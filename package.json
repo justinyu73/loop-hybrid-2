@@ -1,0 +1,9 @@
+{
+  "name": "loop-hybrid",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "PYTHONDONTWRITEBYTECODE=1 sh gate-pack/verify.sh",
+    "lint": "sh -n gate-pack/run.sh && sh -n gate-pack/verify.sh && python3 -B -c \"import pathlib; files=sorted([*pathlib.Path('gate-pack').rglob('*.py'), *pathlib.Path('lh_runtime').rglob('*.py')]); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'lint: PASS ({len(files)} Python files)')\""
+  }
+}

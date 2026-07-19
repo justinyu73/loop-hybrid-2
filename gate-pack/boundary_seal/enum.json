@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "description": "Closed, maintainer-owned human-interrupt boundary. Only these edges may summon the human. Any other human-summoning / fail-closed-to-human / non-promotable route in the scanned tree is drift and must fail the seal canary.",
+  "boundaries": {
+    "B1": "Goal ratification: human ratifies ruler + budget envelope, once per goal.",
+    "B2": "Irreversible external effect beyond the ratified envelope: publish/release, delete published/user data, spend money/quota beyond budget, final product acceptance.",
+    "B3": "Constitution change: this enum, protected-core loop semantics, the two authorities, or the boundary_seal guard itself."
+  },
+  "constitutional_surfaces": [
+    "AGENTS.md",
+    "tools/adversarial_loop/",
+    "tools/adversarial_loop/block_contract.schema.json",
+    "tools/boundary_seal/"
+  ]
+}

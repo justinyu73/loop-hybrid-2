@@ -1,0 +1,16 @@
+{
+  "schema": "loop-hybrid-improvement-proposal/v1",
+  "proposal_id": "example-prompt-improvement-1",
+  "status": "proposed",
+  "surface": "prompt",
+  "target_ref": "gate-pack/improvement/fixtures/target.prompt",
+  "independent_falsifier_required": true,
+  "claim": "The candidate reaches the frozen local gate without regression or higher cost.",
+  "baseline_ref": "gate-pack/improvement/fixtures/baseline.txt",
+  "candidate_ref": "gate-pack/improvement/fixtures/candidate.txt",
+  "frozen_tasks": [{"task_id": "frozen-task-a", "fixture_ref": "gate-pack/improvement/fixtures/task-a.json"}],
+  "shadow_budget": {"max_shadow_runs": 1, "max_regressions": 0, "min_improvements": 1, "max_cost_increase_pct": 0},
+  "rollback_artifact_ref": "gate-pack/improvement/rollback.example.json",
+  "boundary_assertions": {"changes_authority": false, "changes_acceptance": false, "changes_protected_core": false},
+  "cannot_claim": ["automatic promotion authority", "authenticated maintainer identity", "product acceptance", "permanent superiority"]
+}

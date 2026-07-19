@@ -1,0 +1,24 @@
+{
+  "schema": "lh-provider-quota-policy/v1",
+  "policy_id": "lh-user-ratified-5hr-percentage-budget-v1",
+  "window_minutes": 300,
+  "notify_used_percent": 60,
+  "soft_used_percent": 80,
+  "hard_used_percent": 100,
+  "max_age_seconds": 900,
+  "clock_skew_seconds": 60,
+  "sources": {
+    "codex": [
+      "codex_app_server",
+      "codex_session_jsonl"
+    ]
+  },
+  "unknown_or_stale_policy": "zero_cost_only",
+  "cannot_claim": [
+    "fixed token denominator",
+    "provider billing accuracy",
+    "permission to invoke a provider",
+    "background monitoring",
+    "product acceptance"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "loop-hybrid-provider-call-envelope/v1",
+  "call_id": "review-p3-example",
+  "phase": "p3_verifier",
+  "provider_profile": "codex_p3",
+  "capsule": {"handle": "sealed-capsule:example", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "classification": "public_safe", "byte_count": 4096},
+  "authorization": {"kind": "exact_call", "call_id": "review-p3-example", "capsule_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expires_at": "2026-07-11T13:00:00Z"},
+  "requested_at": "2026-07-11T12:00:00Z",
+  "cannot_claim": ["provider invoked", "platform authorization", "review passed", "product acceptance"]
+}

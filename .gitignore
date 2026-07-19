@@ -1,0 +1,36 @@
+# Local agent configuration and workspace state
+/.claude/
+/.codex/
+/.grok/
+
+# Dependencies and generated Python artifacts
+/node_modules/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+
+# Local environment files and credential material
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+*.secret
+/secrets/
+/credentials/
+
+# Local migration and loop runtime state
+/MIGRATION-BRIEF.md
+/ci-sweeper-state.md
+/loop-ledger.json
+/loop-run-log.md
+/runtime/
+
+# OS/editor noise
+.DS_Store

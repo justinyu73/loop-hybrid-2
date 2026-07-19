@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ceremony_grader compares HEAD~1:units.json; shallow checkout would
+          # make the base empty and falsely mark every legacy unit newly done.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: G6 CI conclusion smoke
+        run: python3 -B lh_runtime/ci_conclusion_canary.py
+
+      - name: Aggregate gate-pack tests
+        run: npm test
+
+      - name: In-memory Python and shell lint
+        run: npm run lint
+
+      - name: Boundary seal
+        run: python3 gate-pack/boundary_seal/canary.py --json
+
+      - name: Diff hygiene
+        run: git diff --check

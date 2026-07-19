@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+
+if sh gate-pack/run.sh; then
+  exit 0
+fi
+
+echo "Pre-commit blocked: ceremony-only newly-done unit detected." >&2
+exit 1

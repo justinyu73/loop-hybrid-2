@@ -1,0 +1,12 @@
+{
+  "schema": "loop-hybrid-design-grill-spec/v2",
+  "grill_id": "goal-feasibility-example",
+  "question": "Which assumptions in this bounded goal need counterevidence before a human decides?",
+  "documents": [{"ref": "AGENTS.md", "start_line": 1, "end_line": 9}],
+  "subject": {"kind": "human_goal", "label": "the bounded repository goal", "binding": null},
+  "review_slots": [
+    {"id": "counterevidence", "objective": "Find the strongest falsifying evidence or missing constraint.", "separation_from": []},
+    {"id": "alternative-framing", "objective": "Offer a materially different framing and expose trade-offs.", "separation_from": []}
+  ],
+  "cannot_claim": ["goal ratification", "plan approval", "implementation authorization", "provider invocation authority", "product acceptance", "protected-core approval"]
+}

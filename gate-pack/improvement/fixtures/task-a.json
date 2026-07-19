@@ -1,0 +1,6 @@
+{
+  "task_id": "frozen-task-a",
+  "expected_token": "continue",
+  "baseline_cost_units": 10,
+  "candidate_cost_units": 9
+}

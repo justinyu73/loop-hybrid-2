@@ -1,0 +1,1 @@
+No authorized candidate exists; stop at the current gate.

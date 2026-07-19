@@ -1,0 +1,5 @@
+{
+  "schema": "loop-hybrid-improvement-rollback/v1",
+  "status": "request-only",
+  "cannot_claim": ["candidate restored", "product acceptance"]
+}

@@ -1,0 +1,39 @@
+{
+  "schema": "lh-execution-receipt/v1",
+  "run_id": "local-productivity-001",
+  "goal_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "attempt": 1,
+  "workspace": {
+    "ref": "lh://workspace/local-productivity-001/attempt-1",
+    "base_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "disposable": true
+  },
+  "provider": {
+    "profile": "lh-existing-provider",
+    "response_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "duration_ms": 1200
+  },
+  "trajectory": {
+    "ref": "remote://runs/local-productivity-001/attempt-1",
+    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "diff_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "commands": [{
+    "id": "unit",
+    "argv_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "exit_code": 1,
+    "duration_ms": 24,
+    "output_ref": "remote://runs/local-productivity-001/attempt-1/unit"
+  }],
+  "verification": {
+    "static": {"exit_code": 0, "evidence_ref": "remote://runs/local-productivity-001/attempt-1/static"},
+    "targeted": {"exit_code": 1, "evidence_ref": "remote://runs/local-productivity-001/attempt-1/targeted"},
+    "core_regression": {"exit_code": 0, "evidence_ref": "remote://runs/local-productivity-001/attempt-1/core"},
+    "negative": {"exit_code": 0, "evidence_ref": "remote://runs/local-productivity-001/attempt-1/negative"}
+  },
+  "failure": {
+    "classification": "retryable",
+    "fingerprint": "targeted:test-local-status:exit-1",
+    "excerpt_ref": "remote://runs/local-productivity-001/attempt-1/stderr-excerpt"
+  }
+}

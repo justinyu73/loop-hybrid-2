@@ -1,0 +1,23 @@
+{
+  "schema": "lh-goal-spec/v1",
+  "goal_id": "local-productivity",
+  "feature_contract": {
+    "must_have": ["show local status", "support curated lookup"],
+    "must_not": ["send runtime telemetry"]
+  },
+  "approval_mode": "feature_contract_is_approval",
+  "plan": {
+    "grill_ref": "discussion://example/goal-overlay",
+    "assumptions": ["LH owns the execution and GitHub adapters"]
+  },
+  "acceptance": {
+    "static": ["npm run lint"],
+    "targeted": ["python3 -B -m unittest"],
+    "core_regression": ["npm test"],
+    "negative": ["invalid input remains rejected"]
+  },
+  "run_policy": {
+    "max_attempts": 4,
+    "on_verified_success": "create_pull_request"
+  }
+}

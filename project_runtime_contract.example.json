@@ -1,0 +1,54 @@
+{
+  "_note": "Example project runtime contract. Copy to project_runtime_contract.json and adjust per project. The `models` block is optional: `execute` names the coding CLI that runs attempts; add `judge`/`judge_model` to route judging to a separate reasoning CLI.",
+  "schema": "lh-project-runtime-contract/v1",
+  "project_id": "example-project",
+  "campaign": {
+    "schema": "lh-campaign/v1",
+    "campaign_id": "example-campaign",
+    "stages": [
+      {
+        "stage_id": "gate-green",
+        "goal": {
+          "must_have": [
+            "gate-pack verify.sh green"
+          ],
+          "must_not": [
+            "push",
+            "publish",
+            "merge"
+          ]
+        },
+        "allowed_paths": [
+          "lh_runtime/",
+          "gate-pack/"
+        ],
+        "allowed_side_effects": [
+          "workspace",
+          "artifact"
+        ],
+        "acceptance_lamp": {
+          "id": "gate-pack",
+          "smoke": "sh gate-pack/verify.sh",
+          "verification_argv": [
+            "sh",
+            "gate-pack/verify.sh"
+          ]
+        },
+        "max_attempts": 4,
+        "next_stage_id": null
+      }
+    ]
+  },
+  "source_repo": ".",
+  "base_revision": "main",
+  "runtime": {
+    "goal_store": "runtime/goals",
+    "run_store": "runtime/runs",
+    "workspace_root": "runtime/workspaces",
+    "status_snapshot_out": "runtime/platform_status.json",
+    "pause_flag": "runtime/loop-pause"
+  },
+  "models": {
+    "execute": "codex"
+  }
+}
