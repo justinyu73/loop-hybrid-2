@@ -220,6 +220,13 @@ def _self_test() -> int:
 def main(argv: list[str]) -> int:
     if "--self-test" in argv:
         return _self_test()
+    if not (REPO_ROOT / "docs").is_dir():
+        # Framework-only consumers (e.g. the public Loop Hybrid 2 release) ship
+        # without a docs layer; the three-layer rules are meaningful only where
+        # one exists.  Report skip instead of failing.
+        r = {"check_id": "docs-structure", "status": "skip", "reason": "no docs/ layer in this repo", "blocking_failures": []}
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
     r = check(REPO_ROOT)
     if "--json" in argv:
         print(json.dumps(r, ensure_ascii=False, indent=2))
