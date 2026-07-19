@@ -96,6 +96,35 @@ class KnowledgeStore:
             conn.execute("COMMIT")
         return {"status": "indexed", "document_id": document_id, "content_hash": content_hash, "chunks": len(chunks)}
 
+    def ingest_or_revise(self, *, source_uri: str, revision: str, content: str) -> dict[str, Any]:
+        """Ingest, but restamp instead of rebuild when the content is unchanged.
+
+        An indexer that tags every file with the repo HEAD would otherwise
+        re-chunk every file on every commit.  When the active document for a
+        source_uri already holds the same content_hash under an older revision,
+        only its revision label moves forward; the chunks stay put.
+        """
+        if not source_uri or not revision or not content.strip():
+            raise ValueError("source_uri, revision and non-empty content are required")
+        content_hash = self._digest(content)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                "SELECT document_id, revision FROM documents WHERE source_uri = ? AND content_hash = ? AND active = 1",
+                (source_uri, content_hash)).fetchone()
+            if active is not None and active["revision"] != revision:
+                conflict = conn.execute(
+                    "SELECT document_id FROM documents WHERE source_uri = ? AND revision = ? AND content_hash = ? AND active = 0",
+                    (source_uri, revision, content_hash)).fetchone()
+                if conflict is not None:
+                    conn.execute("DELETE FROM documents WHERE document_id = ?", (conflict["document_id"],))
+                conn.execute("UPDATE documents SET revision = ?, indexed_at = ? WHERE document_id = ?",
+                             (revision, time.time(), active["document_id"]))
+                conn.execute("COMMIT")
+                return {"status": "revised", "document_id": active["document_id"], "content_hash": content_hash, "chunks": 0}
+            conn.execute("COMMIT")
+        return self.ingest(source_uri=source_uri, revision=revision, content=content)
+
     @staticmethod
     def _match_query(query: str) -> str:
         terms = re.findall(r"[^\W_]+", query, flags=re.UNICODE)

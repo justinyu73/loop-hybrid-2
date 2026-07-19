@@ -31,11 +31,13 @@ run_gate goal-matcher-g3 python3 -B lh_runtime/matcher_canary.py || exit $?
 run_gate admission-bridge-g4 python3 -B lh_runtime/admission_canary.py || exit $?
 run_gate goal-loop-g5 python3 -B lh_runtime/goal_loop_canary.py || exit $?
 run_gate goal-loop-g6-ci-conclusion python3 -B lh_runtime/ci_conclusion_canary.py || exit $?
+run_gate lh-worker-async-dispatch python3 -B lh_runtime/worker_async_canary.py || exit $?
 run_gate execution-receipt python3 gate-pack/execution_receipt/canary.py || exit $?
 run_gate verification-reducer python3 gate-pack/verification_reducer/canary.py || exit $?
 run_gate value-route python3 gate-pack/value_route/canary.py || exit $?
 run_gate lh-native-runtime python3 lh_runtime/canary.py || exit $?
 run_gate lh-knowledge-fts5 python3 lh_runtime/knowledge_canary.py || exit $?
+run_gate lh-knowledge-indexer python3 -B lh_runtime/knowledge_indexer_canary.py || exit $?
 run_gate lh-runtime-mcp python3 lh_runtime/mcp_canary.py || exit $?
 run_gate lh-command-ingress python3 -B lh_runtime/command_ingress_canary.py || exit $?
 run_gate lh-intent-derivation python3 -B lh_runtime/intent_derivation_canary.py || exit $?
