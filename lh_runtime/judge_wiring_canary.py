@@ -212,7 +212,7 @@ def main() -> int:
         "blocking_failures": failures,
         "verification": {
             "command": "python3 -B lh_runtime/judge_wiring_canary.py",
-            "spec": "model-routing v1 contract (project documentation)",
+            "spec": "docs/contracts/model-routing-v1.md",
         },
         "known_gaps_open": [
             "Real CLI judge invocations (kimi/claude/codex -m) are a human live-smoke path; this canary proves wiring with fakes only.",

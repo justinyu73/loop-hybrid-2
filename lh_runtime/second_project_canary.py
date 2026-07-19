@@ -217,7 +217,7 @@ def main() -> int:
         "blocking_failures": failures,
         "verification": {
             "command": "python3 -B lh_runtime/second_project_canary.py",
-            "preflight": "second-project fixture preflight (archived project documentation)",
+            "preflight": "docs/archive/lh-b5-second-project-fixture-preflight.md",
         },
         "known_gaps_open": [
             "Restart/crash durability is out of scope for B5 by design (binding/isolation proof; durability is covered by B12 live-smoke).",

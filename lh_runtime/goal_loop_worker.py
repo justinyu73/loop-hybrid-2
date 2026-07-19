@@ -213,7 +213,7 @@ class GoalLoopWorker:
     def _derive_intent_candidate(self, event: dict[str, Any]) -> dict[str, Any]:
         """Derive one candidate from a manual_intent command (MVP W1).
 
-        A commander (e.g. an external hub's command-down) sends only
+        A commander (e.g. session-hub command-down) sends only
         ``{campaign_id, stage_id, intent}``; without this derivation the
         matcher routes every such event to ``human_required`` and the loop
         silently never walks.  The derivation mirrors

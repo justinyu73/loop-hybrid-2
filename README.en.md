@@ -67,3 +67,13 @@ skips with a recorded known gap; the offline `--dry-run` gate is unaffected.
 ## License
 
 [MIT](LICENSE) — copyright 2026 Loop Hybrid contributors.
+
+## Security model
+
+- **Isolation is the disposable clone.** Executor presets run agent CLIs in
+  full-auto mode (bypass flags) by design; the boundary is the throwaway
+  clone, never your working tree. Keep untrusted content out of the loop.
+- **Promotion is always human-owned** — the loop stops at evidence.
+- **Credentials are environment variables only**, and missing ones raise.
+- **Acceptance is mechanical** (committed canaries), never the model's word.
+- **Out-of-scope diffs are rejected** and route to `human_required`.

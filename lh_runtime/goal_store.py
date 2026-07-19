@@ -5,7 +5,7 @@ candidate goals, immutable goal revisions, and idempotent processing claims.
 It deliberately does not match natural language, compile campaigns, admit a
 candidate, or create a RunStore run; those policies belong to later nodes.
 
-H1 (GoalHierarchy v1): goals may form a tree via
+H1 (GoalHierarchy v1, docs/contracts/goal-hierarchy-v1.md): goals may form a tree via
 ``parent_goal_id``; ``depends_on`` (same-parent siblings only) and
 ``priority`` are stored here but only consumed by the H2 selector.  Child
 transitions recompute the parent rollup in the same transaction; a stopped

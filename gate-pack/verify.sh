@@ -18,8 +18,10 @@ run_gate() {
 
 run_gate ceremony sh gate-pack/run.sh || exit $?
 run_gate boundary-seal python3 gate-pack/boundary_seal/canary.py || exit $?
+run_gate docs-structure python3 gate-pack/docs_structure/canary.py || exit $?
 run_gate quota python3 gate-pack/quota/canary.py || exit $?
 run_gate improvement python3 gate-pack/improvement/canary.py || exit $?
+run_gate cross-repo-runner python3 gate-pack/runner/canary.py || exit $?
 run_gate goal-bind python3 gate-pack/goal_bind/canary.py || exit $?
 run_gate goal-store-g1 python3 -B lh_runtime/goal_canary.py || exit $?
 run_gate goal-hierarchy-h1 python3 -B lh_runtime/hierarchy_canary.py || exit $?

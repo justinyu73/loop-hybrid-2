@@ -233,8 +233,8 @@ def main() -> int:
         "blocking_failures": failures,
         "verification": {
             "command": "python3 -B lh_runtime/turning_point_canary.py",
-            "contract": "goal-hierarchy v1 contract (project documentation)",
-            "approval_package": "h2/h3 goal-intake approval package (project documentation)",
+            "contract": "docs/contracts/goal-hierarchy-v1.md",
+            "approval_package": "docs/archive/h2-h3-goal-intake-approval-package.md",
         },
         "known_gaps_open": [
             "H3 node is wired at the worker dispatch point only; feeding a real provider-backed model is a host configuration, not part of this canary.",

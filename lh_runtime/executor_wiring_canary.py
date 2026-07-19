@@ -4,7 +4,7 @@
 Proves selection, the dry-run gate, fail-closed on unknown executors, and that
 --execute actually threads the chosen model into the driver — all without
 invoking codex/claude. Actually running a real coding-agent CLI is a separate
-human live smoke (see the autonomous-driver contract in the project's docs).
+human live smoke (see docs/contracts/autonomous-driver-v1.md).
 """
 from __future__ import annotations
 

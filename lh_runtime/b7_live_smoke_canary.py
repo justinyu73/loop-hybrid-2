@@ -15,12 +15,9 @@ sys.path.insert(0, str(HERE))
 from github_conclusion_source import GitHubConclusionSource  # noqa: E402
 
 
-# Live smoke target owner is host configuration, read from the environment with
-# no default baked in. When LH_LIVE_SMOKE_OWNER is unset the live (--execute)
-# path skips and records a known gap; the offline dry-run is unaffected.
-OWNER = os.environ.get("LH_LIVE_SMOKE_OWNER", "").strip()
-# Placeholder owner for the offline canned fixtures only; never a real account.
-FIXTURE_OWNER = "example-owner"
+import os  # noqa: E402
+
+OWNER = os.environ.get("LH_LIVE_SMOKE_OWNER", "example-owner")
 REPO = "loop-hybrid"
 WORKFLOW = "CI"
 DEFAULT_SHA = "8e8620d2fabb5783241ed8aa3e81af0e4270b276"
@@ -39,7 +36,7 @@ class FakeTransport:
 def _source(payload: dict[str, Any]) -> tuple[GitHubConclusionSource, FakeTransport]:
     transport = FakeTransport(payload)
     source = GitHubConclusionSource(
-        FIXTURE_OWNER,
+        OWNER,
         REPO,
         WORKFLOW,
         "offline-fixture-token",
@@ -83,7 +80,7 @@ def _dry_run() -> int:
         _case(
             "uses-verified-repository-workflow-sha",
             bool(success_request)
-            and success_request[0].startswith(f"https://api.github.com/repos/{FIXTURE_OWNER}/{REPO}/actions/runs?")
+            and success_request[0].startswith(f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs?")
             and success_request[2] == 10.0
             and bool(failure_request),
             {"success_request": success_request, "failure_request": failure_request},
@@ -101,21 +98,6 @@ def _dry_run() -> int:
 
 
 def _execute(sha: str) -> int:
-    if not OWNER:
-        result = {
-            "check_id": "lh-b7-live-smoke",
-            "status": "skip",
-            "mode": "execute",
-            "known_gaps_open": [
-                {
-                    "id": "live-smoke-owner-unset",
-                    "detail": "LH_LIVE_SMOKE_OWNER is not set; live smoke skipped. "
-                              "Offline behaviour (--dry-run) is unaffected.",
-                }
-            ],
-        }
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
     source = GitHubConclusionSource.from_env(
         owner=OWNER,
         repo=REPO,

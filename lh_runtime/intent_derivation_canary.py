@@ -153,7 +153,7 @@ def main() -> int:
         "blocking_failures": failures,
         "verification": {
             "command": "python3 -B lh_runtime/intent_derivation_canary.py",
-            "note": "production consumer: the resident driver tick picks up command-down events",
+            "note": "production consumer: the resident driver tick picks up command-down events (see docs/active/lh-big-node-approval-package.md)",
         },
         "known_gaps_open": [
             "Derivation covers manual_intent with campaign_id+stage_id; richer intent phrasing still routes human_required by design.",

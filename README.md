@@ -115,3 +115,22 @@ python3 -B lh_runtime/goal_loop_run.py \
 ## License
 
 [MIT](LICENSE) — copyright 2026 Loop Hybrid contributors.
+
+## Security model
+
+- **Isolation = disposable clone.** Executor presets run agent CLIs in
+  full-auto mode (`--dangerously-bypass-approvals-and-sandbox` / `--yolo` /
+  `--permission-mode bypassPermissions`). This is deliberate: the safety
+  boundary is that every attempt runs inside a throwaway clone pinned to a
+  commit — never in your working tree. Do not point the engine at a repo you
+  cannot afford to have an agent touch, and keep that boundary in mind before
+  feeding it untrusted content (issues, external text).
+- **Promotion is always human-owned.** The loop never pushes, merges, or
+  publishes; it stops at evidence (receipts, diffs, PRs opened by a human).
+- **Credentials come from environment variables only** (`LH_CI_TOKEN`,
+  `LH_GITHUB_TOKEN`) and are required to be absent-safe: a missing credential
+  raises instead of degrading silently.
+- **Acceptance is mechanical.** Only committed canaries / verification lamps
+  mark work complete; model output never flips goal/run state on its own.
+- **Out-of-scope diffs are rejected deterministically** — an executor that
+  writes outside the campaign's `allowed_paths` routes to `human_required`.

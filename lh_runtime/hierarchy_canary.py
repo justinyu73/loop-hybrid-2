@@ -224,7 +224,7 @@ def main() -> int:
         "verification": {
             "command": "python3 -B lh_runtime/hierarchy_canary.py",
             "crash_exit_code": 17,
-            "contract": "goal-hierarchy v1 contract (project documentation)",
+            "contract": "docs/contracts/goal-hierarchy-v1.md",
         },
         "known_gaps_open": [
             "H1 covers store + rollup only; runnable selection is H2 (selector_canary.py), the optional model turning-point node is H3 (turning_point_canary.py) — both landed, see those canaries.",
