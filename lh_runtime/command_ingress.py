@@ -2,7 +2,7 @@
 """Command ingress — a bounded, commander-agnostic entry for issuing a goal event into LH.
 
 This is the "command down" half of the SH<->LH bus. It is deliberately NOT bound
-to any single commander (session-hub is one client of many: github, scheduler,
+to any single commander (an external hub is one client of many: github, scheduler,
 another front-end) and NOT bound to any model, provider, or file path. It only
 validates a bounded event contract and delegates durable idempotency to
 GoalStore.record_event; it never admits, runs, or promotes anything.
