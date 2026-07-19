@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+import external_action_port as eap
 import external_verdict as ev
 import turning_point as tp
 import value_reducer
@@ -90,12 +91,21 @@ class GoalLoopWorker:
         compilers: dict[str, CampaignCompiler],
         execution_context: dict[str, dict[str, Any]],
         value_gate: bool = True,
+        action_ledger: eap.ActionLedger | None = None,
+        external_adapter: eap.ExternalAdapter | None = None,
     ):
+        if (action_ledger is None) != (external_adapter is None):
+            raise ValueError("action_ledger and external_adapter must be supplied together")
         self.goal_store = goal_store
         self.run_store = run_store
         self.controller = controller
         self.compilers = compilers
         self.execution_context = execution_context
+        # W2: the async external-verdict dispatch leg (controller.tick_async).
+        # Both must be present for an envelope-declared ``external_verdict``
+        # stage to dispatch; without them such a stage routes to human.
+        self.action_ledger = action_ledger
+        self.external_adapter = external_adapter
         # When true, the deterministic 报红 value verdict is the acceptance
         # authority: a lamp-passing but value-RED run does not auto-advance, it
         # routes to human_required (LH execution model: 报红 gates completion).
@@ -118,7 +128,7 @@ class GoalLoopWorker:
             external = self.controller.resume_external(verdict_store=verdict_store, source=conclusion_source)
         terminal_before = self._reduce_one_terminal_run()
         event_result = self._process_one_event(holder)
-        run_result = self._dispatch_one_run(holder, model, turning_point=turning_point)
+        run_result = self._dispatch_one_run(holder, model, turning_point=turning_point, verdict_store=verdict_store)
         terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped"} else None
         progressed = any(item is not None and item != [] for item in (startup, external, terminal_before, event_result, run_result, terminal_after))
         return {
@@ -343,6 +353,7 @@ class GoalLoopWorker:
         holder: str,
         model: ModelRunner,
         turning_point: TurningPointRunner | None = None,
+        verdict_store: ev.VerdictStore | None = None,
     ) -> dict[str, Any] | None:
         eligible = eligible_runs(self.run_store.runnable_runs(), self._goal_lookup)
         if not eligible:
@@ -358,11 +369,24 @@ class GoalLoopWorker:
         verifier_argv = None
         if isinstance(envelope, dict) and isinstance(envelope.get("acceptance_lamp"), dict):
             verifier_argv = envelope["acceptance_lamp"].get("verification_argv")
-        if not isinstance(verifier_argv, list) or not verifier_argv or any(not isinstance(item, str) or not item.strip() for item in verifier_argv):
-            result = {"status": "human_required", "run_id": run["run_id"], "reason": "durable verification plan is missing"}
-            self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
-            return result
-        return self.controller.tick(run["run_id"], holder=holder, model=model, verifier_argv=verifier_argv)
+        if isinstance(verifier_argv, list) and verifier_argv and all(isinstance(item, str) and item.strip() for item in verifier_argv):
+            return self.controller.tick(run["run_id"], holder=holder, model=model, verifier_argv=verifier_argv)
+        # W2: an envelope-declared external_verdict (and no local verifier) takes
+        # the async leg — dispatch the external action at most once, park the run.
+        external = envelope.get("external_verdict") if isinstance(envelope, dict) else None
+        if isinstance(external, dict) and isinstance(external.get("action_id"), str) and external["action_id"].strip():
+            if verdict_store is None or self.action_ledger is None:
+                result = {"status": "human_required", "run_id": run["run_id"], "reason": "external verdict wiring is missing"}
+                self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+                return result
+            return self.controller.tick_async(
+                run["run_id"], holder=holder, model=model, verdict_store=verdict_store,
+                action_ledger=self.action_ledger, adapter=self.external_adapter,
+                action_id=external["action_id"].strip(),
+            )
+        result = {"status": "human_required", "run_id": run["run_id"], "reason": "durable verification plan is missing"}
+        self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+        return result
 
     def _reduce_one_terminal_run(self) -> dict[str, Any] | None:
         for run in self.run_store.terminal_runs():

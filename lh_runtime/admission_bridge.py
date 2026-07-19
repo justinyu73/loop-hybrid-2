@@ -69,7 +69,10 @@ class GoalAdmissionBridge:
         elif sorted(set(side_effects) & FORBIDDEN_SIDE_EFFECTS):
             reasons.append("forbidden_external_side_effect")
         lamp = envelope.get("acceptance_lamp")
-        if not isinstance(lamp, dict) or not isinstance(lamp.get("verification_argv"), list) or not lamp["verification_argv"]:
+        lamp_ok = isinstance(lamp, dict) and isinstance(lamp.get("verification_argv"), list) and bool(lamp["verification_argv"])
+        external = envelope.get("external_verdict")
+        external_ok = isinstance(external, dict) and isinstance(external.get("action_id"), str) and bool(external["action_id"].strip())
+        if not lamp_ok and not external_ok:
             reasons.append("missing_acceptance_lamp")
         if not source_repo.exists() or not source_repo.is_dir():
             reasons.append("source_repo_unavailable")
