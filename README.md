@@ -1,8 +1,20 @@
 # Loop Hybrid 2
 
+> 中文說明（安裝、使用、流程圖）：[README.zh-TW.md](README.zh-TW.md)
+
 Loop Hybrid 2 (LH2) is a deterministic goal-loop engine. It turns a ratified goal
 into audited runs: every step is replayable, every verdict comes from a
 committed check, and anything irreversible stays in human hands.
+
+## Loop at a glance
+
+```mermaid
+flowchart LR
+    E["event"] --> C[candidate] --> A[active + queued run]
+    A -->|lamp green| D[completed]
+    A -->|failed / out of scope| H[human_required]
+    D --> N[next-stage event]
+```
 
 ## Core concepts
 
