@@ -5,6 +5,8 @@
 
 # Dependencies and generated Python artifacts
 /node_modules/
+.venv/
+test-results/
 __pycache__/
 *.py[cod]
 *.pyo

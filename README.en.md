@@ -16,6 +16,20 @@ flowchart LR
     D --> N[next-stage event]
 ```
 
+## See it close itself (60 seconds)
+
+No credentials, no external services — after cloning:
+
+```bash
+npm test                                          # every deterministic gate, incl. the full loop
+python3 -B lh_runtime/intent_derivation_canary.py # intent→candidate→admission→dispatch→completed
+python3 -B lh_runtime/goal_loop_canary.py         # full loop: seed→run→verify→next stage→restart
+```
+
+A canary only counts when it prints `{"status": "pass", ...}` — the engine does
+not accept a model's word as proof. Everything runs offline in tempdirs, so any
+clone can reproduce the same closed loop.
+
 ## Core concepts
 
 - **Durable SQLite goal/run store** — goals, runs, attempts, and usage records
