@@ -33,7 +33,7 @@ def campaign() -> dict:
     stage = {
         "stage_id": "s1", "goal": {"feature_contract": "s1"},
         "allowed_paths": ["src/"], "allowed_side_effects": ["workspace", "artifact"],
-        "acceptance_lamp": {"id": "s1-lamp", "smoke": "git diff --check", "verification_argv": ["git", "diff", "--check"]},
+        "acceptance_lamp": {"id": "s1-lamp", "smoke": "a staged change exists", "verification_argv": ["sh", "-c", "! git diff --cached --quiet"]},
         "max_attempts": 2, "next_stage_id": None,
     }
     return {"schema": CAMPAIGN_SCHEMA, "campaign_id": "campaign-vg", "stages": [stage]}
@@ -46,7 +46,7 @@ def in_scope_model(workspace: Path, capsule: dict) -> dict:
 
 
 def scope_creep_model(workspace: Path, capsule: dict) -> dict:
-    # lamp (git diff --check) will still pass, but this file is outside allowed_paths.
+    # lamp (a staged change exists) will still pass, but this file is outside allowed_paths.
     (workspace / "outside").mkdir(exist_ok=True)
     (workspace / "outside" / "leak.txt").write_text("leak\n", encoding="utf-8")
     return {"summary": "out-of-scope change that still passes the lamp"}

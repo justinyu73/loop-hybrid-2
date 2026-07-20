@@ -49,8 +49,8 @@ def make_campaign(
             "allowed_side_effects": ["workspace", "artifact"],
             "acceptance_lamp": {
                 "id": f"{sid}-lamp",
-                "smoke": "git diff --check",
-                "verification_argv": ["git", "diff", "--check"],
+                "smoke": "a staged change exists",
+                "verification_argv": ["sh", "-c", "! git diff --cached --quiet"],
             },
             "max_attempts": 4,
             "next_stage_id": nxt,

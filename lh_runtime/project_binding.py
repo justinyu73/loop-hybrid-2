@@ -65,6 +65,14 @@ def resolve_project(contract_path: str | Path) -> dict[str, Any]:
             run_kwargs["judge_executor"] = models["judge"]
         if models.get("judge_model"):
             run_kwargs["judge_model"] = models["judge_model"]
+    external_verdict = contract.get("external_verdict")
+    if external_verdict is not None:
+        if not isinstance(external_verdict, dict):
+            raise SystemExit("contract.external_verdict must be an object")
+        for field in ("owner", "repo", "workflow"):
+            if not isinstance(external_verdict.get(field), str) or not external_verdict[field].strip():
+                raise SystemExit(f"contract.external_verdict.{field} must be a non-empty string")
+        run_kwargs["github_verdict"] = {field: external_verdict[field].strip() for field in ("owner", "repo", "workflow")}
     return {"project_id": contract["project_id"], "run_kwargs": run_kwargs}
 
 

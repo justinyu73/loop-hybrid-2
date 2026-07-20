@@ -34,7 +34,7 @@ def campaign() -> dict:
             "goal": {"feature_contract": stage_id},
             "allowed_paths": ["src/"],
             "allowed_side_effects": ["workspace", "artifact"],
-            "acceptance_lamp": {"id": stage_id + "-lamp", "smoke": "git diff --check", "verification_argv": ["git", "diff", "--check"]},
+            "acceptance_lamp": {"id": stage_id + "-lamp", "smoke": "a staged change exists", "verification_argv": ["sh", "-c", "! git diff --cached --quiet"]},
             "max_attempts": 4,
             "next_stage_id": next_stage_id,
         }

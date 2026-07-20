@@ -48,6 +48,12 @@ class CampaignCompiler:
         if not isinstance(campaign, dict) or campaign.get("schema") != CAMPAIGN_SCHEMA:
             raise ValueError(f"campaign.schema must be {CAMPAIGN_SCHEMA}")
         self.campaign_id = _text("campaign_id", campaign.get("campaign_id"))
+        threshold = campaign.get("failure_stop_threshold", 3)
+        if not isinstance(threshold, int) or isinstance(threshold, bool) or not 3 <= threshold <= 5:
+            raise ValueError("campaign.failure_stop_threshold must be an integer from 3 to 5")
+        # W6b: consecutive per-campaign goal failures that route the whole
+        # campaign to a human. Top level because the line spans stages.
+        self.failure_stop_threshold = threshold
         raw_stages = campaign.get("stages")
         if not isinstance(raw_stages, list) or not raw_stages:
             raise ValueError("campaign.stages must be a non-empty list")

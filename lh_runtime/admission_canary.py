@@ -107,26 +107,49 @@ def main() -> int:
                 str(ghost),
             ),
         ]
-        # Re-admission of a goal whose run is exhausted (stopped) must not
-        # re-link the dead run — it routes to human_required for a revision
-        # decision instead of silently re-stopping the goal.
+        # Revision-bump: an exhausted (stopped) run is never re-linked; the
+        # goal comes back as revision N+1 with a NEW run_id, old run kept as
+        # history.  Beyond the revision cap admission stops at human_required.
         exhausted_goals = GoalStore(root / "exhausted-goals")
         exhausted_runs = RunStore(root / "exhausted-runs")
         exhausted_bridge = GoalAdmissionBridge(exhausted_goals, exhausted_runs)
         add_candidate(exhausted_goals, "campaign-g4:exhausted", "g4-event-exhausted", good_policy)
         first_admit = exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
-        first_run = exhausted_runs.get_run(first_admit["run_id"])
-        exhausted_runs.begin_attempt(first_run["run_id"], "workspace://exhausted/1")
-        exhausted_runs.finish_attempt(first_run["run_id"], 1, state="stopped", receipt_ref="artifacts/exhausted/1/receipt.json", receipt_digest="sha256:exhausted")
+        first_run_id = first_admit["run_id"]
+        exhausted_runs.begin_attempt(first_run_id, "workspace://exhausted/1")
+        exhausted_runs.finish_attempt(first_run_id, 1, state="stopped", receipt_ref="artifacts/exhausted/1/receipt.json", receipt_digest="sha256:exhausted")
         exhausted_goals.transition_goal("campaign-g4:exhausted", "stopped", expected_state="active")
         exhausted_goals.transition_goal("campaign-g4:exhausted", "candidate", expected_state="stopped")
-        zombie = exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
+        bumped_admit = exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
+        bumped_goal = exhausted_goals.get_goal("campaign-g4:exhausted")
         cases.append(case(
-            "exhausted-run-readmission-routes-human-required",
-            zombie["status"] == "human_required"
-            and "run_exhausted_needs_new_revision" in zombie.get("reasons", [])
-            and exhausted_goals.get_goal("campaign-g4:exhausted")["state"] == "candidate",
-            json.dumps(zombie),
+            "exhausted-run-readmission-bumps-revision",
+            bumped_admit["status"] == "active"
+            and bumped_admit["run_id"] != first_run_id
+            and bumped_admit["run_state"] == "queued"
+            and bumped_goal["state"] == "active"
+            and bumped_goal["current_revision"]["revision"] == 2
+            and exhausted_runs.get_run(first_run_id)["state"] == "stopped",
+            json.dumps({"new_run": bumped_admit["run_id"][:24], "old_run": first_run_id[:24], "revision": bumped_goal["current_revision"]["revision"]}),
+        ))
+        # Bump to the cap (4), then admission must stop instead of looping.
+        for _ in range(2):
+            run_now = exhausted_runs.get_run(exhausted_goals.get_goal("campaign-g4:exhausted")["run_id"])
+            exhausted_runs.begin_attempt(run_now["run_id"], f"workspace://exhausted/{run_now['run_id'][-4:]}")
+            exhausted_runs.finish_attempt(run_now["run_id"], 1, state="stopped", receipt_ref=f"artifacts/exhausted/{run_now['run_id'][-4:]}/r.json", receipt_digest="sha256:exhausted")
+            exhausted_goals.transition_goal("campaign-g4:exhausted", "stopped", expected_state="active")
+            exhausted_goals.transition_goal("campaign-g4:exhausted", "candidate", expected_state="stopped")
+            exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
+        last_run = exhausted_runs.get_run(exhausted_goals.get_goal("campaign-g4:exhausted")["run_id"])
+        exhausted_runs.begin_attempt(last_run["run_id"], "workspace://exhausted/last")
+        exhausted_runs.finish_attempt(last_run["run_id"], 1, state="stopped", receipt_ref="artifacts/exhausted/last/r.json", receipt_digest="sha256:exhausted")
+        exhausted_goals.transition_goal("campaign-g4:exhausted", "stopped", expected_state="active")
+        exhausted_goals.transition_goal("campaign-g4:exhausted", "candidate", expected_state="stopped")
+        capped = exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
+        cases.append(case(
+            "revision-cap-routes-human-required",
+            capped["status"] == "human_required" and "revision_cap_reached" in capped.get("reasons", []),
+            json.dumps(capped),
         ))
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     result = {

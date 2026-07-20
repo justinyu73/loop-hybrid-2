@@ -97,7 +97,25 @@ class LoopController:
             result = self.store.write_artifact(run_id, ordinal, name, content)
         return result
 
-    def tick(self, run_id: str, *, holder: str, model: ModelRunner, verifier_argv: list[str]) -> dict[str, Any]:
+    def _previous_failure_signature(self, run_id: str, ordinal: int) -> dict[str, Any] | None:
+        """W6b: the previous attempt's failure signature — its verifier exit
+        code and diff digest, read from the durable receipt. None when the
+        receipt is missing or unreadable, so an unreadable history never
+        stops a run."""
+        receipt_path = self.store.artifacts / run_id / str(ordinal - 1) / "receipt.json"
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        verification = receipt.get("verification") if isinstance(receipt, dict) else None
+        diff = receipt.get("diff") if isinstance(receipt, dict) else None
+        exit_code = verification.get("exit_code") if isinstance(verification, dict) else None
+        digest = diff.get("digest") if isinstance(diff, dict) else None
+        if not isinstance(exit_code, int) or not isinstance(digest, str):
+            return None
+        return {"exit_code": exit_code, "diff_digest": digest}
+
+    def tick(self, run_id: str, *, holder: str, model: ModelRunner, verifier_argv: list[str], grill_note: str | None = None) -> dict[str, Any]:
         self.store.recover_stale_run(run_id)
         if not self.store.acquire_lease(run_id, holder):
             return {"status": "lease_busy", "run_id": run_id}
@@ -113,7 +131,39 @@ class LoopController:
             ordinal = self.store.begin_attempt(run_id, workspace_ref)
             workspace, workspace_ref = self._workspace(run, ordinal, budget)
             fence = self.store.attempt_fence(run_id, ordinal)
+            # W3 lamp precheck: if the acceptance lamp already passes on the
+            # untouched base, the work was already done — finish verified
+            # without spending a model invocation (a green-on-base lamp means
+            # "already done", not "run the model anyway").
+            try:
+                pre = subprocess.run(verifier_argv, cwd=workspace, capture_output=True, text=True, timeout=budget.timeout())
+            except subprocess.TimeoutExpired:
+                pre = None
+            if pre is not None and pre.returncode == 0:
+                self._run(["git", "-C", str(workspace), "add", "-A"], cwd=None, budget=budget)
+                pre_diff = self._run(["git", "-C", str(workspace), "diff", "--cached", "--binary"], cwd=None, budget=budget)
+                pre_provider = {"summary": "lamp precheck passed without model invocation", "precheck": True}
+                pre_provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(pre_provider, sort_keys=True), budget)
+                pre_diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", pre_diff.stdout, budget)
+                pre_stdout_ref = self._write_artifact(run_id, ordinal, "verifier.stdout", pre.stdout, budget)
+                pre_stderr_ref = self._write_artifact(run_id, ordinal, "verifier.stderr", pre.stderr, budget)
+                pre_receipt = {
+                    "schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
+                    "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": run["base_revision"]},
+                    "provider": {"summary": pre_provider["summary"], "artifact": pre_provider_ref},
+                    "usage": token_cost.unknown_usage(reason="lamp precheck: no model invocation"),
+                    "diff": pre_diff_ref,
+                    "verification": {"argv": verifier_argv, "exit_code": 0, "stdout": pre_stdout_ref, "stderr": pre_stderr_ref, "precheck": True},
+                }
+                pre_receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(pre_receipt, sort_keys=True), budget)
+                if not self.store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=pre_receipt_ref["ref"], receipt_digest=pre_receipt_ref["digest"], fence=fence):
+                    return {"status": "fence_rejected", "run_id": run_id, "attempt": ordinal, "fence": fence}
+                return {"status": "verified", "run_id": run_id, "attempt": ordinal, "precheck": True, "receipt_ref": pre_receipt_ref["ref"], "receipt_digest": pre_receipt_ref["digest"]}
             capsule = {"run_id": run_id, "attempt": ordinal, "fence": fence, "timeout_seconds": budget.timeout(), "goal": run["goal"], "base_revision": run["base_revision"], "workspace_ref": workspace_ref}
+            if grill_note is not None:
+                # W6a: challenger diagnosis for the final attempt — guidance
+                # only, additive to the capsule the executor already receives.
+                capsule["grill_note"] = grill_note
             provider: dict[str, Any]
             try:
                 provider = model(workspace, capsule)
@@ -141,6 +191,16 @@ class LoopController:
             exit_code = verified.returncode if verified else -1
             run_after = self.store.get_run(run_id)
             state = "verified" if exit_code == 0 else "stopped" if ordinal >= run_after["max_attempts"] else "retry_pending"
+            no_progress: dict[str, Any] | None = None
+            if state == "retry_pending":
+                # W6b no-progress line: two consecutive attempts with an
+                # identical failure signature (same lamp exit, same diff
+                # digest) mean the loop is not moving — stop the run early
+                # instead of burning the remaining attempts.
+                signature = {"exit_code": exit_code, "diff_digest": diff_ref["digest"]}
+                if self._previous_failure_signature(run_id, ordinal) == signature:
+                    state = "stopped"
+                    no_progress = {"attempt": ordinal, "max_attempts": run_after["max_attempts"], "signature": signature}
             receipt = {
                 "schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
                 "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": run["base_revision"]},
@@ -152,6 +212,8 @@ class LoopController:
             receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True), budget)
             if not self.store.finish_attempt(run_id, ordinal, state=state, receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"], fence=fence):
                 return {"status": "fence_rejected", "run_id": run_id, "attempt": ordinal, "fence": fence}
+            if no_progress is not None:
+                self.store.append_event(run_id, "no_progress_stop", no_progress)
             return {"status": state, "run_id": run_id, "attempt": ordinal, "receipt_ref": receipt_ref["ref"], "receipt_digest": receipt_ref["digest"]}
         except AttemptTimeout as exc:
             return {"status": "attempt_timeout", "run_id": run_id, "attempt": ordinal, "reason": str(exc)}

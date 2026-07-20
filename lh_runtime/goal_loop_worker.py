@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import external_action_port as eap
 import external_verdict as ev
+import grill_loop
 import turning_point as tp
 import value_reducer
 from admission_bridge import GoalAdmissionBridge
@@ -93,6 +94,7 @@ class GoalLoopWorker:
         value_gate: bool = True,
         action_ledger: eap.ActionLedger | None = None,
         external_adapter: eap.ExternalAdapter | None = None,
+        grill_runner: grill_loop.GrillRunner | None = None,
     ):
         if (action_ledger is None) != (external_adapter is None):
             raise ValueError("action_ledger and external_adapter must be supplied together")
@@ -106,6 +108,9 @@ class GoalLoopWorker:
         # stage to dispatch; without them such a stage routes to human.
         self.action_ledger = action_ledger
         self.external_adapter = external_adapter
+        # W6a: optional challenger grill before a sync run's last allowed
+        # attempt. None = today's behavior; the grill is advisory everywhere.
+        self.grill_runner = grill_runner
         # When true, the deterministic 报红 value verdict is the acceptance
         # authority: a lamp-passing but value-RED run does not auto-advance, it
         # routes to human_required (LH execution model: 报红 gates completion).
@@ -130,7 +135,8 @@ class GoalLoopWorker:
         event_result = self._process_one_event(holder)
         run_result = self._dispatch_one_run(holder, model, turning_point=turning_point, verdict_store=verdict_store)
         terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped"} else None
-        progressed = any(item is not None and item != [] for item in (startup, external, terminal_before, event_result, run_result, terminal_after))
+        campaign_stops = self._campaign_failure_lines()
+        progressed = any(item is not None and item != [] for item in (startup, external, terminal_before, event_result, run_result, terminal_after, campaign_stops))
         return {
             "status": "progress" if progressed else "idle",
             "startup_reconciled": startup,
@@ -139,7 +145,66 @@ class GoalLoopWorker:
             "event": event_result,
             "run": run_result,
             "terminal_after": terminal_after,
+            "campaign_stops": campaign_stops,
         }
+
+    def _campaign_failure_lines(self) -> list[dict[str, Any]]:
+        """W6b campaign consecutive-failure line (deterministic, no model).
+
+        The count is derived from durable goal states on every call — goals
+        of one campaign ordered by updated_at, taking the trailing run of
+        human_required/stopped goals; any completed goal resets it to zero.
+        When the count reaches the campaign's declared threshold, the
+        remaining active/candidate goals of that campaign route to a human in
+        one batch and a durable event records the stop. The line fires once
+        per campaign (idempotent event key).
+        """
+        stops: list[dict[str, Any]] = []
+        for campaign_id, compiler in self.compilers.items():
+            threshold = int(getattr(compiler, "failure_stop_threshold", 3))
+            event_key = f"campaign-failure-line:{campaign_id}"
+            try:
+                self.goal_store.get_event(event_key)
+                continue  # the line already fired for this campaign
+            except KeyError:
+                pass
+            outcomes = [
+                goal
+                for state in ("human_required", "stopped", "completed")
+                for goal in self.goal_store.goals_in_state(state)
+                if goal.get("campaign_id") == campaign_id
+            ]
+            outcomes.sort(key=lambda goal: (float(goal.get("updated_at") or 0), goal["goal_id"]))
+            consecutive = 0
+            for goal in outcomes:
+                consecutive = 0 if goal["state"] == "completed" else consecutive + 1
+            if consecutive < threshold:
+                continue
+            routed: list[str] = []
+            for goal in self.goal_store.active_goals(campaign_id=campaign_id):
+                self.goal_store.transition_goal(goal["goal_id"], "human_required", expected_state="active")
+                routed.append(goal["goal_id"])
+            for goal in self.goal_store.goals_in_state("candidate"):
+                if goal.get("campaign_id") != campaign_id:
+                    continue
+                self.goal_store.transition_goal(goal["goal_id"], "human_required", expected_state="candidate")
+                routed.append(goal["goal_id"])
+            payload = {
+                "campaign_id": campaign_id,
+                "consecutive_failures": consecutive,
+                "threshold": threshold,
+                "routed_goal_ids": sorted(routed),
+            }
+            event = self.goal_store.record_event(
+                event_id=event_key,
+                idempotency_key=event_key,
+                source="stop_lines",
+                event_type="human_required",
+                payload=payload,
+            )
+            self.goal_store.transition_event(event["event_key"], "human_required", result=payload)
+            stops.append(payload)
+        return stops
 
     def _process_one_event(self, holder: str) -> dict[str, Any] | None:
         for event in self.goal_store.pending_events():
@@ -188,7 +253,11 @@ class GoalLoopWorker:
                     existing = self.goal_store.get_goal(candidate["goal_id"])
                 except KeyError:
                     existing = None
-                if existing is None or existing["state"] != "candidate":
+                if existing is not None and existing["state"] == "stopped":
+                    # Re-issued command for a stopped goal: revive it as a
+                    # candidate; admission decides revision-bump vs cap.
+                    self.goal_store.transition_goal(existing["goal_id"], "candidate", expected_state="stopped")
+                elif existing is None or existing["state"] != "candidate":
                     result = {
                         **reduced,
                         "status": "human_required",
@@ -370,7 +439,10 @@ class GoalLoopWorker:
         if isinstance(envelope, dict) and isinstance(envelope.get("acceptance_lamp"), dict):
             verifier_argv = envelope["acceptance_lamp"].get("verification_argv")
         if isinstance(verifier_argv, list) and verifier_argv and all(isinstance(item, str) and item.strip() for item in verifier_argv):
-            return self.controller.tick(run["run_id"], holder=holder, model=model, verifier_argv=verifier_argv)
+            grill_note, grill_route = self._grill_before_final_attempt(run, goal_id)
+            if grill_route is not None:
+                return grill_route
+            return self.controller.tick(run["run_id"], holder=holder, model=model, verifier_argv=verifier_argv, grill_note=grill_note)
         # W2: an envelope-declared external_verdict (and no local verifier) takes
         # the async leg — dispatch the external action at most once, park the run.
         external = envelope.get("external_verdict") if isinstance(envelope, dict) else None
@@ -388,6 +460,47 @@ class GoalLoopWorker:
         self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
         return result
 
+    def _grill_before_final_attempt(
+        self,
+        run: dict[str, Any],
+        goal_id: str,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """W6a challenger grill before a sync run's last allowed attempt.
+
+        Returns ``(note, route)``: ``note`` is the diagnosis to inject into the
+        final attempt's capsule; ``route`` short-circuits the dispatch when the
+        grill judged the goal broken. Every degrade — no runner configured, a
+        judge that raises, output outside the closed set — returns
+        ``(None, None)`` so the original final-attempt dispatch proceeds
+        unchanged. Advisory only: the grill never touches the lamp, the scope,
+        or the goal content, and its output is never an acceptance authority.
+        """
+        if self.grill_runner is None or not grill_loop.should_grill(run):
+            return None, None
+        snapshot = grill_loop.build_snapshot(self.run_store, run)
+        try:
+            raw = self.grill_runner(snapshot)
+        except Exception:  # a failing judge must never stop the loop
+            return None, None
+        decision = grill_loop.validate_decision(raw)
+        if decision["type"] == "reject":
+            return None, None
+        evidence = {"decision": decision["type"], "diagnosis": decision["diagnosis"], "attempts_used": int(run["attempts"])}
+        self.run_store.append_event(run["run_id"], "grill_decision", evidence)
+        if decision["type"] == "goal-broken":
+            self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+            event = self.goal_store.record_event(
+                event_id=f"grill-goal-broken:{run['run_id']}",
+                idempotency_key=f"grill-goal-broken:{run['run_id']}",
+                source="grill_loop",
+                event_type="human_required",
+                payload={"run_id": run["run_id"], "goal_id": goal_id, "grill": evidence},
+            )
+            self.goal_store.transition_event(event["event_key"], "human_required", result=evidence)
+            return None, {"status": "human_required", "run_id": run["run_id"], "goal_id": goal_id,
+                          "reason": "grill judged the goal broken; final attempt not dispatched", "grill": evidence}
+        return decision["diagnosis"], None
+
     def _reduce_one_terminal_run(self) -> dict[str, Any] | None:
         for run in self.run_store.terminal_runs():
             result = self._reduce_run_result({"status": run["state"], "run_id": run["run_id"]})
@@ -404,7 +517,11 @@ class GoalLoopWorker:
         goal_id = goal_data.get("goal_id") if isinstance(goal_data, dict) else None
         if not isinstance(goal_id, str):
             return None
-        goal = self.goal_store.get_goal(goal_id)
+        goal = self._goal_lookup(goal_id)
+        if goal is None:
+            # Orphaned terminal run (its goal was retired): nothing to reduce.
+            # Skipping is cheap and must not crash the tick.
+            return None
         if goal["state"] != "active":
             return None
         receipt_meta = self.run_store.latest_receipt(run_id)
@@ -459,6 +576,20 @@ class GoalLoopWorker:
             )
             self.goal_store.transition_event(result_event["event_key"], "human_required", result=advanced)
             return {"status": "human_required", "run_id": run_id, "event_key": result_event["event_key"], "reason": advanced.get("reason")}
+        grill = grill_loop.grill_evidence(self.run_store, run_id)
+        if grill is not None:
+            # W6a: the final attempt ran with grill guidance and still failed —
+            # the goal needs a human, with the grill chain attached as evidence.
+            self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+            result_event = self.goal_store.record_event(
+                event_id=f"grill-final-failed:{run_id}",
+                idempotency_key=f"grill-final-failed:{run_id}",
+                source="grill_loop",
+                event_type="human_required",
+                payload={"run_id": run_id, "goal_id": goal_id, "grill": grill, "verification": receipt.get("verification")},
+            )
+            self.goal_store.transition_event(result_event["event_key"], "human_required", result={"run_id": run_id, "grill": grill, "verification": receipt.get("verification")})
+            return {"status": "human_required", "run_id": run_id, "reason": "final attempt failed after a runner-fixable grill", "grill": grill}
         self.goal_store.transition_goal(goal_id, "stopped", expected_state="active")
         result_event = self.goal_store.record_event(
             event_id=f"run-result:{run_id}:{receipt_meta['receipt_digest']}",

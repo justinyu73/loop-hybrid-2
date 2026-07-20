@@ -34,7 +34,7 @@ def campaign() -> dict:
             "goal": {"feature_contract": stage_id},
             "allowed_paths": ["src/"],
             "allowed_side_effects": ["workspace", "artifact"],
-            "acceptance_lamp": {"id": stage_id + "-lamp", "smoke": "git diff --check", "verification_argv": ["git", "diff", "--check"]},
+            "acceptance_lamp": {"id": stage_id + "-lamp", "smoke": "a staged change exists", "verification_argv": ["sh", "-c", "! git diff --cached --quiet"]},
             "max_attempts": 4,
             "next_stage_id": next_stage_id,
         }
@@ -57,6 +57,12 @@ def model(workspace: Path, capsule: dict) -> dict:
 
 
 def failing_model(workspace: Path, capsule: dict) -> dict:
+    # Vary the output per attempt: the W6b no-progress line stops a run after
+    # two consecutive identical failure signatures, and this fixture exercises
+    # the retry path itself, so its failures must differ each attempt.
+    path = workspace / "src"
+    path.mkdir(exist_ok=True)
+    (path / f"attempt-{capsule['attempt']}.txt").write_text("bounded\n", encoding="utf-8")
     return {"summary": "g5 retry fixture"}
 
 

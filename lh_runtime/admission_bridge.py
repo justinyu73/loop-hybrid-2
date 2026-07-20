@@ -133,16 +133,22 @@ class GoalAdmissionBridge:
         except KeyError:
             existing_run = None
         if existing_run is not None and existing_run["state"] == "stopped":
-            # Re-admission after an exhausted run must not re-link the dead
-            # run: activation would immediately re-stop the goal via the
-            # terminal-run reducer (the W4 zombie loop).  A fresh attempt
-            # requires a new goal revision, which is a human decision.
-            return {
-                "status": "human_required",
-                "goal_id": goal_id,
-                "run_id": None,
-                "reasons": ["run_exhausted_needs_new_revision"],
-            }
+            # Revision-bump: an exhausted run is never re-linked.  A new
+            # command re-issues the work as revision N+1 (new deterministic
+            # run_id, old run kept as history); the revision cap turns an
+            # endless fail-retry loop into human_required.
+            try:
+                bumped = self.goal_store.bump_revision(goal_id)
+            except ValueError:
+                return {
+                    "status": "human_required",
+                    "goal_id": goal_id,
+                    "run_id": None,
+                    "reasons": ["revision_cap_reached"],
+                }
+            revision_id = bumped["revision_id"]
+            run_id = _id("run-goal-", {"goal_id": goal_id, "revision_id": revision_id, "base_revision": pinned_revision, "envelope": envelope})
+            run_goal["revision_id"] = revision_id
         self.run_store.create_run(goal=run_goal, source_repo=source_repo, base_revision=pinned_revision, max_attempts=attempts, run_id=run_id)
         linked = self.goal_store.activate_with_run(goal_id, run_id)
         return {

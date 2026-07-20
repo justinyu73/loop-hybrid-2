@@ -125,24 +125,35 @@ def main() -> int:
         # must be re-admitted by a new command — the worker must not crash on
         # the ownership conflict, it proceeds with the existing candidate.
         retry_worker, retry_goals, retry_runs = make_worker(root, "retry", source, base, campaign)
-        seed_intent(retry_goals, stage_id="stage-work", key="cmd-w1-r1")
-        retry_worker.tick(holder="w1", model=model)  # derives + admits + dispatches? one event per tick
-        retry_worker.tick(holder="w1", model=model)
-        # goal is now completed; build a second pre-stopped goal directly
+        # Revision-bump 自跑復活：goal 的 run 耗盡（stopped）後，重發 intent
+        # 不需人復位——worker 自動把 stopped goal 轉回 candidate，admission
+        # bump revision（新 run_id），新 run 跑完，舊 run 留作歷史。
+        retry_campaign = make_campaign(CAMPAIGN, stage_id="stage-retry")
+        rworker, rgoals, rruns = make_worker(root, "retry2", source, base, retry_campaign)
         from _fixture import make_goal
-        make_goal(retry_goals, "intent-campaign:stage-retry", campaign_id=CAMPAIGN, stage_id="stage-work")
-        # consume the fixture seed event so it does not pollute pending_events
-        retry_goals.transition_event("fixture-event:intent-campaign:stage-retry", "completed")
-        retry_goals.transition_goal("intent-campaign:stage-retry", "stopped", expected_state="candidate")
-        retry_goals.transition_goal("intent-campaign:stage-retry", "candidate", expected_state="stopped")
-        seed_intent(retry_goals, stage_id="stage-work", key="cmd-w1-r2")
-        retry_first = retry_worker.tick(holder="w1", model=model)
-        retry_second = retry_worker.tick(holder="w1", model=model)
+        make_goal(rgoals, "intent-campaign:stage-retry", campaign_id=CAMPAIGN, stage_id="stage-retry")
+        rgoals.transition_event("fixture-event:intent-campaign:stage-retry", "completed")
+        from admission_bridge import GoalAdmissionBridge
+        envelope = CampaignCompiler(retry_campaign).compile()["stages"]["stage-retry"]
+        first_admit = GoalAdmissionBridge(rgoals, rruns).admit(
+            "intent-campaign:stage-retry", source_repo=source, base_revision=base, envelope=envelope
+        )
+        first_run_id = first_admit["run_id"]
+        rruns.begin_attempt(first_run_id, "workspace://retry2/1")
+        rruns.finish_attempt(first_run_id, 1, state="stopped", receipt_ref="artifacts/retry2/1/r.json", receipt_digest="sha256:r2")
+        rgoals.transition_goal("intent-campaign:stage-retry", "stopped", expected_state="active")
+        seed_intent(rgoals, stage_id="stage-retry", key="cmd-w1-rev")
+        rworker.tick(holder="w1", model=model)  # derive candidate
+        rworker.tick(holder="w1", model=model)  # revive + bump + dispatch
+        rworker.tick(holder="w1", model=model)  # reduce to completed
+        revived = rgoals.get_goal("intent-campaign:stage-retry")
         cases.append(case(
-            "reissued-command-after-human-reset-does-not-crash",
-            retry_first.get("event", {}).get("status") == "derived_candidate_event"
-            and retry_second.get("status") == "progress",
-            json.dumps({"first": retry_first.get("event"), "second_status": retry_second.get("status")}, ensure_ascii=False),
+            "stopped-goal-revives-via-revision-bump",
+            revived["state"] == "completed"
+            and revived["current_revision"]["revision"] == 2
+            and revived["run_id"] != first_run_id
+            and rruns.get_run(first_run_id)["state"] == "stopped",
+            json.dumps({"state": revived["state"], "revision": revived["current_revision"]["revision"], "new_run": revived["run_id"][:24], "old_run": first_run_id[:24]}),
         ))
 
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]

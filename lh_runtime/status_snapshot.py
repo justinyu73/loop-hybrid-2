@@ -109,6 +109,7 @@ def build_snapshot(
     heartbeat: dict[str, Any] | None = None,
     attempt_timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     tick_overhead_seconds: float = 0.0,
+    dispatch_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     heartbeat = heartbeat if heartbeat is not None else read_heartbeat(default_heartbeat_path(run_store.root))
     attempt_bound = attempt_wall_clock_upper_bound_seconds(attempt_timeout_seconds)
@@ -127,6 +128,7 @@ def build_snapshot(
         "run_store_root": str(run_store.root),
         "goal_store_root": str(goal_store.root),
         "status": build_status(run_store, goal_store, pricing=pricing),
+        "dispatch_gate": dispatch_gate,
         "heartbeat": heartbeat,
         "heartbeat_age_seconds": None if heartbeat_age is None else round(heartbeat_age, 3),
         "stale": stale,

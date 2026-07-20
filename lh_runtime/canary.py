@@ -48,13 +48,13 @@ def main() -> int:
         goal = {"feature_contract": "add a disposable fixture change"}
         successful_run = store.create_run(goal=goal, source_repo=source, base_revision=base)
         lease_held = store.acquire_lease(successful_run, "other-worker")
-        busy = controller.tick(successful_run, holder="controller", model=model_that_changes, verifier_argv=["git", "diff", "--check"])
+        busy = controller.tick(successful_run, holder="controller", model=model_that_changes, verifier_argv=["sh", "-c", "! git diff --cached --quiet"])
         store.release_lease(successful_run, "other-worker")
-        done = controller.tick(successful_run, holder="controller", model=model_that_changes, verifier_argv=["git", "diff", "--check"])
+        done = controller.tick(successful_run, holder="controller", model=model_that_changes, verifier_argv=["sh", "-c", "! git diff --cached --quiet"])
         receipt = json.loads((store.root / done["receipt_ref"]).read_text(encoding="utf-8"))
         interrupted_run = store.create_run(goal=goal, source_repo=source, base_revision=base)
         store.begin_attempt(interrupted_run, "workspace://interrupted/1")
-        recovered = controller.tick(interrupted_run, holder="controller", model=model_that_changes, verifier_argv=["git", "diff", "--check"])
+        recovered = controller.tick(interrupted_run, holder="controller", model=model_that_changes, verifier_argv=["sh", "-c", "! git diff --cached --quiet"])
         receipt_run = store.create_run(goal=goal, source_repo=source, base_revision=base)
         receipt_attempt = store.begin_attempt(receipt_run, "workspace://receipt/1")
         receipt_body = {"schema": "loop-hybrid-attempt-receipt/v1", "run_id": receipt_run, "attempt": receipt_attempt, "verification": {"exit_code": 0}}

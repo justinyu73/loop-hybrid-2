@@ -9,6 +9,7 @@ spine still owns state, the deterministic verifier, retry, and recovery.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -51,7 +52,12 @@ def make_cli_agent(
         argv = argv_builder(build_prompt(capsule))
         argv[0] = resolve_cli(argv[0])
         started_at = time.time()
-        proc = subprocess.run(argv, cwd=workspace, capture_output=True, text=True, timeout=timeout_seconds)
+        # The resolved CLI may itself need its runtime neighbours (e.g. an nvm
+        # node script whose shebang is `/usr/bin/env node`); under systemd/cron
+        # the ambient PATH is minimal, so put the CLI's own bin dir first.
+        env = dict(os.environ)
+        env["PATH"] = f"{Path(argv[0]).parent}:{env.get('PATH', '')}"
+        proc = subprocess.run(argv, cwd=workspace, capture_output=True, text=True, timeout=timeout_seconds, env=env)
         if proc.returncode != 0:
             raise RuntimeError(f"{name} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
         usage = None

@@ -54,6 +54,12 @@ class VerdictStore:
             conn.execute("UPDATE verdicts SET state = ?, conclusion = ?, resolved_at = ? WHERE run_id = ? AND state = 'awaiting_external_verdict'", (state, conclusion, at, run_id))
             conn.execute("COMMIT")
 
+    def action_for_op_key(self, op_key: str) -> dict[str, Any] | None:
+        """Return the parked action record for an op_key, or None when unknown."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT action_json FROM verdicts WHERE op_key = ?", (op_key,)).fetchone()
+        return None if row is None else json.loads(row["action_json"])
+
     def state(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT state, conclusion FROM verdicts WHERE run_id = ?", (run_id,)).fetchone()

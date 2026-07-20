@@ -32,6 +32,8 @@ GOAL_STATES = {
     "stopped",
 }
 
+MAX_GOAL_REVISIONS = 4
+
 ALLOWED_TRANSITIONS = {
     "candidate": {"active", "stale", "conflict", "human_required", "stopped"},
     "active": {"stale", "conflict", "human_required", "completed", "stopped"},
@@ -615,6 +617,46 @@ class GoalStore:
         if value is None:
             raise KeyError(f"unknown goal_id: {goal_id}")
         return value
+
+    def bump_revision(self, goal_id: str) -> dict[str, Any]:
+        """Create revision N+1 for an existing goal (revision-bump re-run).
+
+        When a goal's run is exhausted (stopped) and a new command re-issues
+        the work, a new revision yields a new deterministic run_id while the
+        old run stays as history.  Capped at MAX_GOAL_REVISIONS; beyond it the
+        caller routes to human_required instead of looping forever.
+        """
+        goal_id = _required_text("goal_id", goal_id)
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT * FROM goals WHERE goal_id = ?", (goal_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown goal_id: {goal_id}")
+                current = conn.execute(
+                    "SELECT * FROM goal_revisions WHERE revision_id = ?", (row["current_revision_id"],)
+                ).fetchone()
+                if current is None:
+                    raise ValueError("goal has no current revision to bump")
+                next_seq = int(current["revision"]) + 1
+                if next_seq > MAX_GOAL_REVISIONS:
+                    raise ValueError(f"goal revision cap reached ({MAX_GOAL_REVISIONS})")
+                goal_payload = json.loads(current["goal_json"])
+                revision_id = _id("rev-", {"goal_id": goal_id, "revision": next_seq, "goal": goal_payload})
+                conn.execute(
+                    "INSERT INTO goal_revisions(revision_id, goal_id, revision, goal_json, goal_digest, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (revision_id, goal_id, next_seq, current["goal_json"], current["goal_digest"], now),
+                )
+                conn.execute(
+                    "UPDATE goals SET current_revision_id = ?, updated_at = ? WHERE goal_id = ?",
+                    (revision_id, now, goal_id),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return {"goal_id": goal_id, "revision": next_seq, "revision_id": revision_id}
 
     def activate_with_run(self, goal_id: str, run_id: str, *, event_key: str | None = None) -> dict[str, Any]:
         """Persist the G4 candidate-to-active transition and its deterministic run link."""

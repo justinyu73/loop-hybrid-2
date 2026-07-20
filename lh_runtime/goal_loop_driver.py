@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import budget_reducer
+import dispatch_gate
 import external_verdict as ev
 from goal_loop_worker import GoalLoopWorker, ModelRunner, TurningPointRunner
 from status_snapshot import build_heartbeat, build_snapshot, default_heartbeat_path, write_heartbeat, write_snapshot
@@ -41,6 +42,9 @@ def run_driver(
     idle_limit: int = 3,
     backoff_seconds: float = 1.0,
     status_snapshot_out: str | Path | None = None,
+    quota_reader: dispatch_gate.QuotaReader | None = None,
+    daily_soft_cap_usd: float | None = 2.0,
+    daily_hard_cap_usd: float | None = 5.0,
     sleep_fn: Callable[[float], None] | None = None,
     clock_fn: Callable[[], float] | None = None,
     turning_point: TurningPointRunner | None = None,
@@ -58,6 +62,7 @@ def run_driver(
             "parked_goals": [],
             "heartbeat_path": str(default_heartbeat_path(worker.run_store.root)),
             "budget": {},
+            "dispatch_gate": None,
             "lock_path": str(lock_path),
         }
     try:
@@ -76,6 +81,9 @@ def run_driver(
             idle_limit=idle_limit,
             backoff_seconds=backoff_seconds,
             status_snapshot_out=status_snapshot_out,
+            quota_reader=quota_reader,
+            daily_soft_cap_usd=daily_soft_cap_usd,
+            daily_hard_cap_usd=daily_hard_cap_usd,
             sleep_fn=sleep_fn,
             clock_fn=clock_fn,
             turning_point=turning_point,
@@ -121,6 +129,9 @@ def _run_driver_loop(
     idle_limit: int = 3,
     backoff_seconds: float = 1.0,
     status_snapshot_out: str | Path | None = None,
+    quota_reader: dispatch_gate.QuotaReader | None = None,
+    daily_soft_cap_usd: float | None = 2.0,
+    daily_hard_cap_usd: float | None = 5.0,
     sleep_fn: Callable[[float], None] | None = None,
     clock_fn: Callable[[], float] | None = None,
     turning_point: TurningPointRunner | None = None,
@@ -136,13 +147,24 @@ def _run_driver_loop(
     is needed) rather than ``idle`` (the queue is empty). An injected
     ``budget_ceiling_tokens`` is reduced from the worker's ``RunStore`` receipts
     before startup dispatch and before each tick; unknown receipt usage stops the
-    driver.
+    driver. The W5 owner-durability gate (daily UTC cost caps, quota pressure,
+    executor credential failure) runs before every dispatch: a soft cap idles
+    the tick, a hard cap ends the session, and an in-flight attempt is never
+    touched. Every gate input is re-read each tick, so a cleared condition
+    resumes dispatch with no manual reset.
     """
     sleep = sleep_fn if sleep_fn is not None else time.sleep
     clock = clock_fn if clock_fn is not None else time.monotonic
     pause = Path(pause_flag) if pause_flag is not None else None
     snapshot_out = Path(status_snapshot_out) if status_snapshot_out is not None else None
     heartbeat_out = default_heartbeat_path(worker.run_store.root)
+    gate = dispatch_gate.DispatchGate(
+        worker.run_store,
+        quota_reader=quota_reader,
+        soft_daily_usd=daily_soft_cap_usd,
+        hard_daily_usd=daily_hard_cap_usd,
+    )
+    gate_state: dict[str, Any] | None = None
     started_at = clock()
     cycles = 0
     runs_dispatched = 0
@@ -162,6 +184,20 @@ def _run_driver_loop(
         if budget["stop_reason"] is not None:
             stop_reason = str(budget["stop_reason"])
             break
+        gate_state = gate.evaluate()
+        if gate_state["action"] == dispatch_gate.STOP:
+            stop_reason = str(gate_state["reason_code"])
+            break
+        if gate_state["action"] == dispatch_gate.IDLE:
+            idle_streak += 1
+            _write_heartbeat(worker, heartbeat_out, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
+            if snapshot_out is not None:
+                _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
+            if idle_streak >= idle_limit:
+                stop_reason = str(gate_state["reason_code"])
+                break
+            sleep(backoff_seconds)
+            continue
         if max_cycles is not None and cycles >= max_cycles:
             stop_reason = "max_cycles"
             break
@@ -183,10 +219,16 @@ def _run_driver_loop(
         if terminal is not None:
             outcomes.append(terminal)
 
+        auth = gate.auth_observation(result)
+        if auth is not None:
+            gate_state = auth
+            stop_reason = str(auth["reason_code"])
+            break
+
         if result["status"] == "progress":
             idle_streak = 0
             if snapshot_out is not None:
-                _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds)
+                _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
             _write_heartbeat(worker, heartbeat_out, holder=holder, phase="progress", cycles=cycles, monotonic_ts=clock())
             continue
         idle_streak += 1
@@ -198,7 +240,7 @@ def _run_driver_loop(
 
     parked_goals = _parked_goal_ids(worker)
     if snapshot_out is not None:
-        _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds)
+        _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
     return {
         "stop_reason": stop_reason,
         "cycles": cycles,
@@ -208,10 +250,11 @@ def _run_driver_loop(
         "parked_goals": parked_goals,
         "heartbeat_path": str(heartbeat_out),
         "budget": budget,
+        "dispatch_gate": gate_state,
     }
 
 
-def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_seconds: float = 0.0) -> None:
+def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_seconds: float = 0.0, gate_state: dict[str, Any] | None = None) -> None:
     # LoopController.__init__ always sets timeout_seconds; read it directly.
     timeout_seconds = float(worker.controller.timeout_seconds)
     snapshot = build_snapshot(
@@ -220,6 +263,7 @@ def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_s
         generated_at=datetime.now(timezone.utc).isoformat(),
         attempt_timeout_seconds=timeout_seconds,
         tick_overhead_seconds=tick_overhead_seconds,
+        dispatch_gate=gate_state,
     )
     write_snapshot(snapshot, out_path)
 

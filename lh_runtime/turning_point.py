@@ -21,8 +21,10 @@ verification lamps and the value gate decide completion exactly as before.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+from pathlib import Path
 from typing import Any, Callable
 
 from cli_agent_executor import resolve_cli
@@ -157,7 +159,9 @@ def make_cli_judge(
         prompt = build_judge_prompt(snapshot)
         argv = argv_builder(prompt)
         argv[0] = resolve_cli(argv[0])
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds)
+        env = dict(os.environ)
+        env["PATH"] = f"{Path(argv[0]).parent}:{env.get('PATH', '')}"
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds, env=env)
         if proc.returncode != 0:
             raise RuntimeError(f"judge {name} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
         return parse_decision(proc.stdout)

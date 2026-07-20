@@ -39,7 +39,7 @@ def _in_scope(path: str, allowed_paths: list[str]) -> bool:
     return False
 
 
-def value_verdict(*, exit_code: Any, diff_text: str | None, allowed_paths: list[str]) -> dict[str, Any]:
+def value_verdict(*, exit_code: Any, diff_text: str | None, allowed_paths: list[str], precheck: bool = False) -> dict[str, Any]:
     """Derive a value verdict from receipt evidence. Pure and deterministic."""
     reasons: list[str] = []
     if not isinstance(exit_code, int) or exit_code != 0:
@@ -47,7 +47,10 @@ def value_verdict(*, exit_code: Any, diff_text: str | None, allowed_paths: list[
     touched = touched_files(diff_text)
     if diff_text is None:
         reasons.append("no diff evidence recorded; a pass cannot be confirmed (unknown != pass)")
-    elif not touched:
+    elif not touched and not precheck:
+        # A lamp precheck (verification.precheck) passes on the untouched base
+        # BEFORE any model invocation — there is no agent that could game the
+        # lamp, so an empty diff there means "already done", not lamp gaming.
         reasons.append("empty diff: the run changed nothing but the lamp passed (possible lamp gaming)")
     if not allowed_paths:
         reasons.append("admission allowlist is empty; change scope cannot be verified")
@@ -83,6 +86,7 @@ def verdict_for_run(run_store: Any, run_id: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return value_verdict(exit_code=None, diff_text=None, allowed_paths=allowed_paths)
     exit_code = (receipt.get("verification") or {}).get("exit_code")
+    precheck = (receipt.get("verification") or {}).get("precheck") is True
     diff_text: str | None = None
     diff_ref = receipt.get("diff")
     # The controller stores diff as {"ref","digest"}; older/canary shapes use a
@@ -93,7 +97,7 @@ def verdict_for_run(run_store: Any, run_id: str) -> dict[str, Any]:
             diff_text = (run_store.root / ref_path).read_text(encoding="utf-8")
         except OSError:
             diff_text = None
-    return value_verdict(exit_code=exit_code, diff_text=diff_text, allowed_paths=allowed_paths)
+    return value_verdict(exit_code=exit_code, diff_text=diff_text, allowed_paths=allowed_paths, precheck=precheck)
 
 
 def aggregate(run_store: Any) -> dict[str, Any]:

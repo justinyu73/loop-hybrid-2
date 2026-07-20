@@ -32,6 +32,7 @@ run_gate admission-bridge-g4 python3 -B lh_runtime/admission_canary.py || exit $
 run_gate goal-loop-g5 python3 -B lh_runtime/goal_loop_canary.py || exit $?
 run_gate goal-loop-g6-ci-conclusion python3 -B lh_runtime/ci_conclusion_canary.py || exit $?
 run_gate lh-worker-async-dispatch python3 -B lh_runtime/worker_async_canary.py || exit $?
+run_gate lh-lamp-precheck python3 -B lh_runtime/lamp_precheck_canary.py || exit $?
 run_gate execution-receipt python3 gate-pack/execution_receipt/canary.py || exit $?
 run_gate verification-reducer python3 gate-pack/verification_reducer/canary.py || exit $?
 run_gate value-route python3 gate-pack/value_route/canary.py || exit $?
@@ -57,6 +58,10 @@ run_gate lh-status-snapshot python3 -B lh_runtime/status_snapshot_canary.py || e
 run_gate lh-project-binding python3 -B lh_runtime/project_binding_canary.py || exit $?
 run_gate lh-second-project-b5 python3 -B lh_runtime/second_project_canary.py || exit $?
 run_gate lh-github-conclusion python3 -B lh_runtime/github_conclusion_canary.py || exit $?
+run_gate lh-github-verdict-wiring python3 -B lh_runtime/github_verdict_wiring_canary.py || exit $?
+run_gate lh-owner-durability python3 -B lh_runtime/owner_durability_canary.py || exit $?
+run_gate lh-grill-loop python3 -B lh_runtime/grill_loop_canary.py || exit $?
+run_gate lh-stop-lines python3 -B lh_runtime/stop_lines_canary.py || exit $?
 run_gate lh-b7-live-smoke python3 -B lh_runtime/b7_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-codex-usage python3 -B lh_runtime/codex_usage_canary.py || exit $?
 run_gate lh-usage-parsers python3 -B lh_runtime/usage_parser_canary.py || exit $?

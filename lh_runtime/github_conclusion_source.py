@@ -124,6 +124,7 @@ class GitHubConclusionSource:
         workflow: str | None = None,
         sha_resolver: ShaResolver | None = None,
         environ: Mapping[str, str] | None = None,
+        transport: Transport | None = None,
     ) -> "GitHubConclusionSource":
         values = os.environ if environ is None else environ
         token = values.get("LH_GITHUB_TOKEN", "").strip()
@@ -137,7 +138,7 @@ class GitHubConclusionSource:
             timeout = float(raw_timeout)
         except (TypeError, ValueError) as exc:
             raise ValueError("LH_GITHUB_TIMEOUT_SECONDS must be numeric") from exc
-        return cls(owner, repo, workflow, token, sha_resolver, api_root=api_root, timeout=timeout)
+        return cls(owner, repo, workflow, token, sha_resolver, api_root=api_root, timeout=timeout, transport=transport)
 
     def _runs_url(self, sha: str) -> str:
         path = f"/repos/{quote(self.owner, safe='')}/{quote(self.repo, safe='')}/actions/runs"

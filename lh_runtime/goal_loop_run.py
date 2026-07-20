@@ -16,12 +16,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import cli_agent_executor as executors
 import external_verdict as ev
+import github_conclusion_source as ghc
+import grill_loop
 import project_binding
 import turning_point as tp
 from campaign_compiler import CampaignCompiler
@@ -66,6 +68,7 @@ def build_worker(
     source_repo: str | Path,
     base_revision: str,
     executor_timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
+    grill_runner: grill_loop.GrillRunner | None = None,
 ) -> GoalLoopWorker:
     runs = RunStore(Path(run_store_root))
     campaign_id = campaign["campaign_id"]
@@ -75,7 +78,38 @@ def build_worker(
         controller=LoopController(runs, Path(workspace_root), timeout_seconds=executor_timeout_seconds),
         compilers={campaign_id: CampaignCompiler(campaign)},
         execution_context={campaign_id: {"source_repo": Path(source_repo), "base_revision": base_revision}},
+        grill_runner=grill_runner,
     )
+
+
+def build_github_verdict(
+    github_verdict: dict[str, str],
+    *,
+    run_store_root: str | Path,
+    environ: Mapping[str, str] | None = None,
+    transport: ghc.Transport | None = None,
+) -> tuple[ev.VerdictStore, ghc.GitHubConclusionSource]:
+    """Construct the durable verdict store and the GitHub conclusion source.
+
+    The store lives under the run store root so the awaiting state survives
+    host restarts next to the runs it parks. The token comes from the
+    environment only; when it is absent ``from_env`` raises before the loop
+    starts, so nothing is dispatched or polled. The token is never written
+    to the store, receipts, or any artifact.
+    """
+    store = ev.VerdictStore(Path(run_store_root) / "verdict.sqlite3")
+
+    def sha_resolver(op_key: str) -> str | None:
+        action = store.action_for_op_key(op_key)
+        external = action.get("external") if isinstance(action, dict) else None
+        head_sha = external.get("head_sha") if isinstance(external, dict) else None
+        return head_sha if isinstance(head_sha, str) and head_sha.strip() else None
+
+    source = ghc.GitHubConclusionSource.from_env(
+        github_verdict["owner"], github_verdict["repo"], github_verdict["workflow"], sha_resolver,
+        environ=environ, transport=transport,
+    )
+    return store, source
 
 
 def run(
@@ -100,13 +134,25 @@ def run(
     status_snapshot_out: str | Path | None = None,
     verdict_store: ev.VerdictStore | None = None,
     conclusion_source: ev.ConclusionSource | None = None,
+    github_verdict: dict[str, str] | None = None,
+    github_environ: Mapping[str, str] | None = None,
+    github_transport: ghc.Transport | None = None,
     factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
     driver_fn: Callable[..., dict[str, Any]] = run_driver,
     sleep_fn: Callable[[float], None] | None = None,
     judge_executor: str | None = None,
     judge_model: str | None = None,
     turning_point: TurningPointRunner | None = None,
+    quota_reader: Callable[[], dict[str, Any] | None] | None = None,
+    daily_soft_cap_usd: float | None = 2.0,
+    daily_hard_cap_usd: float | None = 5.0,
 ) -> dict[str, Any]:
+    if github_verdict is not None:
+        if verdict_store is not None or conclusion_source is not None:
+            raise ValueError("github_verdict cannot be combined with an explicit verdict_store/conclusion_source")
+        verdict_store, conclusion_source = build_github_verdict(
+            github_verdict, run_store_root=run_store_root, environ=github_environ, transport=github_transport,
+        )
     if (verdict_store is None) != (conclusion_source is None):
         raise ValueError("verdict_store and conclusion_source must be supplied together")
     if judge_executor is not None and turning_point is not None:
@@ -130,17 +176,29 @@ def run(
             "executor_timeout_seconds": executor_timeout_seconds,
             "status_snapshot_out": str(status_snapshot_out) if status_snapshot_out is not None else None,
             "external_verdict_poll": verdict_store is not None,
+            "daily_soft_cap_usd": daily_soft_cap_usd,
+            "daily_hard_cap_usd": daily_hard_cap_usd,
+            "quota_gate": quota_reader is not None,
         },
         "boundary": "executor runs in a disposable clone; output stops at a PR; push/merge/promotion are human/project-owned",
     }
     model = resolve_executor(executor, execute=execute, timeout_seconds=executor_timeout_seconds, factory_overrides=factory_overrides)
     if model is None:
         return {"mode": "dry_run", "invoked": False, "plan": plan}
+    grill_runner: grill_loop.GrillRunner | None = None
     if judge_executor is not None:
         factories = {**EXECUTORS, **(factory_overrides or {})}
         if judge_executor not in factories:
             raise ValueError(f"unknown judge_executor: {judge_executor!r}; choose one of {sorted(factories)}")
         turning_point = tp.make_cli_judge(
+            lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
+            name=judge_executor,
+        )
+        # W6a: the same judge CLI layering carries the challenger grill before
+        # a run's last allowed attempt. Absent judge = grill stays off (the
+        # original max_attempts behavior), so a missing models.judge config
+        # never blocks the loop.
+        grill_runner = grill_loop.make_cli_judge(
             lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
             name=judge_executor,
         )
@@ -152,6 +210,7 @@ def run(
         source_repo=source_repo,
         base_revision=base_revision,
         executor_timeout_seconds=executor_timeout_seconds,
+        grill_runner=grill_runner,
     )
     startup_external_resumed = []
     if verdict_store is not None and conclusion_source is not None:
@@ -174,6 +233,9 @@ def run(
         status_snapshot_out=status_snapshot_out,
         verdict_store=verdict_store,
         conclusion_source=conclusion_source,
+        quota_reader=quota_reader,
+        daily_soft_cap_usd=daily_soft_cap_usd,
+        daily_hard_cap_usd=daily_hard_cap_usd,
         sleep_fn=sleep_fn,
         turning_point=turning_point,
     )
