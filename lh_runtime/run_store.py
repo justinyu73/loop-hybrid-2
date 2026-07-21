@@ -69,6 +69,13 @@ class RunStore:
                     expires_at REAL NOT NULL,
                     FOREIGN KEY(run_id) REFERENCES runs(run_id)
                 );
+                CREATE TABLE IF NOT EXISTS usage_corrections (
+                    run_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(run_id, ordinal)
+                );
                 """
             )
             run_columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
@@ -157,15 +164,49 @@ class RunStore:
             row = conn.execute("SELECT receipt_ref, receipt_digest FROM attempts WHERE run_id = ? AND receipt_ref IS NOT NULL ORDER BY ordinal DESC LIMIT 1", (run_id,)).fetchone()
         return None if row is None else dict(row)
 
+    def usage_corrections(self) -> list[dict[str, Any]]:
+        """List the human-recorded usage voids (W9e), oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT run_id, ordinal, reason, created_at FROM usage_corrections ORDER BY created_at, run_id, ordinal").fetchall()
+        return [dict(row) for row in rows]
+
+    def void_usage(self, run_id: str, ordinal: int, *, reason: str) -> dict[str, Any]:
+        """W9e: human-only void of a poisoned usage record.
+
+        Appends a correction row beside the evidence — the original receipt
+        and its recorded digest are never modified. Voiding a record that
+        does not exist is a clear error; a duplicate void reports
+        already-voided instead of writing a second row. Nothing in the
+        engine calls this automatically."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be a non-empty string")
+        with self._connect() as conn:
+            attempt = conn.execute("SELECT receipt_ref FROM attempts WHERE run_id = ? AND ordinal = ?", (run_id, int(ordinal))).fetchone()
+            if attempt is None or attempt["receipt_ref"] is None:
+                raise ValueError(f"no recorded usage for run {run_id} attempt {ordinal}")
+            existing = conn.execute("SELECT reason, created_at FROM usage_corrections WHERE run_id = ? AND ordinal = ?", (run_id, int(ordinal))).fetchone()
+            if existing is not None:
+                return {"status": "already_voided", "run_id": run_id, "ordinal": int(ordinal), "reason": existing["reason"], "created_at": existing["created_at"]}
+            now = time.time()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO usage_corrections(run_id, ordinal, reason, created_at) VALUES (?, ?, ?, ?)", (run_id, int(ordinal), reason.strip(), now))
+            conn.execute("COMMIT")
+        return {"status": "voided", "run_id": run_id, "ordinal": int(ordinal), "reason": reason.strip(), "created_at": now}
+
     def usage_records(self) -> list[dict[str, Any]]:
         """Read the per-attempt token usage stamped into each committed receipt.
 
         A missing or unreadable usage block is reported as ``unknown`` — it is
-        never silently treated as zero usage."""
+        never silently treated as zero usage. Records a human voided through
+        ``void_usage`` (W9e, e.g. a phantom-attribution record) are excluded;
+        the correction lives beside the receipt, never inside it."""
         with self._connect() as conn:
             rows = conn.execute("SELECT run_id, ordinal, state, created_at, finished_at, receipt_ref FROM attempts WHERE receipt_ref IS NOT NULL ORDER BY run_id, ordinal").fetchall()
+            voided = {(row["run_id"], row["ordinal"]) for row in conn.execute("SELECT run_id, ordinal FROM usage_corrections")}
         records: list[dict[str, Any]] = []
         for row in rows:
+            if (row["run_id"], row["ordinal"]) in voided:
+                continue
             usage: dict[str, Any] | None = None
             try:
                 receipt = json.loads((self.root / row["receipt_ref"]).read_text(encoding="utf-8"))

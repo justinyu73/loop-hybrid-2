@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +13,7 @@ import turning_point as tp
 import value_reducer
 from admission_bridge import GoalAdmissionBridge
 from campaign_compiler import GOAL_CANDIDATE_SCHEMA, CampaignCompiler
+from command_ingress import submit_command
 from controller import LoopController
 from goal_matcher import GoalMatcher
 from goal_store import GoalStore
@@ -95,6 +97,7 @@ class GoalLoopWorker:
         action_ledger: eap.ActionLedger | None = None,
         external_adapter: eap.ExternalAdapter | None = None,
         grill_runner: grill_loop.GrillRunner | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ):
         if (action_ledger is None) != (external_adapter is None):
             raise ValueError("action_ledger and external_adapter must be supplied together")
@@ -111,6 +114,9 @@ class GoalLoopWorker:
         # W6a: optional challenger grill before a sync run's last allowed
         # attempt. None = today's behavior; the grill is advisory everywhere.
         self.grill_runner = grill_runner
+        # W9f: clock for the standing-intent day window; injectable so the
+        # emitter's window math stays testable without sleeping.
+        self._now_fn = now_fn if now_fn is not None else lambda: datetime.now(timezone.utc)
         # When true, the deterministic 报红 value verdict is the acceptance
         # authority: a lamp-passing but value-RED run does not auto-advance, it
         # routes to human_required (LH execution model: 报红 gates completion).
@@ -127,6 +133,7 @@ class GoalLoopWorker:
     ) -> dict[str, Any]:
         if (verdict_store is None) != (conclusion_source is None):
             raise ValueError("verdict_store and conclusion_source must be supplied together")
+        standing = self._emit_standing_intents()
         startup = self.controller.startup()
         external = []
         if verdict_store is not None and conclusion_source is not None:
@@ -136,9 +143,10 @@ class GoalLoopWorker:
         run_result = self._dispatch_one_run(holder, model, turning_point=turning_point, verdict_store=verdict_store)
         terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped"} else None
         campaign_stops = self._campaign_failure_lines()
-        progressed = any(item is not None and item != [] for item in (startup, external, terminal_before, event_result, run_result, terminal_after, campaign_stops))
+        progressed = any(item is not None and item != [] for item in (standing, startup, external, terminal_before, event_result, run_result, terminal_after, campaign_stops))
         return {
             "status": "progress" if progressed else "idle",
+            "standing_emitted": standing,
             "startup_reconciled": startup,
             "external_resumed": external,
             "terminal_before": terminal_before,
@@ -147,6 +155,50 @@ class GoalLoopWorker:
             "terminal_after": terminal_after,
             "campaign_stops": campaign_stops,
         }
+
+    def _goal_is_open(self, goal_id: str) -> bool:
+        """W9f: an open goal blocks re-emission — candidate/active means work
+        is in flight; human_required means the daily pass must look first.
+        completed/stopped goals do not block: a new daily check may start."""
+        try:
+            goal = self.goal_store.get_goal(goal_id)
+        except KeyError:
+            return False
+        return goal["state"] in {"candidate", "active", "human_required"}
+
+    def _emit_standing_intents(self) -> list[dict[str, Any]]:
+        """W9f standing intent emitter (deterministic, no model anywhere).
+
+        At the start of every tick, each campaign's declared standing intents
+        emit one manual_intent command per UTC day through the same durable
+        event path a human command takes. Emission happens only when no
+        command with today's idempotency key exists yet (record_event dedups
+        naturally) and the stage's goal is not open. An emission failure is
+        noted and skipped — it never crashes the tick.
+        """
+        emitted: list[dict[str, Any]] = []
+        day = self._now_fn().astimezone(timezone.utc).date().isoformat()
+        for campaign_id, compiler in self.compilers.items():
+            for standing in getattr(compiler, "standing_intents", []):
+                stage_id = standing["stage_id"]
+                goal_id = f"{campaign_id}:{stage_id}"
+                key = f"standing:{campaign_id}:{stage_id}:{day}"
+                try:
+                    if self._goal_is_open(goal_id):
+                        continue
+                    result = submit_command(
+                        self.goal_store,
+                        source="standing_intent",
+                        event_type="manual_intent",
+                        event_id=f"evt-{key}",
+                        payload={"campaign_id": campaign_id, "stage_id": stage_id, "intent": standing["intent"]},
+                        idempotency_key=key,
+                    )
+                    if result.get("status") != "reused":
+                        emitted.append({"goal_id": goal_id, "idempotency_key": key, "intent": standing["intent"]})
+                except Exception as exc:  # an emission failure must never crash the tick
+                    emitted.append({"goal_id": goal_id, "idempotency_key": key, "note": f"emission skipped: {type(exc).__name__}: {exc}"})
+        return emitted
 
     def _campaign_failure_lines(self) -> list[dict[str, Any]]:
         """W6b campaign consecutive-failure line (deterministic, no model).

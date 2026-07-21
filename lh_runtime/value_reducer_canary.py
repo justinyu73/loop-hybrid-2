@@ -29,8 +29,13 @@ def _seed_run(store: RunStore, *, allowed: list[str], exit_code: int, diff_text:
     run_id = store.create_run(goal={"feature_contract": "x", "admission_envelope": {"allowed_paths": allowed}}, source_repo=HERE, base_revision="r")
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
     diff_ref = store.write_artifact(run_id, ordinal, "diff.patch", diff_text)
+    # W8-3: verifier stdout/stderr are artifact refs, not inline strings —
+    # the integrity check resolves every recorded ref inside the run store.
+    stdout_ref = store.write_artifact(run_id, ordinal, "verifier.stdout", "a")
+    stderr_ref = store.write_artifact(run_id, ordinal, "verifier.stderr", "b")
     receipt = {"schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
-               "diff": diff_ref["ref"], "verification": {"argv": ["true"], "exit_code": exit_code, "stdout": "a", "stderr": "b"}}
+               "diff": diff_ref["ref"],
+               "verification": {"argv": ["true"], "exit_code": exit_code, "stdout": stdout_ref, "stderr": stderr_ref}}
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
     store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
     return run_id

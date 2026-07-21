@@ -291,11 +291,14 @@ def main(argv: list[str] | None = None) -> int:
         binding["budget_ceiling_tokens"] = args.budget_ceiling_tokens
     if args.budget_scope is not None:
         binding["budget_scope"] = args.budget_scope
-    executor = args.executor or binding.pop("executor", None)
+    binding_executor = binding.pop("executor", None)
+    executor = args.executor or binding_executor
     if not executor:
         parser.error("--executor is required (or set models.execute in the contract)")
-    judge_executor = args.judge_executor or binding.pop("judge_executor", None)
-    judge_model = args.judge_model or binding.pop("judge_model", None)
+    binding_judge_executor = binding.pop("judge_executor", None)
+    judge_executor = args.judge_executor or binding_judge_executor
+    binding_judge_model = binding.pop("judge_model", None)
+    judge_model = args.judge_model or binding_judge_model
 
     result = run(
         executor=executor,

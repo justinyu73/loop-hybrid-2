@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -132,20 +133,29 @@ class GoalAdmissionBridge:
             existing_run = self.run_store.get_run(run_id)
         except KeyError:
             existing_run = None
-        if existing_run is not None and existing_run["state"] == "stopped":
-            # Revision-bump: an exhausted run is never re-linked.  A new
-            # command re-issues the work as revision N+1 (new deterministic
-            # run_id, old run kept as history); the revision cap turns an
-            # endless fail-retry loop into human_required.
-            try:
-                bumped = self.goal_store.bump_revision(goal_id)
-            except ValueError:
-                return {
-                    "status": "human_required",
-                    "goal_id": goal_id,
-                    "run_id": None,
-                    "reasons": ["revision_cap_reached"],
-                }
+        if existing_run is not None and existing_run["state"] in {"stopped", "verified"}:
+            # Revision-bump: a terminal run is never re-linked. A new command
+            # re-issues the work as revision N+1 (new deterministic run_id,
+            # old run kept as history).
+            if existing_run["state"] == "stopped":
+                # Failure loop: the revision cap turns an endless fail-retry
+                # loop into human_required (unchanged semantics).
+                try:
+                    bumped = self.goal_store.bump_revision(goal_id)
+                except ValueError:
+                    return {
+                        "status": "human_required",
+                        "goal_id": goal_id,
+                        "run_id": None,
+                        "reasons": ["revision_cap_reached"],
+                    }
+            else:
+                # W9g: success cycle. A VERIFIED run must never be re-linked
+                # into a revived goal (the W9f day-1 bug: the old verified run
+                # was re-linked and its stale receipt consumed). Recurring
+                # after a success is a fresh cycle, not a fail-retry loop, so
+                # the fail-loop revision cap does not apply here.
+                bumped = self._bump_revision_after_success(goal_id)
             revision_id = bumped["revision_id"]
             run_id = _id("run-goal-", {"goal_id": goal_id, "revision_id": revision_id, "base_revision": pinned_revision, "envelope": envelope})
             run_goal["revision_id"] = revision_id
@@ -159,3 +169,36 @@ class GoalAdmissionBridge:
             "run_state": self.run_store.get_run(run_id)["state"],
             "goal_state": linked["state"],
         }
+
+    def _bump_revision_after_success(self, goal_id: str) -> dict[str, Any]:
+        """W9g: revision-bump after a VERIFIED run, without the fail-loop cap.
+
+        MAX_GOAL_REVISIONS exists to stop endless fail-retry loops; a verified
+        run is a completed success cycle, so recurring (e.g. a daily standing
+        health check) starts a fresh cycle and the cap does not apply. Mirrors
+        GoalStore.bump_revision's write path against the same store; kept here
+        because the capped variant lives in GoalStore and the two policies
+        must stay visibly separate."""
+        now = time.time()
+        with self.goal_store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT current_revision_id FROM goals WHERE goal_id = ?", (goal_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown goal_id: {goal_id}")
+                current = conn.execute("SELECT * FROM goal_revisions WHERE revision_id = ?", (row["current_revision_id"],)).fetchone()
+                if current is None:
+                    raise ValueError("goal has no current revision to bump")
+                next_seq = int(current["revision"]) + 1
+                goal_payload = json.loads(current["goal_json"])
+                revision_id = _id("rev-", {"goal_id": goal_id, "revision": next_seq, "goal": goal_payload})
+                conn.execute(
+                    "INSERT INTO goal_revisions(revision_id, goal_id, revision, goal_json, goal_digest, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (revision_id, goal_id, next_seq, current["goal_json"], current["goal_digest"], now),
+                )
+                conn.execute("UPDATE goals SET current_revision_id = ?, updated_at = ? WHERE goal_id = ?", (revision_id, now, goal_id))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return {"goal_id": goal_id, "revision": next_seq, "revision_id": revision_id}

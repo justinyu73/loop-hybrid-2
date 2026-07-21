@@ -27,6 +27,9 @@ UsageParser = Callable[[str], dict[str, Any]]
 # Post-run: given the completed process and context {started_at, capsule}, return a
 # usage record. Use this when usage lives in a session log rather than stdout.
 UsageCollector = Callable[[subprocess.CompletedProcess, dict[str, Any]], dict[str, Any]]
+# Pre-run: read the current cumulative session-log state so the collector can
+# bill only the per-invocation delta (session logs are cumulative when reused).
+SnapshotFn = Callable[[], dict[str, Any]]
 
 
 def build_prompt(capsule: dict[str, Any]) -> str:
@@ -47,11 +50,19 @@ def make_cli_agent(
     timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     usage_parser: UsageParser | None = None,
     usage_collector: UsageCollector | None = None,
+    snapshot_fn: SnapshotFn | None = None,
 ) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
     def model(workspace: Path, capsule: dict[str, Any]) -> dict[str, Any]:
         argv = argv_builder(build_prompt(capsule))
         argv[0] = resolve_cli(argv[0])
         started_at = time.time()
+        snap: dict[str, Any] | None = None
+        if snapshot_fn is not None:
+            try:
+                baseline = snapshot_fn()
+                snap = baseline if isinstance(baseline, dict) else None
+            except Exception:  # A snapshot failure must not block dispatch; the collector degrades.
+                snap = None
         # The resolved CLI may itself need its runtime neighbours (e.g. an nvm
         # node script whose shebang is `/usr/bin/env node`); under systemd/cron
         # the ambient PATH is minimal, so put the CLI's own bin dir first.
@@ -63,7 +74,7 @@ def make_cli_agent(
         usage = None
         try:
             if usage_collector is not None:
-                usage = usage_collector(proc, {"started_at": started_at, "capsule": capsule})
+                usage = usage_collector(proc, {"started_at": started_at, "capsule": capsule, "snapshot": snap})
             elif usage_parser is not None:
                 usage = usage_parser(proc.stdout)
         except Exception:  # A parse/collect failure must not fabricate usage; stay unknown.
@@ -148,6 +159,6 @@ import claude_usage  # noqa: E402
 import codex_usage  # noqa: E402
 import kimi_usage  # noqa: E402
 
-CODEX = lambda **kw: make_cli_agent(codex_argv, name="codex", usage_collector=kw.pop("usage_collector", codex_usage.collector), **kw)  # noqa: E731
-CLAUDE = lambda **kw: make_cli_agent(claude_argv, name="claude", usage_collector=kw.pop("usage_collector", claude_usage.collector), **kw)   # noqa: E731
-KIMI = lambda **kw: make_cli_agent(kimi_argv, name="kimi", usage_collector=kw.pop("usage_collector", kimi_usage.collector), **kw)   # noqa: E731
+CODEX = lambda **kw: make_cli_agent(codex_argv, name="codex", usage_collector=kw.pop("usage_collector", codex_usage.collector), snapshot_fn=kw.pop("snapshot_fn", codex_usage.snapshot), **kw)  # noqa: E731
+CLAUDE = lambda **kw: make_cli_agent(claude_argv, name="claude", usage_collector=kw.pop("usage_collector", claude_usage.collector), snapshot_fn=kw.pop("snapshot_fn", claude_usage.snapshot), **kw)   # noqa: E731
+KIMI = lambda **kw: make_cli_agent(kimi_argv, name="kimi", usage_collector=kw.pop("usage_collector", kimi_usage.collector), snapshot_fn=kw.pop("snapshot_fn", kimi_usage.snapshot), **kw)   # noqa: E731

@@ -62,6 +62,13 @@ run_gate lh-github-verdict-wiring python3 -B lh_runtime/github_verdict_wiring_ca
 run_gate lh-owner-durability python3 -B lh_runtime/owner_durability_canary.py || exit $?
 run_gate lh-grill-loop python3 -B lh_runtime/grill_loop_canary.py || exit $?
 run_gate lh-stop-lines python3 -B lh_runtime/stop_lines_canary.py || exit $?
+run_gate lh-usage-delta python3 -B lh_runtime/usage_delta_canary.py || exit $?
+run_gate lh-cli-executor-flags python3 -B lh_runtime/cli_flags_canary.py || exit $?
+run_gate lh-live-smoke python3 -B lh_runtime/live_smoke_canary.py || exit $?
+run_gate lh-usage-void python3 -B lh_runtime/usage_void_canary.py || exit $?
+run_gate lh-standing-intent python3 -B lh_runtime/standing_intent_canary.py || exit $?
+run_gate lh-run-revival python3 -B lh_runtime/revival_canary.py || exit $?
+run_gate lh-evidence-integrity python3 -B lh_runtime/evidence_integrity_canary.py || exit $?
 run_gate lh-b7-live-smoke python3 -B lh_runtime/b7_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-codex-usage python3 -B lh_runtime/codex_usage_canary.py || exit $?
 run_gate lh-usage-parsers python3 -B lh_runtime/usage_parser_canary.py || exit $?

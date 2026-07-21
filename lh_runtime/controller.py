@@ -97,6 +97,17 @@ class LoopController:
             result = self.store.write_artifact(run_id, ordinal, name, content)
         return result
 
+    @staticmethod
+    def _staging_error(add: subprocess.CompletedProcess, diff: subprocess.CompletedProcess) -> str | None:
+        """W8-1: staging must be checked — a failed ``git add``/``git diff``
+        (e.g. an unreadable file the model created) makes the attempt's
+        evidence chain unreliable, so the attempt can never go green."""
+        if add.returncode != 0:
+            return f"git add -A exited {add.returncode}: {add.stderr.strip()[:400]}"
+        if diff.returncode != 0:
+            return f"git diff --cached exited {diff.returncode}: {diff.stderr.strip()[:400]}"
+        return None
+
     def _previous_failure_signature(self, run_id: str, ordinal: int) -> dict[str, Any] | None:
         """W6b: the previous attempt's failure signature — its verifier exit
         code and diff digest, read from the durable receipt. None when the
@@ -140,8 +151,11 @@ class LoopController:
             except subprocess.TimeoutExpired:
                 pre = None
             if pre is not None and pre.returncode == 0:
-                self._run(["git", "-C", str(workspace), "add", "-A"], cwd=None, budget=budget)
+                pre_add = self._run(["git", "-C", str(workspace), "add", "-A"], cwd=None, budget=budget)
                 pre_diff = self._run(["git", "-C", str(workspace), "diff", "--cached", "--binary"], cwd=None, budget=budget)
+            # W8-1: a precheck whose staging failed is not evidence — fall
+            # through to the model path, whose own staging check records it.
+            if pre is not None and pre.returncode == 0 and self._staging_error(pre_add, pre_diff) is None:
                 pre_provider = {"summary": "lamp precheck passed without model invocation", "precheck": True}
                 pre_provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(pre_provider, sort_keys=True), budget)
                 pre_diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", pre_diff.stdout, budget)
@@ -174,10 +188,11 @@ class LoopController:
             # Stage everything first so new/untracked files the executor created
             # appear in the diff; a plain `git diff` omits them, which would make
             # the value reducer see an empty diff for a real new-file change.
-            self._run(["git", "-C", str(workspace), "add", "-A"], cwd=None, budget=budget)
+            add = self._run(["git", "-C", str(workspace), "add", "-A"], cwd=None, budget=budget)
             diff = self._run(["git", "-C", str(workspace), "diff", "--cached", "--binary"], cwd=None, budget=budget)
+            staging_error = self._staging_error(add, diff)
             verified = None
-            if "failure" not in provider:
+            if "failure" not in provider and staging_error is None:
                 try:
                     verified = subprocess.run(verifier_argv, cwd=workspace, capture_output=True, text=True, timeout=budget.timeout())
                 except subprocess.TimeoutExpired as exc:
@@ -185,7 +200,7 @@ class LoopController:
             provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(provider, sort_keys=True), budget)
             diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", diff.stdout, budget)
             stdout = verified.stdout if verified else ""
-            stderr = verified.stderr if verified else provider["failure"]
+            stderr = verified.stderr if verified else staging_error or provider["failure"]
             stdout_ref = self._write_artifact(run_id, ordinal, "verifier.stdout", stdout, budget)
             stderr_ref = self._write_artifact(run_id, ordinal, "verifier.stderr", stderr, budget)
             exit_code = verified.returncode if verified else -1
@@ -201,13 +216,18 @@ class LoopController:
                 if self._previous_failure_signature(run_id, ordinal) == signature:
                     state = "stopped"
                     no_progress = {"attempt": ordinal, "max_attempts": run_after["max_attempts"], "signature": signature}
+            verification: dict[str, Any] = {"argv": verifier_argv, "exit_code": exit_code, "stdout": stdout_ref, "stderr": stderr_ref}
+            if staging_error is not None:
+                # W8-1: staging failed, so the verifier never ran and the
+                # attempt cannot go green; the reason stays on the receipt.
+                verification["staging_error"] = staging_error
             receipt = {
                 "schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
                 "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": run["base_revision"]},
                 "provider": {"summary": provider["summary"], "artifact": provider_ref},
                 "usage": provider.get("usage") if isinstance(provider.get("usage"), dict) else token_cost.unknown_usage(reason="model did not report usage"),
                 "diff": diff_ref,
-                "verification": {"argv": verifier_argv, "exit_code": exit_code, "stdout": stdout_ref, "stderr": stderr_ref},
+                "verification": verification,
             }
             receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True), budget)
             if not self.store.finish_attempt(run_id, ordinal, state=state, receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"], fence=fence):

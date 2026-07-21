@@ -64,6 +64,15 @@ class CampaignCompiler:
             next_stage_id = stage["next_stage_id"]
             if next_stage_id is not None and next_stage_id not in self.stages:
                 raise ValueError(f"unknown next_stage_id: {next_stage_id}")
+        raw_standing = campaign.get("standing_intents")
+        if raw_standing is None:
+            self.standing_intents: list[dict[str, str]] = []
+        else:
+            if not isinstance(raw_standing, list):
+                raise ValueError("campaign.standing_intents must be a list")
+            # W9f: recurring deterministic intents, compiled after the stages
+            # so each reference is checked against the compiled admission.
+            self.standing_intents = [self._compile_standing_intent(item) for item in raw_standing]
         self.envelope = {
             "schema": ENVELOPE_SCHEMA,
             "campaign_id": self.campaign_id,
@@ -76,6 +85,23 @@ class CampaignCompiler:
         if not isinstance(stage, dict):
             raise ValueError("each campaign stage must be an object")
         return _text("stage_id", stage.get("stage_id"))
+
+    def _compile_standing_intent(self, item: Any) -> dict[str, str]:
+        """Validate one standing_intents entry: a recurring manual_intent the
+        worker emits once per UTC day. Interval is daily only (finer intervals
+        are a human decision); the stage must exist and be auto-admissible."""
+        if not isinstance(item, dict):
+            raise ValueError("campaign.standing_intents entries must be objects")
+        stage_id = _text("standing_intents.stage_id", item.get("stage_id"))
+        if item.get("interval") != "daily":
+            raise ValueError(f"{stage_id}: standing_intents.interval must be 'daily'")
+        intent = _text(f"{stage_id}.standing_intents.intent", item.get("intent"))
+        stage = self.stages.get(stage_id)
+        if stage is None:
+            raise ValueError(f"standing_intents references unknown stage_id: {stage_id}")
+        if not stage["auto_admission"]["eligible"]:
+            raise ValueError(f"standing_intents stage is not auto-admissible: {stage_id}")
+        return {"stage_id": stage_id, "interval": "daily", "intent": intent}
 
     def _compile_stage(self, stage: dict[str, Any]) -> dict[str, Any]:
         stage_id = self._stage_id(stage)
