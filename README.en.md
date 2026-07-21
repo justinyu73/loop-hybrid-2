@@ -78,6 +78,36 @@ The optional GitHub CI-conclusion live smoke
 `LH_LIVE_SMOKE_OWNER` environment variable. When it is unset, the live path
 skips with a recorded known gap; the offline `--dry-run` gate is unaffected.
 
+
+## Operator quickstart: bind your own project
+
+End-to-end, offline-verifiable up to step C:
+
+1. **Write a campaign** — each `campaign.stages[]` entry is one bounded unit: `goal`
+   (must_have/must_not), `allowed_paths` (out-of-scope diffs go value-RED),
+   `acceptance_lamp`, `max_attempts`, `next_stage_id` (multi-stage auto-advance).
+   Lamp rules: red-on-base (green-on-base means the work is already done and the
+   precheck completes it for $0); deterministic and environment-independent;
+   green must be positive proof of work, not absence of errors; verifier failures
+   must exit nonzero.
+2. **Issue a goal** — `python3 -B lh_runtime/command_ingress.py --goal-store <dir>
+   --source operator --event-type manual_intent --event-id cmd-1 --payload
+   '{"campaign_id":"example-campaign","stage_id":"stage-1","intent":"..."}'`
+   (or let `standing_intents` emit one daily).
+3. **Run the driver** — `python3 -B lh_runtime/goal_loop_run.py --contract
+   project_runtime_contract.json --execute --max-cycles 12 --idle-limit 2`.
+   Chain: intent → admission → disposable-clone execution → lamp + value gate →
+   receipt → next stage. A cron/systemd timer calling the same bounded command
+   makes it resident; every invocation is restart-safe.
+4. **Read results** — `platform_status.json` (state, cost, heartbeat/staleness),
+   `runs/artifacts/<run_id>/<attempt>/` (receipt, diff, verifier output, usage),
+   and the read-only MCP server.
+5. **Draft-PR mode** — declare `external_verdict` on the stage plus the
+   `external_verdict.adapter` (github_pr): the engine pushes the diff to an `lh/*`
+   branch, opens a **draft PR** with the evidence chain in the body, and resumes on
+   the GitHub CI conclusion. Use a fine-grained PAT (single repo; Contents RW,
+   Pull requests RW, Actions read) via `LH_GITHUB_TOKEN`. **Merging is always human.**
+
 ## License
 
 [MIT](LICENSE) — copyright 2026 Loop Hybrid contributors.

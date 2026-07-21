@@ -125,6 +125,58 @@ python3 -B lh_runtime/goal_loop_run.py \
 「完成」只由 committed canary / lamp 證明；模型輸出永不構成驗收。
 驗收失敗、依賴斷裂、scope 擴張一律轉 `human_required`，由人接手。
 
+
+## 接你的專案：Operator quickstart
+
+把 LH2 接上你真實專案的完整順序（全部離線可驗證到第 4 步）：
+
+### A. 寫 campaign（工作單位）
+
+Contract 的 `campaign.stages[]` 每個 stage 是一個 bounded 工作單位：`goal`（must_have/must_not）、
+`allowed_paths`（diff 越界即 value RED）、`acceptance_lamp`（驗收燈）、`max_attempts`、
+`next_stage_id`（多 stage 自動接跑）。
+
+**燈的四條鐵律**（寫錯等於沒有驗收）：
+1. base 上必須是紅的——綠-on-base 表示工作已完成，引擎會以 precheck $0 直通，不會叫模型。
+2. deterministic、環境無關——路徑用絕對或 repo 相對，不依賴 PATH 裡的特定 venv、不觸網。
+3. 燈綠必須是「工作完成才成立」的正向證據，不是「沒有報錯」。
+4. 驗證器自身出錯（讀不到、缺依賴）必須非零退出——錯誤不能經任何 shell 邏輯變綠。
+
+### B. 下指令（goal 入庫）
+
+```bash
+python3 -B lh_runtime/command_ingress.py --goal-store /path/to/goals \
+  --source operator --event-type manual_intent --event-id cmd-1 \
+  --payload '{"campaign_id":"example-campaign","stage_id":"stage-1","intent":"..."}'
+```
+
+也可以讓 contract 的 `standing_intents` 每天自動發（daily health check 模式）。
+
+### C. 跑 driver
+
+```bash
+python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --execute \
+  --max-cycles 12 --idle-limit 2
+```
+
+鏈路：intent → admission → disposable clone 執行 → 燈 + value gate → receipt →
+（多 stage 時）自動派生下一 stage。`--status-snapshot-out` 給即時狀態投影；
+cron/systemd timer 定期呼叫同一指令即成常駐（每次都是有界 session，重啟可續）。
+
+### D. 讀結果
+
+- `platform_status.json`：runs/goals 狀態、成本、driver heartbeat 與 stale 判定。
+- `runs/artifacts/<run_id>/<attempt>/`：receipt、diff、verifier 輸出、usage——完整證據鏈。
+- MCP（read-only）：`python3 -B lh_runtime/mcp_server.py --run-store ... --knowledge-store ...`。
+
+### E. 進階：draft-PR 模式
+
+Stage 宣告 `external_verdict`（無本地燈）+ contract 的 `external_verdict.adapter`
+（github_pr）：引擎把 diff 推到你 repo 的 `lh/*` branch 並開 **draft PR**（body 帶證據鏈），
+再用 GitHub CI 結論推進 run。token 用 fine-grained PAT（單一 repo、Contents RW、
+Pull requests RW、Actions R），放環境變數 `LH_GITHUB_TOKEN`，不進任何檔案。
+**merge 永遠是人**——引擎只到 draft PR。
+
 ## License
 
 [MIT](LICENSE) — copyright 2026 Loop Hybrid contributors.
