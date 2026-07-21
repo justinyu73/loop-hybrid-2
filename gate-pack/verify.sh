@@ -68,6 +68,8 @@ run_gate lh-live-smoke python3 -B lh_runtime/live_smoke_canary.py || exit $?
 run_gate lh-usage-void python3 -B lh_runtime/usage_void_canary.py || exit $?
 run_gate lh-standing-intent python3 -B lh_runtime/standing_intent_canary.py || exit $?
 run_gate lh-run-revival python3 -B lh_runtime/revival_canary.py || exit $?
+run_gate lh-github-pr-adapter python3 -B lh_runtime/github_pr_adapter_canary.py || exit $?
+run_gate lh-authority-surface python3 -B lh_runtime/s1_canary.py || exit $?
 run_gate lh-evidence-integrity python3 -B lh_runtime/evidence_integrity_canary.py || exit $?
 run_gate lh-b7-live-smoke python3 -B lh_runtime/b7_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-codex-usage python3 -B lh_runtime/codex_usage_canary.py || exit $?

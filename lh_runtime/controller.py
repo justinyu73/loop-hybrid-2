@@ -273,23 +273,45 @@ class LoopController:
                     raise ValueError("model runner must return a dict with a bounded summary")
             except Exception as exc:
                 provider = {"summary": "model invocation failed", "failure": f"{type(exc).__name__}: {exc}"}
-            diff = self._run(["git", "-C", str(workspace), "diff", "--binary"], cwd=None, budget=budget).stdout
-            diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", diff, budget)
+            # Stage everything first so new/untracked files the executor created
+            # appear in the diff — a plain `git diff` omits them, which would
+            # hand the external adapter an empty patch for a real new-file change.
+            add = self._run(["git", "-C", str(workspace), "add", "-A"], cwd=None, budget=budget)
+            diff = self._run(["git", "-C", str(workspace), "diff", "--cached", "--binary"], cwd=None, budget=budget)
+            staging_error = self._staging_error(add, diff)
+            diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", diff.stdout, budget)
             provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(provider, sort_keys=True), budget)
             base_receipt = {"schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
                             "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": run["base_revision"]},
                             "provider": {"summary": provider["summary"], "artifact": provider_ref}, "diff": diff_ref}
+            dispatch_error: str | None = None
             if "failure" in provider:
+                dispatch_error = provider["failure"]
+            elif staging_error is not None:
+                dispatch_error = staging_error
+            if dispatch_error is not None:
                 run_after = self.store.get_run(run_id)
                 state = "stopped" if ordinal >= run_after["max_attempts"] else "retry_pending"
-                receipt = {**base_receipt, "verification": {"mode": "external_async", "dispatched": False, "reason": provider["failure"]}}
+                receipt = {**base_receipt, "verification": {"mode": "external_async", "dispatched": False, "reason": dispatch_error}}
                 receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True), budget)
                 if not self.store.finish_attempt(run_id, ordinal, state=state, receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"], fence=fence):
                     return {"status": "fence_rejected", "run_id": run_id, "attempt": ordinal, "fence": fence}
                 return {"status": state, "run_id": run_id, "attempt": ordinal}
             op_key = eap.operation_key(run_id, action_id, diff_ref["digest"])
-            dispatched = ev.dispatch_external(verdict_store, action_ledger, adapter, run_id=run_id, op_key=op_key,
-                                              request={"diff_digest": diff_ref["digest"], "workspace_ref": workspace_ref, "action_id": action_id}, at=time.time())
+            try:
+                dispatched = ev.dispatch_external(verdict_store, action_ledger, adapter, run_id=run_id, op_key=op_key,
+                                                  request={"diff_digest": diff_ref["digest"], "workspace_ref": workspace_ref, "action_id": action_id}, at=time.time())
+            except Exception as exc:
+                # An adapter failure is an attempt failure, not a driver crash:
+                # record it on the receipt and let retry/stopped semantics decide.
+                run_after = self.store.get_run(run_id)
+                state = "stopped" if ordinal >= run_after["max_attempts"] else "retry_pending"
+                reason = f"external dispatch failed: {type(exc).__name__}: {exc}"
+                receipt = {**base_receipt, "verification": {"mode": "external_async", "dispatched": False, "reason": reason[:500]}}
+                receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True), budget)
+                if not self.store.finish_attempt(run_id, ordinal, state=state, receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"], fence=fence):
+                    return {"status": "fence_rejected", "run_id": run_id, "attempt": ordinal, "fence": fence}
+                return {"status": state, "run_id": run_id, "attempt": ordinal}
             receipt = {**base_receipt, "verification": {"mode": "external_async", "dispatched": True, "op_key": op_key, "external": dispatched["external"]}}
             receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True), budget)
             if not self.store.park_external_verdict(run_id, ordinal, receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"], fence=fence):

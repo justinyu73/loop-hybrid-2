@@ -79,10 +79,16 @@ def poll_and_resume(store: VerdictStore, source: ConclusionSource, *, at: float)
 
     A pending verdict leaves the run awaiting (no premature resolution). A success maps
     to verified; any other conclusion maps to retry_pending for the loop to retry.
+    A source ERROR (unavailable, 403, malformed) is not a verdict either: the run
+    stays parked and polling continues with the next one — a bad source must never
+    crash the driver.
     """
     resumed: list[dict[str, Any]] = []
     for run_id, op_key in store.awaiting():
-        verdict = source(op_key)
+        try:
+            verdict = source(op_key)
+        except Exception:  # a source failure is not a verdict; keep the run parked
+            continue
         if verdict is None:
             continue
         state = "verified" if verdict.get("conclusion") == "success" else "retry_pending"

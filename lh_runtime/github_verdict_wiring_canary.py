@@ -228,8 +228,8 @@ def main() -> int:
              and missing_transport.calls == 0 and missing_run_state == "awaiting_external_verdict",
              "detail": json.dumps({"error": missing_error, "driver_called": driver_called["value"],
                                    "transport_calls": missing_transport.calls, "run_state": missing_run_state})},
-            {"id": "missing-head-sha-is-not-a-verdict",
-             "ok": no_sha["error"] == "GitHubResponseInvalid" and no_sha["run_state"] == "awaiting_external_verdict"
+            {"id": "missing-head-sha-stays-parked-not-a-verdict",
+             "ok": no_sha["error"] is None and no_sha["run_state"] == "awaiting_external_verdict"
              and no_sha["transport"].calls == 0,
              "detail": json.dumps({"error": no_sha["error"], "run_state": no_sha["run_state"]})},
             {"id": "token-never-written-to-artifacts",

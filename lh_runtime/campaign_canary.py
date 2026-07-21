@@ -86,6 +86,25 @@ def main() -> int:
         human_campaign = dict(campaign())
         human_campaign["stages"] = [human_campaign["stages"][0], {**human_campaign["stages"][1], "stage_id": "stage-2", "human_only": True, "acceptance_lamp": None}]
         human_result = CampaignCompiler(human_campaign).advance(completion)
+        external_campaign = {
+            "schema": CAMPAIGN_SCHEMA,
+            "campaign_id": "campaign-g2-external",
+            "stages": [{
+                "stage_id": "stage-pr",
+                "goal": {"must_have": ["a change"]},
+                "allowed_paths": ["docs/"],
+                "allowed_side_effects": ["workspace", "artifact"],
+                "external_verdict": {"action_id": "open-pr"},
+                "max_attempts": 2,
+                "next_stage_id": None,
+            }],
+        }
+        external_stage = CampaignCompiler(external_campaign).compile()["stages"]["stage-pr"]
+        lampless_campaign = dict(external_campaign)
+        lampless_campaign["stages"] = [{k: v for k, v in external_campaign["stages"][0].items() if k != "external_verdict"}]
+        lampless_stage = CampaignCompiler(lampless_campaign).compile()["stages"]["stage-pr"]
+        malformed_external = dict(external_campaign)
+        malformed_external["stages"] = [{**external_campaign["stages"][0], "external_verdict": {"action_id": "  "}}]
         cases = [
             case("compiler-emits-versioned-envelope", compiled["schema"] == "lh-campaign-admission-envelope/v1" and compiled["digest"].startswith("sha256:"), compiled["digest"]),
             case("green-deterministic-stage-emits-stable-candidate", first["status"] == "candidate_ready" and second["candidate_key"] == first["candidate_key"] and first["event"]["idempotency_key"] == second["event"]["idempotency_key"], first["candidate_key"]),
@@ -93,6 +112,16 @@ def main() -> int:
             case("human-only-next-stage-does-not-queue", human_result["status"] == "human_required" and human_result["event"] is None, str(human_result)),
             case("non_green_lamp_does_not_queue", compiler.advance({**completion, "verification": {"exit_code": 1}})["status"] == "human_required", "human_required"),
             case("unknown_next_stage_is_rejected", _unknown_stage_rejected(), "unknown stage rejected"),
+            case("external-verdict-stage-passes-through-and-stays-eligible",
+                 external_stage["external_verdict"] == {"action_id": "open-pr"}
+                 and external_stage["acceptance_lamp"] is None
+                 and external_stage["auto_admission"]["eligible"],
+                 json.dumps(external_stage.get("external_verdict"))),
+            case("lampless-stage-without-external-verdict-stays-ineligible",
+                 not lampless_stage["auto_admission"]["eligible"]
+                 and "missing_acceptance_lamp" in lampless_stage["auto_admission"]["reasons"],
+                 json.dumps(lampless_stage["auto_admission"])),
+            case("malformed-external-verdict-rejected", _malformed_external_rejected(malformed_external), "malformed external_verdict rejected"),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     result = {
@@ -110,6 +139,14 @@ def main() -> int:
 def _unknown_stage_rejected() -> bool:
     broken = campaign()
     broken["stages"][0] = {**broken["stages"][0], "next_stage_id": "missing"}
+    try:
+        CampaignCompiler(broken)
+    except ValueError:
+        return True
+    return False
+
+
+def _malformed_external_rejected(broken: dict) -> bool:
     try:
         CampaignCompiler(broken)
     except ValueError:

@@ -161,6 +161,19 @@ def main() -> int:
         seed(worker_e.goal_store, goal_id="campaign-w2:sync-e", envelope=compiler.compile()["stages"]["stage-async"], event_key="w2-e-seed")
         sync_e = worker_e.tick(holder="w2-e", model=model, verdict_store=verdicts_e, conclusion_source=lambda op_key: None)
 
+        # The async diff must include NEW untracked files (staging before diff).
+        parked_diff = (root / "a-runs" / "artifacts" / run_a / "1" / "diff.patch").read_text(encoding="utf-8")
+
+        # Flow F: an adapter that raises is an attempt failure (retry), not a driver crash.
+        worker_f, verdicts_f, _unused = make_worker(root, "f", source, base, compiler)
+        exploding = worker_f.external_adapter
+        def boom_adapter(op_key, request):
+            raise RuntimeError("push failed fixture")
+        worker_f.external_adapter = type("Boom", (), {"perform": staticmethod(boom_adapter)})()
+        seed(worker_f.goal_store, goal_id="campaign-w2:async-f", envelope=async_envelope(compiler), event_key="w2-f-seed")
+        exploded_f = worker_f.tick(holder="w2-f", model=model, verdict_store=verdicts_f, conclusion_source=lambda op_key: None)
+        run_f_state = RunStore(root / "f-runs").get_run(exploded_f["run"]["run_id"])["state"] if exploded_f.get("run") else None
+
         cases = [
             case("async-envelope-parks-run",
                  parked_a["run"]["status"] == "awaiting_external_verdict"
@@ -191,6 +204,14 @@ def main() -> int:
             case("sync-envelope-still-takes-local-verifier",
                  sync_e["run"]["status"] == "verified" and adapter_e.calls == 0 and verdicts_e.awaiting() == [],
                  str(sync_e["run"])),
+            case("async-diff-includes-new-untracked-files",
+                 "src/out.txt" in parked_diff and "new file" in parked_diff,
+                 parked_diff[:200]),
+            case("adapter-failure-is-retry-not-driver-crash",
+                 exploded_f["run"]["status"] == "retry_pending"
+                 and run_f_state == "retry_pending"
+                 and verdicts_f.awaiting() == [],
+                 str(exploded_f["run"])),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({

@@ -73,6 +73,14 @@ def resolve_project(contract_path: str | Path) -> dict[str, Any]:
             if not isinstance(external_verdict.get(field), str) or not external_verdict[field].strip():
                 raise SystemExit(f"contract.external_verdict.{field} must be a non-empty string")
         run_kwargs["github_verdict"] = {field: external_verdict[field].strip() for field in ("owner", "repo", "workflow")}
+        adapter = external_verdict.get("adapter")
+        if adapter is not None:
+            if not isinstance(adapter, dict) or adapter.get("type") != "github_pr":
+                raise SystemExit("contract.external_verdict.adapter must be an object with type 'github_pr'")
+            for field in ("owner", "repo", "base_branch"):
+                if not isinstance(adapter.get(field), str) or not adapter[field].strip():
+                    raise SystemExit(f"contract.external_verdict.adapter.{field} must be a non-empty string")
+            run_kwargs["github_pr_adapter"] = {field: adapter[field].strip() for field in ("owner", "repo", "base_branch")}
     return {"project_id": contract["project_id"], "run_kwargs": run_kwargs}
 
 

@@ -128,12 +128,22 @@ class CampaignCompiler:
         reasons: list[str] = []
         if human_only:
             reasons.append("human_only_stage")
-        if lamp is None:
+        # W2 contract surface: a stage may declare an external async verdict
+        # instead of a local lamp. The compiled envelope carries it through so
+        # admission (which waives the lamp for a well-formed external_verdict)
+        # and worker dispatch can see it; without this pass-through the declared
+        # field was silently dropped at compile time.
+        external_verdict = stage.get("external_verdict")
+        if external_verdict is not None:
+            if not isinstance(external_verdict, dict) or not isinstance(external_verdict.get("action_id"), str) or not external_verdict["action_id"].strip():
+                raise ValueError(f"{stage_id}.external_verdict must be an object with a non-empty action_id")
+            external_verdict = {"action_id": external_verdict["action_id"].strip()}
+        if lamp is None and external_verdict is None:
             reasons.append("missing_acceptance_lamp")
         forbidden = sorted(set(allowed_side_effects) & FORBIDDEN_SIDE_EFFECTS)
         if forbidden:
             reasons.append("forbidden_side_effect:" + ",".join(forbidden))
-        return {
+        compiled = {
             "schema": ENVELOPE_SCHEMA,
             "campaign_id": self.campaign_id,
             "stage_id": stage_id,
@@ -146,6 +156,9 @@ class CampaignCompiler:
             "next_stage_id": stage.get("next_stage_id"),
             "auto_admission": {"eligible": not reasons, "reasons": reasons},
         }
+        if external_verdict is not None:
+            compiled["external_verdict"] = external_verdict
+        return compiled
 
     def compile(self) -> dict[str, Any]:
         return json.loads(json.dumps(self.envelope, ensure_ascii=False, sort_keys=True))

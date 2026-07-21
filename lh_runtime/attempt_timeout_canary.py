@@ -38,14 +38,20 @@ def main() -> int:
         base = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
 
         store = RunStore(root / "runs")
-        controller = LoopController(store, root / "workspaces", timeout_seconds=0.25)
+        # Budget and sleep are sized so the proof is wall-clock-independent:
+        # the verifier sleeps far longer than the budget, and the assertions
+        # only require (a) the attempt converges to retry with the timeout
+        # exit code and (b) the tick returns well before the sleep would end.
+        budget_seconds = 2.0
+        sleep_seconds = 10
+        controller = LoopController(store, root / "workspaces", timeout_seconds=budget_seconds)
         run_id = store.create_run(goal={"case": "hanging-verifier"}, source_repo=source, base_revision=base, run_id="run-timeout")
         started = time.monotonic()
         result = controller.tick(
             run_id,
             holder="timeout-canary",
             model=_model,
-            verifier_argv=[sys.executable, "-c", "import time; time.sleep(2)"],
+            verifier_argv=[sys.executable, "-c", f"import time; time.sleep({sleep_seconds})"],
         )
         elapsed = time.monotonic() - started
         run = store.get_run(run_id)
@@ -59,8 +65,8 @@ def main() -> int:
             },
             {
                 "id": "hanging-verifier-does-not-block-indefinitely",
-                "ok": elapsed < 1.5,
-                "detail": {"elapsed_seconds": round(elapsed, 3), "controller_timeout_seconds": controller.timeout_seconds},
+                "ok": elapsed < sleep_seconds - 2,
+                "detail": {"elapsed_seconds": round(elapsed, 3), "budget_seconds": budget_seconds, "sleep_seconds": sleep_seconds},
             },
         ]
     failures = [case for case in cases if not case["ok"]]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -21,8 +22,10 @@ from typing import Any, Callable, Mapping
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import cli_agent_executor as executors
+import external_action_port as eap
 import external_verdict as ev
 import github_conclusion_source as ghc
+import github_pr_adapter as gpa
 import grill_loop
 import project_binding
 import turning_point as tp
@@ -69,6 +72,8 @@ def build_worker(
     base_revision: str,
     executor_timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     grill_runner: grill_loop.GrillRunner | None = None,
+    action_ledger: eap.ActionLedger | None = None,
+    external_adapter: eap.ExternalAdapter | None = None,
 ) -> GoalLoopWorker:
     runs = RunStore(Path(run_store_root))
     campaign_id = campaign["campaign_id"]
@@ -79,7 +84,36 @@ def build_worker(
         compilers={campaign_id: CampaignCompiler(campaign)},
         execution_context={campaign_id: {"source_repo": Path(source_repo), "base_revision": base_revision}},
         grill_runner=grill_runner,
+        action_ledger=action_ledger,
+        external_adapter=external_adapter,
     )
+
+
+def build_pr_adapter(
+    github_pr_adapter: dict[str, str],
+    *,
+    run_store_root: str | Path,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[eap.ActionLedger, gpa.GitHubPrAdapter]:
+    """R1: construct the durable action ledger and the draft-PR adapter.
+
+    The ledger lives under the run store root (at-most-once survives
+    restarts). The adapter's token comes from the environment only; when it
+    is absent the constructor raises before any git or API call. The remote
+    URL defaults to github.com and can be overridden for fixtures or SSH
+    remotes via ``LH_GITHUB_GIT_REMOTE``.
+    """
+    values = os.environ if environ is None else environ
+    ledger = eap.ActionLedger(Path(run_store_root) / "action-ledger.sqlite3")
+    adapter = gpa.GitHubPrAdapter(
+        owner=github_pr_adapter["owner"],
+        repo=github_pr_adapter["repo"],
+        base_branch=github_pr_adapter["base_branch"],
+        run_store=RunStore(Path(run_store_root)),
+        environ=values,
+        remote_url=values.get("LH_GITHUB_GIT_REMOTE") or None,
+    )
+    return ledger, adapter
 
 
 def build_github_verdict(
@@ -137,6 +171,7 @@ def run(
     github_verdict: dict[str, str] | None = None,
     github_environ: Mapping[str, str] | None = None,
     github_transport: ghc.Transport | None = None,
+    github_pr_adapter: dict[str, str] | None = None,
     factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
     driver_fn: Callable[..., dict[str, Any]] = run_driver,
     sleep_fn: Callable[[float], None] | None = None,
@@ -185,6 +220,12 @@ def run(
     model = resolve_executor(executor, execute=execute, timeout_seconds=executor_timeout_seconds, factory_overrides=factory_overrides)
     if model is None:
         return {"mode": "dry_run", "invoked": False, "plan": plan}
+    action_ledger: eap.ActionLedger | None = None
+    external_adapter: gpa.GitHubPrAdapter | None = None
+    if github_pr_adapter is not None:
+        # R1: a missing token raises here — before the loop starts and before
+        # any git or API call — never mid-action.
+        action_ledger, external_adapter = build_pr_adapter(github_pr_adapter, run_store_root=run_store_root, environ=github_environ)
     grill_runner: grill_loop.GrillRunner | None = None
     if judge_executor is not None:
         factories = {**EXECUTORS, **(factory_overrides or {})}
@@ -211,6 +252,8 @@ def run(
         base_revision=base_revision,
         executor_timeout_seconds=executor_timeout_seconds,
         grill_runner=grill_runner,
+        action_ledger=action_ledger,
+        external_adapter=external_adapter,
     )
     startup_external_resumed = []
     if verdict_store is not None and conclusion_source is not None:

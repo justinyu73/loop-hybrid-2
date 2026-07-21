@@ -53,7 +53,44 @@ def _in_scope(path: str, allowed_paths: list[str]) -> bool:
     return False
 
 
-def value_verdict(*, exit_code: Any, diff_text: str | None, allowed_paths: list[str], precheck: bool = False, stderr_text: str | None = None) -> dict[str, Any]:
+# S1 authority surface: the engine must never modify its own acceptance
+# authority. A touched file under any of these is value-RED and routes to a
+# human via the existing value-gate path — enforced in code, not by convention.
+AUTHORITY_PREFIXES = ("gate-pack/", "docs/contracts/", ".github/workflows/")
+AUTHORITY_FILES = {"AGENTS.md"}
+CANARY_SUFFIX = "_canary.py"
+
+
+def _lamp_script_paths(lamp_argv: list[str] | None) -> list[str]:
+    """Repo-relative script paths referenced by the lamp's own argv (e.g.
+    ["sh", "gate-pack/verify.sh"] -> "gate-pack/verify.sh"). Flags, absolute
+    paths, and inline -c scripts carry no repo file."""
+    if not lamp_argv:
+        return []
+    paths: list[str] = []
+    for token in lamp_argv:
+        if not isinstance(token, str) or token.startswith("-") or token.startswith("/"):
+            continue
+        if "/" in token and " " not in token:
+            paths.append(token)
+    return paths
+
+
+def _authority_surface_reasons(touched: list[str], lamp_script_paths: list[str]) -> list[str]:
+    surface = set(lamp_script_paths)
+    reasons: list[str] = []
+    for path in touched:
+        if (
+            path in AUTHORITY_FILES
+            or path.endswith(CANARY_SUFFIX)
+            or any(path == prefix or path.startswith(prefix) for prefix in AUTHORITY_PREFIXES)
+            or path in surface
+        ):
+            reasons.append(f"authority surface touched: {path}")
+    return reasons
+
+
+def value_verdict(*, exit_code: Any, diff_text: str | None, allowed_paths: list[str], precheck: bool = False, stderr_text: str | None = None, lamp_argv: list[str] | None = None) -> dict[str, Any]:
     """Derive a value verdict from receipt evidence. Pure and deterministic."""
     reasons: list[str] = []
     if not isinstance(exit_code, int) or exit_code != 0:
@@ -80,6 +117,8 @@ def value_verdict(*, exit_code: Any, diff_text: str | None, allowed_paths: list[
         outside = [path for path in touched if not _in_scope(path, allowed_paths)]
         if outside:
             reasons.append(f"changed files outside the allowed scope: {outside}")
+    # S1: appended after the existing rules (order and strength unchanged).
+    reasons.extend(_authority_surface_reasons(touched, _lamp_script_paths(lamp_argv)))
     return {
         "schema": VERDICT_SCHEMA,
         "verdict": "GREEN" if not reasons else "RED",
@@ -183,7 +222,7 @@ def verdict_for_run(run_store: Any, run_id: str) -> dict[str, Any]:
     precheck = verification.get("precheck") is True
     diff_text = _read_ref_text(run_store, receipt.get("diff"))
     stderr_text = _read_ref_text(run_store, verification.get("stderr"))
-    verdict = value_verdict(exit_code=exit_code, diff_text=diff_text, allowed_paths=allowed_paths, precheck=precheck, stderr_text=stderr_text)
+    verdict = value_verdict(exit_code=exit_code, diff_text=diff_text, allowed_paths=allowed_paths, precheck=precheck, stderr_text=stderr_text, lamp_argv=_lamp_argv(run_store, run_id))
     problems = _consistency_problems(run_store, run_id, receipt, latest)
     if problems:
         verdict["reasons"] = verdict["reasons"] + problems
