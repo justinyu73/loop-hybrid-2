@@ -122,7 +122,7 @@ def main() -> int:
         lease_b = lease_goals.claim_event(lease_event["event_key"], "worker-b", seconds=60)
         lease_goals.release_event(lease_event["event_key"], "worker-a")
         cases = [
-            case("serial-worker-runs-seed-and-emits-next-event", first["status"] == "progress" and first["run"]["status"] == "verified" and first["terminal_after"]["status"] == "completed_with_next_event" and goals_after.get_event(first["terminal_after"]["derived_event_key"])["state"] == "active", str(first)),
+            case("serial-worker-runs-seed-and-emits-next-event", first["status"] == "progress" and first["run"]["status"] == "verified" and first["terminal_after"]["status"] == "completed_with_next_event" and goals_after.get_event(first["terminal_after"]["derived_event_key"])["state"] == "completed", str(first)),
             case("restart-claims-next-event-and-runs-it-once", second["status"] == "progress" and second["run"]["status"] == "verified" and goals_after.get_goal("campaign-g5:stage-2")["state"] == "completed" and runs_after.summary()["runs_by_state"].get("verified") == 2, str(second)),
             case("retry-pending-is_reused_by_restart", retry_first["run"]["status"] == "retry_pending" and retry_second["run"]["status"] == "retry_pending" and retry_first["run"]["run_id"] == retry_second["run"]["run_id"], str(retry_second)),
             case("startup-polls-external-verdict", polled["external_resumed"] == [{"run_id": verdict_run_id, "op_key": "op-g5-verdict", "conclusion": "success", "state": "verified"}], "external verdict resumed"),

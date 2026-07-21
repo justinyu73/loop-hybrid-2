@@ -299,16 +299,19 @@ class GoalLoopWorker:
                 # A re-issued command for a goal that already exists from a
                 # different source event must not crash the tick.  When the
                 # goal is already a candidate, proceed to admission with it;
-                # anything else (active/completed/conflicting payload) is a
-                # human decision.
+                # terminal goals (stopped/completed) revive as candidates;
+                # anything else (active/conflicting payload) is a human decision.
                 try:
                     existing = self.goal_store.get_goal(candidate["goal_id"])
                 except KeyError:
                     existing = None
-                if existing is not None and existing["state"] == "stopped":
-                    # Re-issued command for a stopped goal: revive it as a
+                if existing is not None and existing["state"] in {"stopped", "completed"}:
+                    # Re-issued command for a terminal goal: revive it as a
                     # candidate; admission decides revision-bump vs cap.
-                    self.goal_store.transition_goal(existing["goal_id"], "candidate", expected_state="stopped")
+                    # completed mirrors stopped (daily standing intents recur
+                    # after a successful cycle — the fresh run comes from the
+                    # W9g verified-run bump at admission).
+                    self.goal_store.transition_goal(existing["goal_id"], "candidate", expected_state=existing["state"])
                 elif existing is None or existing["state"] != "candidate":
                     result = {
                         **reduced,
@@ -331,7 +334,13 @@ class GoalLoopWorker:
                 envelope=envelope,
             )
             if admission["status"] in {"active", "reused"}:
-                return {**reduced, "status": admission["status"], "admission": admission, "stored": stored}
+                # The candidate is consumed: a successful admission completes
+                # its source event. Leaving it pending re-processes the same
+                # candidate every tick — which, now that terminal goals can be
+                # revived (W9g/W9h), would re-admit and re-run forever.
+                result = {**reduced, "status": admission["status"], "admission": admission, "stored": stored}
+                self.goal_store.transition_event(event_key, "completed", result=result)
+                return result
             result = {**reduced, "status": "human_required", "admission": admission}
             self.goal_store.transition_event(event_key, "human_required", result=result)
             return result

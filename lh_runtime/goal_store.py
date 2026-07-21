@@ -40,7 +40,10 @@ ALLOWED_TRANSITIONS = {
     "stale": {"human_required"},
     "conflict": {"human_required"},
     "human_required": {"candidate", "active", "stopped"},
-    "completed": set(),
+    # A completed goal may be re-issued by a NEW command (e.g. the daily
+    # standing intent): revive as candidate; admission decides the fresh
+    # revision/run. Replay dedup happens upstream at record_event.
+    "completed": {"candidate"},
     "stopped": {"candidate", "human_required"},
 }
 

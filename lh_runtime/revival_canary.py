@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Committed W9g smoke: verified-run revival starts a fresh cycle.
+"""Committed W9g/W9h smoke: terminal-run revival starts a fresh cycle.
 
 Live evidence (2026-07-21, W9f day 1): a revived stopped goal whose linked
 run was VERIFIED got the old run re-linked — admission only revision-bumped
 on stopped runs — so the next tick consumed the stale receipt instead of
-re-running the lamp. Proves, offline, that admission now bumps the revision
-and creates a NEW run for a verified terminal run (never re-linking it),
-that success-cycle bumps skip the fail-loop revision cap (beyond
-MAX_GOAL_REVISIONS still admitted), that stopped-run bumps keep the cap,
-that an active goal with a queued run is untouched, and that the revived
-run really dispatches and re-runs its lamp.
+re-running the lamp. Day 2 then showed the twin gap (W9h): a COMPLETED goal
+hit the worker's re-admission guard before admission could bump at all.
+Proves, offline, that admission bumps the revision and creates a NEW run for
+a verified terminal run (never re-linking it), that success-cycle bumps skip
+the fail-loop revision cap, that stopped-run bumps keep the cap, that an
+active goal with a queued run is untouched, that the revived run really
+dispatches and re-runs its lamp, and that a completed goal revives the same
+way (daily recurrence after a success).
 """
 from __future__ import annotations
 
@@ -184,6 +186,41 @@ def main() -> int:
         run_e2_state = runs_e.get_run(run_e2)["state"] if run_e2 else None
         goal_e = goals_e.get_goal(GOAL_ID)["state"]
 
+        # Completed-goal revival (W9h, day-2 recurrence): a COMPLETED goal
+        # re-issued by a new command revives as candidate and gets a fresh run
+        # (the worker guard accepts completed, admission bumps via W9g).
+        runs_f = RunStore(root / "runs-f")
+        compiler_f = CampaignCompiler(_campaign())
+        worker_f = GoalLoopWorker(
+            goal_store=GoalStore(root / "goals-f"),
+            run_store=runs_f,
+            controller=LoopController(runs_f, root / "workspaces-f"),
+            compilers={CAMPAIGN_ID: compiler_f},
+            execution_context={CAMPAIGN_ID: {"source_repo": source, "base_revision": base}},
+        )
+        goals_f = worker_f.goal_store
+        env_f = compiler_f.compile()["stages"][STAGE_ID]
+        goals_f.record_event(event_id="w9h-e2e", idempotency_key="w9h-e2e", source="manual_intent", event_type="goal_candidate", payload={
+            "candidate": {"goal_id": GOAL_ID, "campaign_id": CAMPAIGN_ID, "stage_id": STAGE_ID,
+                          "goal": {"feature_contract": STAGE_ID, "admission_envelope": env_f}}
+        })
+        goals_f.create_candidate("w9h-e2e", goal_id=GOAL_ID, campaign_id=CAMPAIGN_ID, stage_id=STAGE_ID,
+                                 goal={"feature_contract": STAGE_ID, "admission_envelope": env_f})
+        goals_f.transition_event("w9h-e2e", "completed")
+        bridge_f = GoalAdmissionBridge(goals_f, runs_f)
+        day1_f = bridge_f.admit(GOAL_ID, source_repo=source, base_revision=base, envelope=env_f)
+        run_f1 = day1_f["run_id"]
+        _finish_verified(runs_f, run_f1)
+        goals_f.transition_goal(GOAL_ID, "completed", expected_state="active")
+        goals_f.record_event(event_id="w9h-e2e-day2", idempotency_key="w9h-e2e-day2", source="standing_intent", event_type="manual_intent",
+                             payload={"campaign_id": CAMPAIGN_ID, "stage_id": STAGE_ID, "intent": "daily check"})
+        calls_f: list[dict] = []
+        worker_f.tick(holder="w9h", model=_fixed_model(calls_f))
+        tick_f = worker_f.tick(holder="w9h", model=_fixed_model(calls_f))
+        run_f2 = tick_f.get("run", {}).get("run_id")
+        run_f2_state = runs_f.get_run(run_f2)["state"] if run_f2 else None
+        goal_f = goals_f.get_goal(GOAL_ID)["state"]
+
         cases = [
             {"id": "verified-old-run-is-never-re-linked",
              "ok": revived["status"] == "active" and revived["run_id"] != old_run_id
@@ -208,6 +245,11 @@ def main() -> int:
              and runs_e.get_run(run_e1)["state"] == "verified",
              "detail": json.dumps({"day1_run": run_e1[:20], "day2_run": (run_e2 or "")[:20],
                                    "day2_state": run_e2_state, "goal": goal_e, "model_calls": len(calls)})},
+            {"id": "completed-goal-revives-and-reruns",
+             "ok": run_f2 is not None and run_f2 != run_f1 and run_f2_state == "verified"
+             and goal_f == "completed" and len(calls_f) == 1,
+             "detail": json.dumps({"day1_run": run_f1[:20], "day2_run": (run_f2 or "")[:20],
+                                   "day2_state": run_f2_state, "goal": goal_f, "model_calls": len(calls_f)})},
         ]
     failures = [{"id": case["id"], "detail": case["detail"]} for case in cases if not case["ok"]]
     print(json.dumps({
