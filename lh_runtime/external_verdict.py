@@ -39,9 +39,20 @@ class VerdictStore:
         return conn
 
     def park(self, run_id: str, op_key: str, action: dict[str, Any], *, at: float) -> None:
+        """Park a run awaiting its external verdict.
+
+        A retry after a failure verdict re-parks the SAME run_id with a NEW
+        op_key (the new attempt's action). The row must therefore upsert:
+        reset to awaiting with the current round's op_key and timestamps.
+        An ignored re-park would leave the row resolved forever, and the run
+        would never be polled again (live-found gap).
+        """
         with self._connect() as conn:
-            conn.execute("INSERT OR IGNORE INTO verdicts(run_id, op_key, action_json, state, conclusion, dispatched_at, resolved_at) VALUES (?, ?, ?, 'awaiting_external_verdict', NULL, ?, NULL)",
-                         (run_id, op_key, json.dumps(action, sort_keys=True), at))
+            conn.execute(
+                "INSERT INTO verdicts(run_id, op_key, action_json, state, conclusion, dispatched_at, resolved_at) VALUES (?, ?, ?, 'awaiting_external_verdict', NULL, ?, NULL) "
+                "ON CONFLICT(run_id) DO UPDATE SET op_key = excluded.op_key, action_json = excluded.action_json, state = 'awaiting_external_verdict', conclusion = NULL, dispatched_at = excluded.dispatched_at, resolved_at = NULL",
+                (run_id, op_key, json.dumps(action, sort_keys=True), at),
+            )
             conn.execute("COMMIT")
 
     def awaiting(self) -> list[tuple[str, str]]:

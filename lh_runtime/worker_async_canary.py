@@ -143,6 +143,10 @@ def main() -> int:
         op_key_b = parked_b["run"].get("op_key")
         failed_b = worker_b.tick(holder="w2-b", model=model, verdict_store=verdicts_b,
                                  conclusion_source=lambda op_key: {"conclusion": "failure"} if op_key == op_key_b else None)
+        # After the retry re-parks, the run must be pollable AGAIN (upsert park).
+        awaiting_b_after_retry = verdicts_b.awaiting()
+        second_b = worker_b.tick(holder="w2-b", model=model, verdict_store=verdicts_b,
+                                 conclusion_source=lambda op_key: {"conclusion": "success"} if op_key == op_key_b else None)
 
         # Flow C: executor failure retries without parking.
         worker_c, verdicts_c, adapter_c = make_worker(root, "c", source, base, compiler)
@@ -193,6 +197,10 @@ def main() -> int:
                  and failed_b["run"]["status"] == "awaiting_external_verdict"
                  and failed_b["run"]["attempt"] == 2,
                  f"calls={adapter_b.calls} run={failed_b['run']}"),
+            case("re-parked-run-is-polled-again-and-resolves",
+                 awaiting_b_after_retry == [(run_b, op_key_b)]
+                 and second_b["external_resumed"] == [{"run_id": run_b, "op_key": op_key_b, "conclusion": "success", "state": "verified"}],
+                 f"awaiting={awaiting_b_after_retry} resumed={second_b['external_resumed']}"),
             case("executor-failure-retries-without-park",
                  failed_c["run"]["status"] == "retry_pending"
                  and verdicts_c.awaiting() == []
@@ -219,8 +227,6 @@ def main() -> int:
         "total": len(cases), "blocking_failures": failures,
         "verification": {"command": "python3 -B lh_runtime/worker_async_canary.py", "adapter": "fixture only, no network"},
         "known_gaps_open": [
-            "A retried async run re-parks in run_store, but VerdictStore.park is INSERT OR IGNORE, "
-            "so the re-parked run is not re-polled; pre-existing controller.tick_async limitation, out of W2 scope.",
             "github_conclusion_source remains Deferred; canary uses a fixture conclusion source.",
         ],
     }, ensure_ascii=False, indent=2))
