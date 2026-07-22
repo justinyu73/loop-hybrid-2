@@ -42,7 +42,9 @@ EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
     "codex": executors.CODEX,
     "claude": executors.CLAUDE,
     "kimi": executors.KIMI,
+    "orca": executors.ORCA,
 }
+JUDGE_EXECUTORS = {"codex", "claude", "kimi"}
 
 
 def resolve_executor(
@@ -50,6 +52,7 @@ def resolve_executor(
     *,
     execute: bool,
     timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
+    provider_binding: dict[str, str] | None = None,
     factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
 ) -> ModelRunner | None:
     """Fail closed on an unknown executor (even in dry-run). Return the real
@@ -57,9 +60,16 @@ def resolve_executor(
     factories = {**EXECUTORS, **(factory_overrides or {})}
     if name not in factories:
         raise ValueError(f"unknown executor: {name!r}; choose one of {sorted(factories)}")
+    if provider_binding is not None:
+        if name != "orca":
+            raise ValueError("provider_binding is currently supported only with executor='orca'")
+        executors._validate_provider_binding(provider_binding, agent=os.environ.get("LH_ORCA_AGENT", "codex"))
     if not execute:
         return None
-    return factories[name](timeout_seconds=timeout_seconds)
+    kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
+    if provider_binding is not None:
+        kwargs["provider_binding"] = provider_binding
+    return factories[name](**kwargs)
 
 
 def build_worker(
@@ -177,6 +187,7 @@ def run(
     sleep_fn: Callable[[float], None] | None = None,
     judge_executor: str | None = None,
     judge_model: str | None = None,
+    executor_binding: dict[str, str] | None = None,
     turning_point: TurningPointRunner | None = None,
     quota_reader: Callable[[], dict[str, Any] | None] | None = None,
     daily_soft_cap_usd: float | None = 2.0,
@@ -200,6 +211,11 @@ def run(
         "run_store": str(run_store_root),
         "judge_executor": judge_executor,
         "judge_model": judge_model,
+        "executor_binding": (
+            {key: executor_binding[key] for key in ("runner", "model") if key in executor_binding}
+            if isinstance(executor_binding, dict)
+            else None
+        ),
         "gates": {
             "pause_flag": str(pause_flag) if pause_flag is not None else None,
             "max_cycles": max_cycles,
@@ -217,7 +233,13 @@ def run(
         },
         "boundary": "executor runs in a disposable clone; output stops at a PR; push/merge/promotion are human/project-owned",
     }
-    model = resolve_executor(executor, execute=execute, timeout_seconds=executor_timeout_seconds, factory_overrides=factory_overrides)
+    model = resolve_executor(
+        executor,
+        execute=execute,
+        timeout_seconds=executor_timeout_seconds,
+        provider_binding=executor_binding,
+        factory_overrides=factory_overrides,
+    )
     if model is None:
         return {"mode": "dry_run", "invoked": False, "plan": plan}
     action_ledger: eap.ActionLedger | None = None
@@ -229,8 +251,8 @@ def run(
     grill_runner: grill_loop.GrillRunner | None = None
     if judge_executor is not None:
         factories = {**EXECUTORS, **(factory_overrides or {})}
-        if judge_executor not in factories:
-            raise ValueError(f"unknown judge_executor: {judge_executor!r}; choose one of {sorted(factories)}")
+        if judge_executor not in JUDGE_EXECUTORS:
+            raise ValueError(f"unknown judge_executor: {judge_executor!r}; choose one of {sorted(JUDGE_EXECUTORS)}")
         turning_point = tp.make_cli_judge(
             lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
             name=judge_executor,
@@ -289,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the autonomous driver with a real coding-agent executor (opt-in)")
     parser.add_argument("--executor", default=None, choices=sorted(EXECUTORS),
                         help="coding executor; defaults to the contract's models.execute when --contract is used")
-    parser.add_argument("--judge-executor", default=None, choices=sorted(EXECUTORS),
+    parser.add_argument("--judge-executor", default=None, choices=sorted(JUDGE_EXECUTORS),
                         help="optional turning-point judge executor (M1 model routing); defaults to the contract's models.judge")
     parser.add_argument("--judge-model", default=None, help="optional model id pinned for the judge (e.g. a reasoning-tier model)")
     parser.add_argument("--execute", action="store_true", help="actually invoke the executor; omit for a dry-run plan")

@@ -164,6 +164,22 @@ class RunStore:
             row = conn.execute("SELECT receipt_ref, receipt_digest FROM attempts WHERE run_id = ? AND receipt_ref IS NOT NULL ORDER BY ordinal DESC LIMIT 1", (run_id,)).fetchone()
         return None if row is None else dict(row)
 
+    def latest_attempt(self, run_id: str) -> dict[str, Any] | None:
+        """Read the newest attempt metadata without exposing the SQLite store.
+
+        Command/report adapters use this projection to correlate a goal with
+        the durable run/attempt boundary.  It is intentionally read-only;
+        attempt ownership, fencing, and receipt writes remain RunStore's
+        responsibility.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT run_id, ordinal, state, workspace_ref, fence, receipt_ref, receipt_digest, created_at, finished_at "
+                "FROM attempts WHERE run_id = ? ORDER BY ordinal DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def usage_corrections(self) -> list[dict[str, Any]]:
         """List the human-recorded usage voids (W9e), oldest first."""
         with self._connect() as conn:

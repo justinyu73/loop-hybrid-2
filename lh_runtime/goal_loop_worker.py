@@ -332,6 +332,7 @@ class GoalLoopWorker:
                 source_repo=context.get("source_repo", ""),
                 base_revision=context.get("base_revision", ""),
                 envelope=envelope,
+                event_key=event_key,
             )
             if admission["status"] in {"active", "reused"}:
                 # The candidate is consumed: a successful admission completes

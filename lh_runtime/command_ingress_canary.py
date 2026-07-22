@@ -73,6 +73,48 @@ def main() -> int:
             case("status-reads-event-and-goal-state", status_bound["schema"] == "lh-command-status/v1" and status_bound["event_state"] == "candidate" and status_bound["goal_id"] == "goal-4" and status_bound["goal_state"] == "candidate", str(status_bound)),
             case("status-of-unknown-key-is-unknown-not-error", status_unknown["event_state"] == "unknown" and status_unknown["goal_id"] is None and status_unknown["goal_state"] is None, str(status_unknown)),
         ]
+
+        submit_command(goal_store, source="example-commander", event_type="manual_intent", event_id="evt-chain", payload=payload)
+        derived = goal_store.record_event(
+            event_id="derived-evt-chain", idempotency_key="intent-derived:evt-chain",
+            source="manual_intent", event_type="goal_candidate",
+            payload={"source_event_key": "evt-chain"},
+        )
+        goal_store.transition_event("evt-chain", "completed", result={"derived_event_key": derived["event_key"]})
+        goal_store.create_candidate("intent-derived:evt-chain", goal_id="goal-chain", campaign_id="camp-1", stage_id="s1", goal={"lamp": "gate-pack"})
+        run_id = run_store.create_run(goal={"goal_id": "goal-chain", "admission_envelope": {"allowed_paths": []}}, source_repo=root, base_revision="base", run_id="run-chain")
+        goal_store.activate_with_run("goal-chain", run_id, event_key="intent-derived:evt-chain")
+        ordinal = run_store.begin_attempt(run_id, "workspace://run-chain/1")
+        receipt_ref = run_store.write_artifact(run_id, ordinal, "receipt.json", json.dumps({
+            "schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
+            "workspace": {"ref": "workspace://run-chain/1", "disposable": True, "disposed": True, "base_revision": "base"},
+            "provider": {"summary": "canary", "artifact": {"ref": "artifacts/run-chain/1/provider.json", "digest": "sha256:" + "a" * 64}},
+            "usage": {"input_tokens": 3, "cached_input_tokens": 1, "output_tokens": 2, "total_tokens": 5},
+            "diff": {"ref": "artifacts/run-chain/1/diff.patch", "digest": "sha256:" + "b" * 64},
+            "verification": {"argv": ["true"], "exit_code": 0, "stdout": {"ref": "artifacts/run-chain/1/verifier.stdout", "digest": "sha256:" + "c" * 64}, "stderr": {"ref": "artifacts/run-chain/1/verifier.stderr", "digest": "sha256:" + "d" * 64}},
+        }, sort_keys=True))
+        run_store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"])
+        status_chain = command_status(goal_store, "evt-chain", run_store)
+        execution = status_chain["execution"]
+        cases += [
+            case("status-follows-derived-event-to-goal", status_chain["goal_id"] == "goal-chain" and execution["event_chain"] == ["evt-chain", "intent-derived:evt-chain"], str(status_chain)),
+            case("status-projects-lh-run-attempt-receipt", execution["run_id"] == "run-chain" and execution["attempt"] == 1 and execution["receipt"]["digest"] == receipt_ref["digest"], str(execution)),
+        ]
+
+        # A recurring/standing intent may revive a completed Goal through a
+        # new derived event.  Production admission passes that event key
+        # explicitly; status must follow the fresh command rather than the
+        # Goal's historical source event.
+        submit_command(goal_store, source="example-commander", event_type="manual_intent", event_id="evt-revive", payload=payload)
+        derived_revive = goal_store.record_event(
+            event_id="derived-evt-revive", idempotency_key="intent-derived:evt-revive",
+            source="manual_intent", event_type="goal_candidate",
+            payload={"candidate": {"goal_id": "goal-chain", "campaign_id": "camp-1", "stage_id": "s1", "goal": {"lamp": "gate-pack"}}, "source_event_key": "evt-revive"},
+        )
+        goal_store.transition_event("evt-revive", "completed", result={"derived_event_key": derived_revive["event_key"]})
+        goal_store.transition_event("intent-derived:evt-revive", "completed", result={"admission": {"goal_id": "goal-chain", "run_id": "run-chain"}})
+        status_revive = command_status(goal_store, "evt-revive", run_store)
+        cases.append(case("status-keeps-revived-command-correlation", status_revive["goal_id"] == "goal-chain" and status_revive["execution"]["run_id"] == "run-chain", str(status_revive)))
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({
         "check_id": "lh-command-ingress",

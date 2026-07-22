@@ -78,7 +78,7 @@ def main() -> int:
         source, base = _source_repo(root)
         camp = campaign()
 
-        presets_ok = set(EXECUTORS) == {"codex", "claude", "kimi"} \
+        presets_ok = set(EXECUTORS) == {"codex", "claude", "kimi", "orca"} \
             and executors.codex_argv("P") == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "P"] \
             and executors.claude_argv("P") == ["claude", "-p", "P", "--permission-mode", "bypassPermissions"] \
             and executors.kimi_argv("P") == ["kimi", "-p", "P"]
@@ -117,7 +117,7 @@ def main() -> int:
         "total": len(cases),
         "blocking_failures": failures,
         "known_gaps_open": [
-            "actually invoking codex/claude is a human live smoke; this gate injects a fake executor",
+            "actually invoking codex/claude/kimi or Orca is a human live smoke; this gate injects a fake executor",
             "GitHub PR adapter and promotion remain later/human-owned nodes",
         ],
     }, ensure_ascii=False, indent=2))

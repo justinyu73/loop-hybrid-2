@@ -61,6 +61,13 @@ def resolve_project(contract_path: str | Path) -> dict[str, Any]:
             if optional in models and not isinstance(models[optional], str):
                 raise SystemExit(f"contract.models.{optional} must be a string")
         run_kwargs["executor"] = models["execute"]
+        execute_binding = models.get("execute_binding")
+        if execute_binding is not None:
+            if not isinstance(execute_binding, dict) or set(execute_binding) != {"runner", "base_url", "model"}:
+                raise SystemExit("contract.models.execute_binding must contain exactly runner, base_url, and model")
+            if any(not isinstance(execute_binding.get(field), str) or not execute_binding[field].strip() for field in ("runner", "base_url", "model")):
+                raise SystemExit("contract.models.execute_binding fields must be non-empty strings")
+            run_kwargs["executor_binding"] = {field: execute_binding[field].strip() for field in ("runner", "base_url", "model")}
         if models.get("judge"):
             run_kwargs["judge_executor"] = models["judge"]
         if models.get("judge_model"):

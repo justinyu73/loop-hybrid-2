@@ -93,10 +93,13 @@ class GoalAdmissionBridge:
         source_repo: str | Path,
         base_revision: str,
         envelope: dict[str, Any],
+        event_key: str | None = None,
         verification_argv: list[str] | None = None,
         max_attempts: int | None = None,
     ) -> dict[str, Any]:
         goal_id = _text("goal_id", goal_id)
+        if event_key is not None:
+            event_key = _text("event_key", event_key)
         source_repo = Path(source_repo)
         base_revision = _text("base_revision", base_revision)
         goal = self.goal_store.get_goal(goal_id)
@@ -160,7 +163,11 @@ class GoalAdmissionBridge:
             run_id = _id("run-goal-", {"goal_id": goal_id, "revision_id": revision_id, "base_revision": pinned_revision, "envelope": envelope})
             run_goal["revision_id"] = revision_id
         self.run_store.create_run(goal=run_goal, source_repo=source_repo, base_revision=pinned_revision, max_attempts=attempts, run_id=run_id)
-        linked = self.goal_store.activate_with_run(goal_id, run_id)
+        # Preserve the command-to-goal correlation for recurring/revived
+        # goals.  Without the explicit event key, activate_with_run falls
+        # back to the goal's original source event, so a new standing intent
+        # can create a real Run while command-status still reports no goal.
+        linked = self.goal_store.activate_with_run(goal_id, run_id, event_key=event_key)
         return {
             "status": "reused" if goal["state"] == "active" else "active",
             "goal_id": goal_id,
