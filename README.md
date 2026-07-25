@@ -1,7 +1,7 @@
 # Loop Hybrid 2 中文說明
 
 Loop Hybrid 2（LH2）是一個**確定性 goal loop 引擎**：把核准過的目標（goal）變成可稽核的執行（run）。
-每一步可重播、每個驗收來自 committed check、一切不可逆操作留在人手上。
+每一步可重播、每個驗收來自 committed check；超出核准 Goal 權限的操作才回到人／專案。
 
 > English: see [README.en.md](README.en.md)
 
@@ -24,7 +24,9 @@ python3 -B lh_runtime/goal_loop_canary.py         # 完整 loop：seed→執行�
 - **Serial 單 holder worker**：同一時間只有一個 worker 推進 loop，狀態轉移確定性、可稽核。
 - **Disposable-clone executor**：每次嘗試都在一次性 workspace clone 裡執行，不污染原始碼樹。
 - **Committed canary 是驗收權威**：驗收 = repo 裡的可重跑檢查（`gate-pack/`、`lh_runtime/*_canary.py`），不是模型說了算。
-- **Promotion 永遠人持有**：push、merge、publish 不由 loop 執行。
+- **Goal-scoped authority**：人／專案核准 Goal、權限 envelope、停止條件與終驗；其內可依 contract
+  自動 commit、push `lh/*` branch，或在 committed merge gate 通過時 conditional merge。
+  公開發布、release 與產品終驗仍由人／專案持有。
 - **多模型分層**：contract 的 `models` 欄位讓執行用 coding CLI、判斷用推理 CLI，彼此獨立、可各自計價。
 
 ## 流程圖
@@ -175,7 +177,8 @@ Stage 宣告 `external_verdict`（無本地燈）+ contract 的 `external_verdic
 （github_pr）：引擎把 diff 推到你 repo 的 `lh/*` branch 並開 **draft PR**（body 帶證據鏈），
 再用 GitHub CI 結論推進 run。token 用 fine-grained PAT（單一 repo、Contents RW、
 Pull requests RW、Actions R），放環境變數 `LH_GITHUB_TOKEN`，不進任何檔案。
-**merge 永遠是人**——引擎只到 draft PR。
+預設止於 draft PR；只有 Project Runtime Contract 明確授予 `auto_merge`，且 committed
+merge gate 通過時，才允許 conditional merge。公開發布、release 與產品終驗不因此被授權。
 
 ## License
 
@@ -190,8 +193,10 @@ Pull requests RW、Actions R），放環境變數 `LH_GITHUB_TOKEN`，不進任�
   commit — never in your working tree. Do not point the engine at a repo you
   cannot afford to have an agent touch, and keep that boundary in mind before
   feeding it untrusted content (issues, external text).
-- **Promotion is always human-owned.** The loop never pushes, merges, or
-  publishes; it stops at evidence (receipts, diffs, PRs opened by a human).
+- **Authority is goal-scoped.** The loop may commit, push an `lh/*` branch, or
+  conditionally merge only when the approved Project Runtime Contract grants
+  it and the committed gate passes. Publication, release, and terminal product
+  acceptance remain project/human-owned.
 - **Credentials come from environment variables only** (`LH_CI_TOKEN`,
   `LH_GITHUB_TOKEN`) and are required to be absent-safe: a missing credential
   raises instead of degrading silently.

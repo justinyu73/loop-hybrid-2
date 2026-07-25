@@ -4,7 +4,8 @@
 
 Loop Hybrid 2 (LH2) is a deterministic goal-loop engine. It turns a ratified goal
 into audited runs: every step is replayable, every verdict comes from a
-committed check, and anything irreversible stays in human hands.
+committed check, and actions outside the ratified Goal envelope return to the
+project or human.
 
 ## Loop at a glance
 
@@ -41,8 +42,11 @@ clone can reproduce the same closed loop.
 - **Committed canaries as acceptance authority** — acceptance is a check script
   committed in the repo (`gate-pack/`, `lh_runtime/*_canary.py`), not a model's
   say-so.
-- **Promotion is always human-owned** — push, merge, publish, and release are
-  never performed by the loop.
+- **Goal-scoped authority** — the project/human ratifies the Goal, authority
+  envelope, stop conditions, and terminal acceptance. Inside it, the loop may
+  commit, push an `lh/*` branch, or conditionally merge when the committed gate
+  passes. Publication, release, and terminal product acceptance remain
+  project/human-owned.
 - **Multi-model layering** — the optional `models` contract field routes
   execution to a coding CLI and judging to a separate reasoning CLI.
 
@@ -106,7 +110,10 @@ End-to-end, offline-verifiable up to step C:
    `external_verdict.adapter` (github_pr): the engine pushes the diff to an `lh/*`
    branch, opens a **draft PR** with the evidence chain in the body, and resumes on
    the GitHub CI conclusion. Use a fine-grained PAT (single repo; Contents RW,
-   Pull requests RW, Actions read) via `LH_GITHUB_TOKEN`. **Merging is always human.**
+   Pull requests RW, Actions read) via `LH_GITHUB_TOKEN`. The default stops at a
+   draft PR. Conditional merge requires an explicit `auto_merge` grant in the
+   Project Runtime Contract and a passing committed merge gate; publication,
+   release, and terminal product acceptance are not implied.
 
 ## License
 
@@ -117,7 +124,9 @@ End-to-end, offline-verifiable up to step C:
 - **Isolation is the disposable clone.** Executor presets run agent CLIs in
   full-auto mode (bypass flags) by design; the boundary is the throwaway
   clone, never your working tree. Keep untrusted content out of the loop.
-- **Promotion is always human-owned** — the loop stops at evidence.
+- **Authority is goal-scoped** — commit, `lh/*` push, and conditional merge
+  require an explicit contract grant and passing committed gates. Publication,
+  release, and terminal product acceptance remain project/human-owned.
 - **Credentials are environment variables only**, and missing ones raise.
 - **Acceptance is mechanical** (committed canaries), never the model's word.
 - **Out-of-scope diffs are rejected** and route to `human_required`.

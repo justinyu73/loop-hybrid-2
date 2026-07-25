@@ -55,7 +55,12 @@ def _excluded(rel: str) -> bool:
     if rel.startswith(EXCLUDE_PREFIXES):
         return True
     name = rel.rsplit("/", 1)[-1]
-    if name == "canary.py" or name.startswith("test_") or name.endswith("_test.py"):
+    if (
+        name == "canary.py"
+        or name.endswith("_canary.py")
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    ):
         return True
     return rel.startswith("tests/") or "/tests/" in rel
 
@@ -116,12 +121,20 @@ def check() -> dict:
     new = sorted(current - base) if has_baseline else []
     removed = sorted(base - current)
     enum_ok = has_baseline and _enum_digest() == baseline.get("sealed_enum_digest")
+    fixture_exclusion_ok = (
+        _excluded("lh_runtime/example_canary.py")
+        and _excluded("tests/test_example.py")
+        and _excluded("gate-pack/boundary_seal/example.py")
+        and not _excluded("lh_runtime/example.py")
+    )
 
     canaries = [
         {"id": "baseline-present", "ok": has_baseline,
          "detail": "" if has_baseline else "no baseline.json; run --reseal first"},
         {"id": "enum-seal-intact", "ok": bool(enum_ok),
          "detail": "" if enum_ok else "enum.json digest does not match the sealed baseline"},
+        {"id": "test-and-canary-files-excluded", "ok": fixture_exclusion_ok,
+         "detail": "" if fixture_exclusion_ok else "fixture exclusion rules are inconsistent"},
         {"id": "no-boundary-drift", "ok": not new,
          "detail": "" if not new else f"{len(new)} human-summoning site(s) not in the seal"},
     ]

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
+import capability_resolver as cr
 import external_action_port as eap
 import external_verdict as ev
 import token_cost
@@ -65,13 +66,26 @@ def _hard_io_timeout(seconds: float):
 class LoopController:
     """A trigger-safe controller; callers may invoke ``tick`` repeatedly."""
 
-    def __init__(self, store: RunStore, workspace_root: str | Path, *, timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS):
+    def __init__(
+        self,
+        store: RunStore,
+        workspace_root: str | Path,
+        *,
+        timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
+        dispatch: dict[str, str] | None = None,
+    ):
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self.store = store
         self.workspace_root = Path(workspace_root)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.timeout_seconds = float(timeout_seconds)
+        self.dispatch = dict(dispatch) if dispatch is not None else None
+
+    def _bind_dispatch(self, receipt: dict[str, Any]) -> dict[str, Any]:
+        if self.dispatch is not None:
+            receipt["dispatch"] = dict(self.dispatch)
+        return receipt
 
     def _run(self, argv: list[str], *, cwd: str | Path | None, budget: _TimeoutBudget) -> subprocess.CompletedProcess:
         try:
@@ -126,7 +140,7 @@ class LoopController:
             return None
         return {"exit_code": exit_code, "diff_digest": digest}
 
-    def tick(self, run_id: str, *, holder: str, model: ModelRunner, verifier_argv: list[str], grill_note: str | None = None) -> dict[str, Any]:
+    def tick(self, run_id: str, *, holder: str, model: ModelRunner, verifier_argv: list[str], grill_note: str | None = None, knowledge_context: dict[str, Any] | None = None) -> dict[str, Any]:
         self.store.recover_stale_run(run_id)
         if not self.store.acquire_lease(run_id, holder):
             return {"status": "lease_busy", "run_id": run_id}
@@ -137,6 +151,10 @@ class LoopController:
             run = self.store.get_run(run_id)
             if run["state"] not in {"queued", "retry_pending"}:
                 return {"status": "not_runnable", "run_id": run_id, "state": run["state"]}
+            remediation_case = self.store.failure_case_for_run(
+                run_id,
+                states={"remediation_running"},
+            )
             ordinal_hint = run["attempts"] + 1
             workspace_ref = f"workspace://{run_id}/{ordinal_hint}"
             ordinal = self.store.begin_attempt(run_id, workspace_ref)
@@ -156,28 +174,61 @@ class LoopController:
             # W8-1: a precheck whose staging failed is not evidence — fall
             # through to the model path, whose own staging check records it.
             if pre is not None and pre.returncode == 0 and self._staging_error(pre_add, pre_diff) is None:
-                pre_provider = {"summary": "lamp precheck passed without model invocation", "precheck": True}
+                pre_binding = cr.deterministic_binding(
+                    run_id=run_id,
+                    attempt=ordinal,
+                    base_revision=run["base_revision"],
+                    verifier_argv=verifier_argv,
+                    goal=run["goal"],
+                )
+                pre_provider = {
+                    "summary": "lamp precheck passed without model invocation",
+                    "precheck": True,
+                    "binding_receipt": pre_binding,
+                }
                 pre_provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(pre_provider, sort_keys=True), budget)
                 pre_diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", pre_diff.stdout, budget)
                 pre_stdout_ref = self._write_artifact(run_id, ordinal, "verifier.stdout", pre.stdout, budget)
                 pre_stderr_ref = self._write_artifact(run_id, ordinal, "verifier.stderr", pre.stderr, budget)
-                pre_receipt = {
+                pre_binding["evidence_refs"] = [
+                    pre_provider_ref,
+                    pre_diff_ref,
+                    pre_stdout_ref,
+                    pre_stderr_ref,
+                ]
+                pre_receipt = self._bind_dispatch({
                     "schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
                     "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": run["base_revision"]},
                     "provider": {"summary": pre_provider["summary"], "artifact": pre_provider_ref},
                     "usage": token_cost.unknown_usage(reason="lamp precheck: no model invocation"),
+                    "binding": pre_binding,
                     "diff": pre_diff_ref,
                     "verification": {"argv": verifier_argv, "exit_code": 0, "stdout": pre_stdout_ref, "stderr": pre_stderr_ref, "precheck": True},
-                }
+                })
                 pre_receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(pre_receipt, sort_keys=True), budget)
                 if not self.store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=pre_receipt_ref["ref"], receipt_digest=pre_receipt_ref["digest"], fence=fence):
                     return {"status": "fence_rejected", "run_id": run_id, "attempt": ordinal, "fence": fence}
-                return {"status": "verified", "run_id": run_id, "attempt": ordinal, "precheck": True, "receipt_ref": pre_receipt_ref["ref"], "receipt_digest": pre_receipt_ref["digest"]}
+                return {
+                    "status": "verified",
+                    "run_id": run_id,
+                    "attempt": ordinal,
+                    "precheck": True,
+                    "receipt_ref": pre_receipt_ref["ref"],
+                    "receipt_digest": pre_receipt_ref["digest"],
+                    # A green verifier is only the first half of the checker.
+                    # The worker records resolution after the value gate also
+                    # passes, so projections cannot report a premature fix.
+                    "failure_case": remediation_case,
+                }
             capsule = {"run_id": run_id, "attempt": ordinal, "fence": fence, "timeout_seconds": budget.timeout(), "goal": run["goal"], "base_revision": run["base_revision"], "workspace_ref": workspace_ref}
             if grill_note is not None:
                 # W6a: challenger diagnosis for the final attempt — guidance
                 # only, additive to the capsule the executor already receives.
                 capsule["grill_note"] = grill_note
+            if knowledge_context is not None:
+                # Advisory context only: it cannot alter admission, verifier,
+                # scope, budget, or promotion ownership.
+                capsule["knowledge_context"] = knowledge_context
             provider: dict[str, Any]
             try:
                 provider = model(workspace, capsule)
@@ -205,36 +256,90 @@ class LoopController:
             stderr_ref = self._write_artifact(run_id, ordinal, "verifier.stderr", stderr, budget)
             exit_code = verified.returncode if verified else -1
             run_after = self.store.get_run(run_id)
-            state = "verified" if exit_code == 0 else "stopped" if ordinal >= run_after["max_attempts"] else "retry_pending"
-            no_progress: dict[str, Any] | None = None
-            if state == "retry_pending":
-                # W6b no-progress line: two consecutive attempts with an
-                # identical failure signature (same lamp exit, same diff
-                # digest) mean the loop is not moving — stop the run early
-                # instead of burning the remaining attempts.
+            routing = provider.get("routing") if isinstance(provider.get("routing"), dict) else None
+            routing_route = routing.get("route") if isinstance(routing, dict) else None
+            if routing_route in {"stop", "human_required"}:
+                state = "stopped"
+            else:
+                state = "verified" if exit_code == 0 else "stopped" if ordinal >= run_after["max_attempts"] else "retry_pending"
+            repeated_failure: dict[str, Any] | None = None
+            if state == "retry_pending" and remediation_case is None:
+                # FC-P0 precedence over the old W6b stop: two consecutive
+                # attempts with an identical failure signature raise one
+                # durable FailureCase.  The next worker tick must grill it
+                # before another executor dispatch; the run stays retryable.
                 signature = {"exit_code": exit_code, "diff_digest": diff_ref["digest"]}
                 if self._previous_failure_signature(run_id, ordinal) == signature:
-                    state = "stopped"
-                    no_progress = {"attempt": ordinal, "max_attempts": run_after["max_attempts"], "signature": signature}
+                    repeated_failure = {
+                        "attempt": ordinal,
+                        "max_attempts": run_after["max_attempts"],
+                        "signature": signature,
+                    }
             verification: dict[str, Any] = {"argv": verifier_argv, "exit_code": exit_code, "stdout": stdout_ref, "stderr": stderr_ref}
             if staging_error is not None:
                 # W8-1: staging failed, so the verifier never ran and the
                 # attempt cannot go green; the reason stays on the receipt.
                 verification["staging_error"] = staging_error
-            receipt = {
+            receipt = self._bind_dispatch({
                 "schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
                 "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": run["base_revision"]},
                 "provider": {"summary": provider["summary"], "artifact": provider_ref},
                 "usage": provider.get("usage") if isinstance(provider.get("usage"), dict) else token_cost.unknown_usage(reason="model did not report usage"),
                 "diff": diff_ref,
                 "verification": verification,
-            }
+            })
+            if routing is not None:
+                receipt["routing"] = routing
+            binding_receipt = provider.get("binding_receipt")
+            if (
+                isinstance(binding_receipt, dict)
+                and binding_receipt.get("schema") == cr.BINDING_SCHEMA
+            ):
+                binding_receipt = dict(binding_receipt)
+                binding_receipt["evidence_refs"] = [
+                    provider_ref,
+                    diff_ref,
+                    stdout_ref,
+                    stderr_ref,
+                ]
+                receipt["binding"] = binding_receipt
             receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True), budget)
             if not self.store.finish_attempt(run_id, ordinal, state=state, receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"], fence=fence):
                 return {"status": "fence_rejected", "run_id": run_id, "attempt": ordinal, "fence": fence}
-            if no_progress is not None:
-                self.store.append_event(run_id, "no_progress_stop", no_progress)
-            return {"status": state, "run_id": run_id, "attempt": ordinal, "receipt_ref": receipt_ref["ref"], "receipt_digest": receipt_ref["digest"]}
+            failure_case = None
+            if remediation_case is not None and exit_code != 0:
+                failure_case = self.store.record_resolution(
+                    run_id,
+                    ordinal=ordinal,
+                    receipt_digest=receipt_ref["digest"],
+                    exit_code=exit_code,
+                    checker_reason="deterministic_verifier_failed",
+                )
+            elif remediation_case is not None:
+                # Defer PASS until GoalLoopWorker evaluates the value gate.
+                failure_case = remediation_case
+            elif repeated_failure is not None:
+                failure_case = self.store.ensure_failure_case(
+                    run_id,
+                    signature=repeated_failure["signature"],
+                    acceptance_argv=verifier_argv,
+                    trigger="same_run_identical_signature_x2",
+                    receipt_digest=receipt_ref["digest"],
+                )
+                self.store.append_event(
+                    run_id,
+                    "repeated_failure_detected",
+                    {**repeated_failure, "failure_case_id": failure_case["failure_case_id"]},
+                    event_id=f"failure-case:{failure_case['failure_case_id']}:repeated",
+                )
+            return {
+                "status": state,
+                "run_id": run_id,
+                "attempt": ordinal,
+                "receipt_ref": receipt_ref["ref"],
+                "receipt_digest": receipt_ref["digest"],
+                "failure_case": failure_case,
+            }
         except AttemptTimeout as exc:
             return {"status": "attempt_timeout", "run_id": run_id, "attempt": ordinal, "reason": str(exc)}
         finally:
@@ -247,7 +352,8 @@ class LoopController:
         return self.store.reconcile_startup()
 
     def tick_async(self, run_id: str, *, holder: str, model: ModelRunner, verdict_store: ev.VerdictStore,
-                   action_ledger: eap.ActionLedger, adapter: eap.ExternalAdapter, action_id: str = "open-pr") -> dict[str, Any]:
+                   action_ledger: eap.ActionLedger, adapter: eap.ExternalAdapter, action_id: str = "open-pr",
+                   knowledge_context: dict[str, Any] | None = None) -> dict[str, Any]:
         """Method A: execute, open an external action (PR) at most once, then PARK the run
         awaiting its async CI verdict. No local verifier — the verdict lands later via
         resume_external (poll-on-startup). An executor failure falls back to retry/stopped."""
@@ -267,6 +373,8 @@ class LoopController:
             workspace, workspace_ref = self._workspace(run, ordinal, budget)
             fence = self.store.attempt_fence(run_id, ordinal)
             capsule = {"run_id": run_id, "attempt": ordinal, "fence": fence, "timeout_seconds": budget.timeout(), "goal": run["goal"], "base_revision": run["base_revision"], "workspace_ref": workspace_ref}
+            if knowledge_context is not None:
+                capsule["knowledge_context"] = knowledge_context
             try:
                 provider = model(workspace, capsule)
                 if not isinstance(provider, dict) or not isinstance(provider.get("summary"), str):
@@ -281,9 +389,9 @@ class LoopController:
             staging_error = self._staging_error(add, diff)
             diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", diff.stdout, budget)
             provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(provider, sort_keys=True), budget)
-            base_receipt = {"schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
+            base_receipt = self._bind_dispatch({"schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
                             "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": run["base_revision"]},
-                            "provider": {"summary": provider["summary"], "artifact": provider_ref}, "diff": diff_ref}
+                            "provider": {"summary": provider["summary"], "artifact": provider_ref}, "diff": diff_ref})
             dispatch_error: str | None = None
             if "failure" in provider:
                 dispatch_error = provider["failure"]

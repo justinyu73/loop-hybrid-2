@@ -10,6 +10,7 @@ stops on an unsatisfied wait instead of declaring a completed attempt.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import stat
 import sys
@@ -20,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import cli_agent_executor as executors
 from _fixture import make_campaign, make_source_repo
+from capability_resolver_canary import graph
 from executor_wiring_canary import _noop_sleep
 from campaign_compiler import CampaignCompiler
 from goal_loop_run import EXECUTORS, JUDGE_EXECUTORS, resolve_executor
@@ -190,11 +192,18 @@ def main() -> int:
         binding_bin = root / "binding-bin"
         binding_bin.mkdir()
         binding_codex = binding_bin / "codex"
-        binding_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binding_codex.write_text(
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":11,\"cached_input_tokens\":3,\"output_tokens\":2}}'\n",
+            encoding="utf-8",
+        )
         binding_codex.chmod(binding_codex.stat().st_mode | stat.S_IXUSR)
         bound_agent = executors.make_orca_agent(
             agent="codex", orca_cli=str(cli),
             provider_argv_builder=lambda prompt: [str(binding_codex), "exec", "--ephemeral", prompt],
+            usage_collector=lambda _proc, _context: {
+                "state": "measured", "model": "fixture-codex", "input_tokens": 11,
+                "output_tokens": 2, "cache_read_tokens": 3,
+            },
             provider_binding=binding, timeout_seconds=2,
         )
         bound = bound_agent(workspace, {"run_id": "run-cut5-binding", "attempt": 1, "goal": {}, "base_revision": "base"})
@@ -249,6 +258,21 @@ def main() -> int:
 
         runtime_root = root / "runtime-fixture"
         runtime_root.mkdir()
+        trusted_bootstrap_root = runtime_root / "trusted-bootstrap"
+        bootstrap_path = (
+            trusted_bootstrap_root
+            / "docs"
+            / "bootstrap-authority.md"
+        )
+        bootstrap_path.parent.mkdir(parents=True)
+        bootstrap_path.write_text(
+            '<a id="lh-external-bootstrap-001"></a>\n'
+            "### Unified bootstrap fixture\n",
+            encoding="utf-8",
+        )
+        bootstrap_digest = (
+            "sha256:" + hashlib.sha256(bootstrap_path.read_bytes()).hexdigest()
+        )
         runtime_cli, fake_bin, runtime_log, _ = _fake_runtime_tools(runtime_root)
         source, base = make_source_repo(runtime_root)
         runtime_campaign = make_campaign("campaign-orca")
@@ -260,16 +284,40 @@ def main() -> int:
         old_path = os.environ.get("PATH", "")
         old_orca_cli = os.environ.get("LH_ORCA_CLI")
         old_orca_agent = os.environ.get("LH_ORCA_AGENT")
+        old_trusted_root = os.environ.get("LH_TRUSTED_BOOTSTRAP_ROOT")
         os.environ["PATH"] = f"{fake_bin}:{old_path}"
         os.environ["LH_ORCA_CLI"] = str(runtime_cli)
         os.environ["LH_ORCA_AGENT"] = "codex"
+        os.environ["LH_TRUSTED_BOOTSTRAP_ROOT"] = str(trusted_bootstrap_root)
         try:
             from goal_loop_run import run
+            runtime_graph = graph(evaluate=False)
+            for resource, runner in zip(
+                runtime_graph["registry"]["resources"],
+                ("codex", "claude", "codex", "claude"),
+            ):
+                resource["runner"] = runner
+                resource["model_family"] = f"ambient:{runner}"
+                resource["endpoint_ref"] = f"ambient:{runner}"
+                resource["network_access"] = "external"
+                resource["data_boundary"] = "external"
+                resource.pop("model", None)
+                resource["trust_tier"] = "claimed"
+            runtime_graph["nodes"][0]["permissions"]["network"] = "external"
+            runtime_graph["nodes"][0]["data_boundary"] = "external"
             runtime_result = run(
-                executor="orca", execute=True,
+                execute=True,
                 goal_store_root=runtime_root / "goals", run_store_root=runtime_root / "runs",
                 workspace_root=runtime_root / "workspaces", campaign=runtime_campaign,
                 source_repo=source, base_revision=base, max_cycles=30,
+                execution_graph=runtime_graph,
+                execution_host="external-orca",
+                bootstrap_authority={
+                    "decision_id": "LH-EXTERNAL-BOOTSTRAP-001",
+                    "authority_ref": "docs/bootstrap-authority.md#lh-external-bootstrap-001",
+                    "authority_digest": bootstrap_digest,
+                    "root": str(trusted_bootstrap_root),
+                },
                 sleep_fn=_noop_sleep,
             )
             goal = GoalStore(runtime_root / "goals").get_goal("campaign-orca:stage-1")
@@ -277,7 +325,11 @@ def main() -> int:
             receipt = json.loads((runtime_root / "runs" / receipt_meta["receipt_ref"]).read_text(encoding="utf-8")) if receipt_meta else {}
         finally:
             os.environ["PATH"] = old_path
-            for name, value in (("LH_ORCA_CLI", old_orca_cli), ("LH_ORCA_AGENT", old_orca_agent)):
+            for name, value in (
+                ("LH_ORCA_CLI", old_orca_cli),
+                ("LH_ORCA_AGENT", old_orca_agent),
+                ("LH_TRUSTED_BOOTSTRAP_ROOT", old_trusted_root),
+            ):
                 if value is None:
                     os.environ.pop(name, None)
                 else:
@@ -286,8 +338,16 @@ def main() -> int:
 
         registry_ok = set(EXECUTORS) == {"codex", "claude", "kimi", "orca"} and JUDGE_EXECUTORS == {"codex", "claude", "kimi"}
         dry = resolve_executor("orca", execute=False)
+        pinned_codex = executors.hosted_provider_argv("codex", "P", "gpt-code")
+        pinned_claude = executors.hosted_provider_argv("claude", "P", "sonnet")
         cases = [
             case("registry-adds-orca-but-keeps-judge-direct", registry_ok, f"executors={sorted(EXECUTORS)} judges={sorted(JUDGE_EXECUTORS)}"),
+            case(
+                "host-runs-the-selected-model-without-becoming-the-model",
+                pinned_codex[:4] == ["codex", "exec", "-m", "gpt-code"]
+                and pinned_claude[:3] == ["claude", "--model", "sonnet"],
+                json.dumps({"codex": pinned_codex, "claude": pinned_claude}),
+            ),
             case("create-targets-existing-disposable-workspace", any(f"path:{workspace}" in args for args in create), json.dumps(create)),
             case("provider-command-is-shell-quoted-and-bounded", any("exec /bin/echo" in args and ".lh-orca-provider-output.jsonl" in args for args in create) and "fixture output\nfinished" == result["stdout_tail"], json.dumps(result)),
             case(
@@ -298,6 +358,13 @@ def main() -> int:
                 and bound["execution"]["provider_binding"] == {"runner": "codex", "model": "fixture-codex", "mode": "codex_argv"}
                 and binding["base_url"] not in json.dumps(bound),
                 json.dumps({"command": bound_command, "execution": bound["execution"]}),
+            ),
+            case(
+                "redirected-binding-usage-is-unknown-not-mispriced",
+                bound["usage"]["state"] == "unknown"
+                and bound["usage"]["model"] == "fixture-codex"
+                and "no verified usage/cost attribution" in bound["usage"]["reason"],
+                json.dumps(bound["usage"]),
             ),
             case(
                 "claude-binding-is-scoped-to-terminal-shell-env",
@@ -319,16 +386,27 @@ def main() -> int:
             ),
             case("dry-run-does-not-construct-orca-process", dry is None, str(dry)),
             case(
-                "registry-orca-runs-through-lh-controller",
+                "capability-model-runs-through-separate-orca-host",
                 runtime_result.get("invoked") is True
                 and runtime_result.get("driver", {}).get("runs_dispatched") == 1
                 and goal.get("state") == "completed"
+                and receipt.get("binding", {}).get("runner") == "codex"
+                and receipt.get("binding", {}).get("execution_host", {}).get(
+                    "host_id"
+                ) == "external-orca"
+                and receipt.get("binding", {}).get("execution_host", {}).get(
+                    "bootstrap_authority", {}
+                ).get("decision_id") == "LH-EXTERNAL-BOOTSTRAP-001"
                 and receipt.get("provider", {}).get("summary") == "codex executor completed via Orca terminal"
                 and receipt.get("usage", {}).get("state") == "measured"
                 and receipt.get("usage", {}).get("input_tokens") == 8
                 and receipt.get("usage", {}).get("cache_read_tokens") == 4
                 and receipt.get("usage", {}).get("output_tokens") == 2
-                and any(args[:2] == ["terminal", "create"] for args in runtime_commands),
+                and any(
+                    args[:2] == ["terminal", "create"]
+                    and "LH-EXTERNAL-BOOTSTRAP-001" in " ".join(args)
+                    for args in runtime_commands
+                ),
                 json.dumps({"runtime": runtime_result, "goal": goal, "receipt": receipt}, ensure_ascii=False),
             ),
         ]

@@ -157,6 +157,40 @@ class KnowledgeStore:
             for row in rows
         ]
 
+    def bounded_context(self, query: str, *, max_results: int = 4, max_chars: int = 2400) -> dict[str, Any]:
+        """Build a small provenance-carrying context packet for one Goal.
+
+        This is advisory input to a model capsule.  It contains source URI,
+        revision/hash and bounded text only; it has no admission, verifier or
+        promotion authority.
+        """
+        if not 1 <= max_chars <= 8000:
+            raise ValueError("max_chars must be an integer from 1 to 8000")
+        hits = self.search(query, max_results=max_results)
+        selected: list[dict[str, Any]] = []
+        used = 0
+        for hit in hits:
+            remaining = max_chars - used
+            if remaining <= 0:
+                break
+            text = str(hit.get("text", ""))[:remaining]
+            selected.append({
+                "source_uri": hit["source_uri"],
+                "revision": hit["revision"],
+                "document_hash": hit["document_hash"],
+                "chunk_hash": hit["chunk_hash"],
+                "text": text,
+            })
+            used += len(text)
+        return {
+            "schema": "loop-hybrid-goal-context/v1",
+            "query": str(query)[:240],
+            "authority": "advisory_only",
+            "gate_mutation": "forbidden",
+            "hits": selected,
+            "chars": used,
+        }
+
     def summary(self) -> dict[str, int]:
         with self._connect() as conn:
             documents = conn.execute("SELECT COUNT(*) FROM documents WHERE active = 1").fetchone()[0]

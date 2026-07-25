@@ -16,6 +16,7 @@ from external_verdict import VerdictStore
 from admission_bridge import GoalAdmissionBridge
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
+from knowledge_store import KnowledgeStore
 from run_store import RunStore
 
 
@@ -78,6 +79,9 @@ def main() -> int:
         git("-C", str(source), "add", "baseline.txt")
         git("-C", str(source), "commit", "-qm", "baseline")
         base = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        (source / "AGENTS.md").write_text("Canonical acceptance boundaries and restart receipts are authoritative.\n", encoding="utf-8")
+        (source / "docs" / "contracts").mkdir(parents=True)
+        (source / "docs" / "contracts" / "context.md").write_text("Use the durable receipt failure corpus when preparing a retry.\n", encoding="utf-8")
         goals = GoalStore(root / "goals")
         runs = RunStore(root / "runs")
         controller = LoopController(runs, root / "workspaces")
@@ -121,12 +125,35 @@ def main() -> int:
         lease_a = lease_goals.claim_event(lease_event["event_key"], "worker-a", seconds=60)
         lease_b = lease_goals.claim_event(lease_event["event_key"], "worker-b", seconds=60)
         lease_goals.release_event(lease_event["event_key"], "worker-a")
+
+        context_store = KnowledgeStore(root / "context-knowledge")
+        context_goals = GoalStore(root / "context-goals")
+        context_runs = RunStore(root / "context-runs")
+        context_worker = GoalLoopWorker(
+            goal_store=context_goals,
+            run_store=context_runs,
+            controller=LoopController(context_runs, root / "context-workspaces"),
+            compilers={"campaign-g5": compiler},
+            execution_context={"campaign-g5": {"source_repo": source, "base_revision": base}},
+            knowledge_store=context_store,
+            knowledge_repo_roots=(source,),
+        )
+        seed_candidate(context_goals, compiler, goal_id="campaign-g5:context", stage_id="stage-1", event_key="g5-context-1")
+        seen_context: dict[str, object] = {}
+
+        def context_model(workspace: Path, capsule: dict) -> dict:
+            seen_context["packet"] = capsule.get("knowledge_context")
+            return model(workspace, capsule)
+
+        context_result = context_worker.tick(holder="context-worker", model=context_model)
+        context_packet = seen_context.get("packet") if isinstance(seen_context.get("packet"), dict) else {}
         cases = [
             case("serial-worker-runs-seed-and-emits-next-event", first["status"] == "progress" and first["run"]["status"] == "verified" and first["terminal_after"]["status"] == "completed_with_next_event" and goals_after.get_event(first["terminal_after"]["derived_event_key"])["state"] == "completed", str(first)),
             case("restart-claims-next-event-and-runs-it-once", second["status"] == "progress" and second["run"]["status"] == "verified" and goals_after.get_goal("campaign-g5:stage-2")["state"] == "completed" and runs_after.summary()["runs_by_state"].get("verified") == 2, str(second)),
             case("retry-pending-is_reused_by_restart", retry_first["run"]["status"] == "retry_pending" and retry_second["run"]["status"] == "retry_pending" and retry_first["run"]["run_id"] == retry_second["run"]["run_id"], str(retry_second)),
             case("startup-polls-external-verdict", polled["external_resumed"] == [{"run_id": verdict_run_id, "op_key": "op-g5-verdict", "conclusion": "success", "state": "verified"}], "external verdict resumed"),
             case("event-lease-excludes-second-worker", lease_a is True and lease_b is False, str({"worker_a": lease_a, "worker_b": lease_b})),
+            case("next-goal-receives-bounded-provenanced-context", context_result["run"]["status"] == "verified" and context_packet.get("schema") == "loop-hybrid-goal-context/v1" and context_packet.get("authority") == "advisory_only" and context_packet.get("gate_mutation") == "forbidden" and 0 < int(context_packet.get("chars", 0)) <= 2400 and context_packet.get("hits"), json.dumps({"result": context_result, "context": context_packet}, ensure_ascii=False)),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     result = {

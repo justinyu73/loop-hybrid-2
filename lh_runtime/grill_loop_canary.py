@@ -7,7 +7,8 @@ runner-fixable injects the diagnosis into the final capsule (same executor);
 goal-broken skips the final attempt and routes the goal to a human; a failed
 final attempt after runner-fixable routes human with the grill chain as
 durable evidence; a judge outage, out-of-set output, or absent judge config
-degrades to the original max_attempts behavior; and the grill never fires
+records the FailureCase and routes human; a verifier PASS is not marked
+resolved when the subsequent value gate is RED; and the grill never fires
 before the final attempt or on a first-attempt success. No network, no real
 CLI, no real credentials.
 """
@@ -82,6 +83,35 @@ def _model(capsules: list[dict], *, succeed_from: int | None = None):
     return model
 
 
+def _same_failure_model(capsules: list[dict], *, succeed_from: int | None = None):
+    """Leave the same wrong diff until the selected attempt succeeds."""
+    def model(workspace: Path, capsule: dict) -> dict:
+        capsules.append(dict(capsule))
+        src = workspace / "src"
+        src.mkdir(exist_ok=True)
+        fixed = succeed_from is not None and int(capsule["attempt"]) >= succeed_from
+        (src / "out.txt").write_text("fixed\n" if fixed else "same wrong\n", encoding="utf-8")
+        return {"summary": "w6a repeated fixture model"}
+    return model
+
+
+def _same_failure_then_scope_creep(capsules: list[dict]):
+    """Raise a FailureCase, then pass its lamp with an out-of-scope edit."""
+    def model(workspace: Path, capsule: dict) -> dict:
+        capsules.append(dict(capsule))
+        src = workspace / "src"
+        src.mkdir(exist_ok=True)
+        if int(capsule["attempt"]) < 3:
+            (src / "out.txt").write_text("same wrong\n", encoding="utf-8")
+        else:
+            (src / "out.txt").write_text("fixed\n", encoding="utf-8")
+            outside = workspace / "outside"
+            outside.mkdir(exist_ok=True)
+            (outside / "leak.txt").write_text("scope creep\n", encoding="utf-8")
+        return {"summary": "w6a value-red fixture model"}
+    return model
+
+
 def _grill(calls: list[dict], response: Any = None, *, error: bool = False):
     def grill(snapshot: dict) -> Any:
         calls.append(snapshot)
@@ -119,6 +149,14 @@ def main() -> int:
         run_a = worker_a.run_store.get_run(_run_id(worker_a))
         goal_a = worker_a.goal_store.get_goal(GOAL_ID)["state"]
         evidence_a = grill_evidence(worker_a.run_store, run_a["run_id"])
+        case_a = worker_a.run_store.failure_case_for_run(run_a["run_id"])
+        replay_a = worker_a.run_store.record_grill_result(
+            case_a["failure_case_id"],
+            generation=1,
+            fence=case_a["claim_fence"],
+            decision="runner-fixable",
+            diagnosis=DIAGNOSIS,
+        ) if case_a is not None else {}
 
         # B: goal-broken -> no final attempt, goal routes human with the diagnosis.
         worker_b = _worker(root, "b", source, base, grill_runner=_grill(calls_b := [], {"decision": "goal-broken", "diagnosis": DIAGNOSIS}))
@@ -138,32 +176,65 @@ def main() -> int:
         run_c = worker_c.run_store.get_run(_run_id(worker_c))
         goal_c = worker_c.goal_store.get_goal(GOAL_ID)["state"]
 
-        # D: judge outage -> degrade; the final attempt dispatches as today.
+        # D: judge outage is recorded and routes human without another attempt.
         worker_d = _worker(root, "d", source, base, grill_runner=_grill(calls_d := [], error=True))
         _seed_goal(worker_d, "d")
         capsules_d: list[dict] = []
         _ticks(worker_d, "d", _model(capsules_d, succeed_from=4), 4)
         run_d = worker_d.run_store.get_run(_run_id(worker_d))
+        goal_d = worker_d.goal_store.get_goal(GOAL_ID)["state"]
+        case_d = worker_d.run_store.failure_case_for_run(run_d["run_id"])
+        failed_d = [item for item in worker_d.run_store.failure_outbox() if item["event_type"] == "grill_failed"]
 
-        # E: out-of-set decision -> reject -> degrade to the original dispatch.
+        # E: out-of-set decision is recorded and routes human.
         worker_e = _worker(root, "e", source, base, grill_runner=_grill(calls_e := [], {"decision": "retry-forever", "diagnosis": DIAGNOSIS}))
         _seed_goal(worker_e, "e")
         capsules_e: list[dict] = []
         _ticks(worker_e, "e", _model(capsules_e, succeed_from=4), 4)
         run_e = worker_e.run_store.get_run(_run_id(worker_e))
+        goal_e = worker_e.goal_store.get_goal(GOAL_ID)["state"]
+        case_e = worker_e.run_store.failure_case_for_run(run_e["run_id"])
 
-        # F: no grill configured -> identical to current behavior.
+        # F: no judge configured cannot silently consume the final attempt.
         worker_f = _worker(root, "f", source, base)
         _seed_goal(worker_f, "f")
         capsules_f: list[dict] = []
         _ticks(worker_f, "f", _model(capsules_f, succeed_from=4), 4)
         run_f = worker_f.run_store.get_run(_run_id(worker_f))
+        goal_f = worker_f.goal_store.get_goal(GOAL_ID)["state"]
+        case_f = worker_f.run_store.failure_case_for_run(run_f["run_id"])
+
+        # G: identical signatures raise grill after attempt 2; a failed guided
+        # attempt creates generation 2, whose guided attempt passes the checker.
+        worker_g = _worker(root, "g", source, base, grill_runner=_grill(calls_g := [], {"decision": "runner-fixable", "diagnosis": DIAGNOSIS}))
+        _seed_goal(worker_g, "g")
+        capsules_g: list[dict] = []
+        model_g = _same_failure_model(capsules_g, succeed_from=4)
+        tick_g2 = _ticks(worker_g, "g", model_g, 2)
+        run_g2 = worker_g.run_store.get_run(_run_id(worker_g))
+        case_g2 = worker_g.run_store.failure_case_for_run(run_g2["run_id"])
+        _ticks(worker_g, "g", model_g, 1)
+        case_g3 = worker_g.run_store.failure_case_for_run(run_g2["run_id"])
+        tick_g4 = _ticks(worker_g, "g", model_g, 1)
+        run_g4 = worker_g.run_store.get_run(run_g2["run_id"])
+        case_g4 = worker_g.run_store.failure_case_for_run(run_g2["run_id"])
+        outbox_g = worker_g.run_store.failure_outbox()
 
         # H: first-attempt success never touches the grill.
         worker_h = _worker(root, "h", source, base, grill_runner=_grill(calls_h := [], {"decision": "goal-broken", "diagnosis": DIAGNOSIS}))
         _seed_goal(worker_h, "h")
         _ticks(worker_h, "h", _model([], succeed_from=1), 1)
         run_h = worker_h.run_store.get_run(_run_id(worker_h))
+
+        # I: verifier PASS is not a complete checker PASS. A subsequent value
+        # RED must keep the FailureCase unresolved and must not emit closed.
+        worker_i = _worker(root, "i", source, base, grill_runner=_grill(calls_i := [], {"decision": "runner-fixable", "diagnosis": DIAGNOSIS}))
+        _seed_goal(worker_i, "i")
+        capsules_i: list[dict] = []
+        tick_i = _ticks(worker_i, "i", _same_failure_then_scope_creep(capsules_i), 3)
+        run_i = worker_i.run_store.get_run(_run_id(worker_i))
+        case_i = worker_i.run_store.failure_case_for_run(run_i["run_id"])
+        outbox_i = worker_i.run_store.failure_outbox()
 
         rejects = [
             validate_decision(raw)["type"] == "reject"
@@ -183,7 +254,13 @@ def main() -> int:
              and all("grill_note" not in capsule for capsule in capsules_a[:3])
              and capsules_a[3].get("grill_note") == DIAGNOSIS
              and run_a["state"] == "verified" and goal_a == "completed"
-             and evidence_a == {"decision": "runner-fixable", "diagnosis": DIAGNOSIS, "attempts_used": 3},
+             and evidence_a is not None
+             and evidence_a["decision"] == "runner-fixable"
+             and evidence_a["diagnosis"] == DIAGNOSIS
+             and evidence_a["attempts_used"] == 3
+             and case_a is not None and case_a["state"] == "resolved"
+             and case_a["next_node_id"] == "campaign_completed"
+             and replay_a.get("status") == "reused",
              "detail": json.dumps({"grill_calls": len(calls_a), "attempts": len(capsules_a),
                                    "note": capsules_a[3].get("grill_note") if len(capsules_a) == 4 else None,
                                    "run_state": run_a["state"], "goal": goal_a})},
@@ -210,24 +287,62 @@ def main() -> int:
              and tick_c.get("terminal_after", {}).get("grill", {}).get("diagnosis") == DIAGNOSIS,
              "detail": json.dumps({"run_state": run_c["state"], "goal": goal_c,
                                    "terminal": tick_c.get("terminal_after", {}).get("status")})},
-            {"id": "judge-outage-degrades-to-original-dispatch",
-             "ok": len(calls_d) == 1 and len(capsules_d) == 4
-             and "grill_note" not in capsules_d[3] and run_d["state"] == "verified",
-             "detail": json.dumps({"grill_calls": len(calls_d), "attempts": len(capsules_d), "run_state": run_d["state"]})},
-            {"id": "out-of-set-output-rejected-and-degrades",
-             "ok": len(calls_e) == 1 and len(capsules_e) == 4
-             and "grill_note" not in capsules_e[3] and run_e["state"] == "verified",
-             "detail": json.dumps({"grill_calls": len(calls_e), "attempts": len(capsules_e), "run_state": run_e["state"]})},
+            {"id": "judge-outage-records-once-and-routes-human",
+             "ok": len(calls_d) == 1 and len(capsules_d) == 3
+             and run_d["state"] == "retry_pending" and goal_d == "human_required"
+             and case_d is not None and case_d["state"] == "human_required"
+             and len(failed_d) == 1,
+             "detail": json.dumps({"grill_calls": len(calls_d), "attempts": len(capsules_d),
+                                   "run_state": run_d["state"], "goal": goal_d,
+                                   "failure_case": case_d, "failed_events": len(failed_d)})},
+            {"id": "out-of-set-output-records-and-routes-human",
+             "ok": len(calls_e) == 1 and len(capsules_e) == 3
+             and run_e["state"] == "retry_pending" and goal_e == "human_required"
+             and case_e is not None and case_e["state"] == "human_required",
+             "detail": json.dumps({"grill_calls": len(calls_e), "attempts": len(capsules_e),
+                                   "run_state": run_e["state"], "goal": goal_e,
+                                   "failure_case": case_e})},
             {"id": "closed-set-validation-rejects-malformed-output",
              "ok": all(rejects) and len(rejects) == 6,
              "detail": json.dumps({"rejects": rejects})},
-            {"id": "no-judge-configured-keeps-current-behavior",
-             "ok": len(capsules_f) == 4 and all("grill_note" not in capsule for capsule in capsules_f)
-             and run_f["state"] == "verified",
-             "detail": json.dumps({"attempts": len(capsules_f), "run_state": run_f["state"]})},
+            {"id": "no-judge-configured-records-and-routes-human",
+             "ok": len(capsules_f) == 3 and all("grill_note" not in capsule for capsule in capsules_f)
+             and run_f["state"] == "retry_pending" and goal_f == "human_required"
+             and case_f is not None and case_f["state"] == "human_required",
+             "detail": json.dumps({"attempts": len(capsules_f), "run_state": run_f["state"],
+                                   "goal": goal_f, "failure_case": case_f})},
+            {"id": "identical-failure-regrills-then-checks-and-closes",
+             "ok": tick_g2.get("run", {}).get("failure_case", {}).get("state") == "grill_required"
+             and run_g2["attempts"] == 2 and case_g2 is not None and case_g2["grill_generation"] == 1
+             and case_g3 is not None and case_g3["state"] == "grill_required" and case_g3["grill_generation"] == 2
+             and len(calls_g) == 2 and len(capsules_g) == 4
+             and capsules_g[2].get("grill_note") == DIAGNOSIS
+             and capsules_g[3].get("grill_note") == DIAGNOSIS
+             and run_g4["state"] == "verified"
+             and case_g4 is not None and case_g4["state"] == "resolved"
+             and case_g4["grill_generation"] == 2
+             and case_g4["next_node_id"] == "campaign_completed"
+             and tick_g4.get("terminal_after", {}).get("failure_case", {}).get("next_node_id") == "campaign_completed"
+             and len([item for item in outbox_g if item["event_type"] == "grill_result"]) == 2
+             and len([item for item in outbox_g if item["event_type"] == "resolution_checked"]) == 2,
+             "detail": json.dumps({"after_2": case_g2, "after_3": case_g3, "after_4": case_g4,
+                                   "calls": len(calls_g), "capsules": len(capsules_g),
+                                   "outbox": [item["event_type"] for item in outbox_g]})},
             {"id": "first-attempt-success-never-invokes-grill",
              "ok": len(calls_h) == 0 and run_h["state"] == "verified",
              "detail": json.dumps({"grill_calls": len(calls_h), "run_state": run_h["state"]})},
+            {"id": "value-red-never-prematurely-resolves-failure-case",
+             "ok": len(calls_i) == 1 and len(capsules_i) == 3
+             and run_i["state"] == "verified"
+             and tick_i.get("terminal_after", {}).get("status") == "value_red_human_required"
+             and case_i is not None and case_i["state"] == "human_required"
+             and len([item for item in outbox_i if item["event_type"] == "resolution_checked"
+                      and item["payload"].get("machine_resolved") is False
+                      and item["payload"].get("checker_reason") == "value_gate_red"]) == 1
+             and len([item for item in outbox_i if item["event_type"] == "failure_case_closed"]) == 0,
+             "detail": json.dumps({"calls": len(calls_i), "capsules": len(capsules_i),
+                                   "terminal": tick_i.get("terminal_after"), "case": case_i,
+                                   "outbox": [item["event_type"] for item in outbox_i]})},
         ]
     failures = [{"id": case["id"], "detail": case["detail"]} for case in cases if not case["ok"]]
     print(json.dumps({

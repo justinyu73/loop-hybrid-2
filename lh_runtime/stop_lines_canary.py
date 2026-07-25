@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Committed W6b smoke: deterministic no-progress and campaign failure lines.
+"""Committed W6b/FC-P0 smoke: deterministic repeated-failure escalation.
 
 Proves, offline with fixture models, that two consecutive identical failure
-signatures (same verifier exit, same diff digest) stop a run early with a
-durable no_progress_stop event; that varying signatures retry to normal
-exhaustion; that a verified attempt never triggers the line; that a campaign
+signatures (same verifier exit, same diff digest) raise one durable FailureCase
+without consuming another attempt; that varying signatures retry to normal
+exhaustion through a bounded grill; that a verified attempt never triggers the
+line; that a campaign
 routes to a human after N consecutive failed goals (declared
 failure_stop_threshold, default 3, range 3-5, invalid values rejected); that
 a completed goal resets the count; and that the count is derived from
@@ -54,7 +55,7 @@ def _campaign(campaign_id: str, stage_ids: list[str], *, lamp: list[str], thresh
     return campaign
 
 
-def _worker(root: Path, tag: str, source: Path, base: str, campaign: dict) -> GoalLoopWorker:
+def _worker(root: Path, tag: str, source: Path, base: str, campaign: dict, *, grill_runner=None) -> GoalLoopWorker:
     runs = RunStore(root / f"{tag}-runs")
     compiler = CampaignCompiler(campaign)
     return GoalLoopWorker(
@@ -63,6 +64,7 @@ def _worker(root: Path, tag: str, source: Path, base: str, campaign: dict) -> Go
         controller=LoopController(runs, root / f"{tag}-workspaces"),
         compilers={compiler.campaign_id: compiler},
         execution_context={compiler.campaign_id: {"source_repo": source, "base_revision": base}},
+        grill_runner=grill_runner,
     )
 
 
@@ -107,6 +109,10 @@ def _fixed_model(workspace: Path, _capsule: dict) -> dict:
     return {"summary": "w6b success fixture"}
 
 
+def _runner_fixable(_snapshot: dict) -> dict:
+    return {"decision": "runner-fixable", "diagnosis": "fixture guidance"}
+
+
 def _ticks(worker: GoalLoopWorker, holder: str, model, count: int) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for _ in range(count):
@@ -120,10 +126,10 @@ def _only_run(worker: GoalLoopWorker) -> dict[str, Any]:
 
 
 def _fail_goal(worker: GoalLoopWorker, campaign_id: str, stage_id: str, event_key: str) -> dict[str, Any]:
-    """Admit one goal and drive its run to a stopped failure (2 ticks: the
-    identical empty-diff failures trip the no-progress line at attempt 2)."""
+    """Admit one goal, raise a FailureCase on attempt 2, then park it human
+    because this campaign fixture deliberately has no challenger configured."""
     _seed(worker, campaign_id, stage_id, event_key)
-    return _ticks(worker, f"w6b-{event_key}", _empty_model, 2)
+    return _ticks(worker, f"w6b-{event_key}", _empty_model, 3)
 
 
 def main() -> int:
@@ -131,19 +137,20 @@ def main() -> int:
         root = Path(raw)
         source, base = make_source_repo(root)
 
-        # 1) Identical signatures: the run stops early, below max_attempts.
+        # 1) Identical signatures: one FailureCase is raised below max_attempts.
         w1 = _worker(root, "same", source, base, _campaign("c1", ["s1"], lamp=DEFAULT_LAMP))
         _seed(w1, "c1", "s1", "same-1")
         _ticks(w1, "w6b-same", _empty_model, 2)
         run1 = _only_run(w1)
-        events1 = [event for event in w1.run_store.events(run1["run_id"]) if event["event_type"] == "no_progress_stop"]
+        events1 = [event for event in w1.run_store.events(run1["run_id"]) if event["event_type"] == "repeated_failure_detected"]
+        case1 = w1.run_store.failure_case_for_run(run1["run_id"])
 
-        # 2) Varying signatures: retries burn to normal exhaustion.
-        w2 = _worker(root, "vary", source, base, _campaign("c2", ["s1"], lamp=MARKER_LAMP))
+        # 2) Varying signatures: a bounded grill permits the final attempt.
+        w2 = _worker(root, "vary", source, base, _campaign("c2", ["s1"], lamp=MARKER_LAMP), grill_runner=_runner_fixable)
         _seed(w2, "c2", "s1", "vary-1")
         _ticks(w2, "w6b-vary", _wrong_model, 4)
         run2 = _only_run(w2)
-        events2 = [event for event in w2.run_store.events(run2["run_id"]) if event["event_type"] == "no_progress_stop"]
+        events2 = [event for event in w2.run_store.events(run2["run_id"]) if event["event_type"] == "repeated_failure_detected"]
 
         # 3) A verified attempt never trips the line.
         w3 = _worker(root, "pass", source, base, _campaign("c3", ["s1"], lamp=MARKER_LAMP))
@@ -151,7 +158,7 @@ def main() -> int:
         w3.tick(holder="w6b-pass", model=_wrong_model)
         w3.tick(holder="w6b-pass", model=_fixed_model)
         run3 = _only_run(w3)
-        events3 = [event for event in w3.run_store.events(run3["run_id"]) if event["event_type"] == "no_progress_stop"]
+        events3 = [event for event in w3.run_store.events(run3["run_id"]) if event["event_type"] == "repeated_failure_detected"]
 
         # 4) Default threshold 3: three consecutive failed goals stop the campaign.
         w4 = _worker(root, "t3", source, base, _campaign("c4", ["s1", "s2", "s3", "s4"], lamp=DEFAULT_LAMP))
@@ -160,8 +167,9 @@ def main() -> int:
         _seed_candidate_only(w4, "c4", "s4", "t3-4")
         tick4 = _fail_goal(w4, "c4", "s3", "t3-3")
         goal4_s4 = w4.goal_store.get_goal("c4:s4")["state"]
+        event4_key = tick4.get("campaign_stops", [{}])[0].get("event_key")
         try:
-            event4 = w4.goal_store.get_event("campaign-failure-line:c4")
+            event4 = w4.goal_store.get_event(event4_key) if event4_key else None
         except KeyError:
             event4 = None
 
@@ -196,7 +204,18 @@ def main() -> int:
         )
         tick7 = _fail_goal(w7b, "c7", "s3", "boot-3")
 
-        # 8) Invalid thresholds are rejected at compile time.
+        # 8) A completed review resolution re-arms a later failure episode.
+        w8 = _worker(root, "rearm", source, base, _campaign("c8", ["s1", "s2", "s3", "s4", "s5", "s6"], lamp=DEFAULT_LAMP))
+        _fail_goal(w8, "c8", "s1", "rearm-1")
+        _fail_goal(w8, "c8", "s2", "rearm-2")
+        first_episode = _fail_goal(w8, "c8", "s3", "rearm-3")
+        w8.goal_store.transition_goal("c8:s3", "active", expected_state="human_required")
+        w8.goal_store.transition_goal("c8:s3", "completed", expected_state="active")
+        _fail_goal(w8, "c8", "s4", "rearm-4")
+        _fail_goal(w8, "c8", "s5", "rearm-5")
+        second_episode = _fail_goal(w8, "c8", "s6", "rearm-6")
+
+        # 9) Invalid thresholds are rejected at compile time.
         invalid = 0
         for bad in (2, 6, "3", 3.5):
             try:
@@ -207,11 +226,13 @@ def main() -> int:
         default_threshold = CampaignCompiler(_campaign("cdef", ["s1"], lamp=DEFAULT_LAMP)).failure_stop_threshold == 3
 
         cases = [
-            {"id": "identical-signatures-stop-run-early",
-             "ok": run1["state"] == "stopped" and run1["attempts"] == 2 and run1["max_attempts"] == 4
-             and len(events1) == 1 and events1[0]["payload"]["signature"]["exit_code"] == 1,
+            {"id": "identical-signatures-raise-one-failure-case",
+             "ok": run1["state"] == "retry_pending" and run1["attempts"] == 2 and run1["max_attempts"] == 4
+             and len(events1) == 1 and events1[0]["payload"]["signature"]["exit_code"] == 1
+             and case1 is not None and case1["state"] == "grill_required" and case1["grill_generation"] == 1,
              "detail": json.dumps({"state": run1["state"], "attempts": run1["attempts"],
-                                   "event": events1[0]["payload"] if events1 else None})},
+                                   "event": events1[0]["payload"] if events1 else None,
+                                   "failure_case": case1})},
             {"id": "varying-signatures-reach-normal-exhaustion",
              "ok": run2["state"] == "stopped" and run2["attempts"] == 4 and events2 == [],
              "detail": json.dumps({"state": run2["state"], "attempts": run2["attempts"], "events": len(events2)})},
@@ -236,6 +257,12 @@ def main() -> int:
              "ok": tick7.get("campaign_stops", []) != []
              and tick7["campaign_stops"][0]["consecutive_failures"] == 3,
              "detail": json.dumps({"stops": tick7.get("campaign_stops")})},
+            {"id": "completed-review-rearms-next-failure-episode",
+             "ok": len(first_episode.get("campaign_stops", [])) == 1
+             and len(second_episode.get("campaign_stops", [])) == 1
+             and first_episode["campaign_stops"][0]["event_key"] != second_episode["campaign_stops"][0]["event_key"],
+             "detail": json.dumps({"first": first_episode.get("campaign_stops"),
+                                   "second": second_episode.get("campaign_stops")})},
             {"id": "invalid-threshold-rejected-at-compile",
              "ok": invalid == 4 and valid and default_threshold,
              "detail": json.dumps({"invalid_rejected": invalid, "valid": valid, "default": default_threshold})},
@@ -249,9 +276,7 @@ def main() -> int:
         "cases": cases,
         "verification": {"command": "python3 -B lh_runtime/stop_lines_canary.py",
                          "fixtures": "injected models only; fully deterministic, no network"},
-        "known_gaps_open": [
-            "campaign failure line fires once per campaign (idempotent event key); re-arming after human review is a later slice",
-        ],
+        "known_gaps_open": [],
     }, ensure_ascii=False, indent=2))
     return 0 if not failures else 1
 

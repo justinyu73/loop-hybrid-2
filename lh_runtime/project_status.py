@@ -93,6 +93,15 @@ def build_status(run_store: RunStore, goal_store: GoalStore, *, pricing: dict[st
     parked = [goal["goal_id"] for goal in goal_store.goals_in_state("human_required")]
     cost = token_cost.aggregate(run_store.usage_records(), pricing=pricing)
     value = value_reducer.aggregate(run_store)
+    latest = run_store.latest_receipt_projection()
+    if latest is None:
+        evidence = {"schema": "loop-hybrid-receipt-evidence/v1", "receipt_count": 0, "latest": None}
+    else:
+        evidence = {
+            "schema": "loop-hybrid-receipt-evidence/v1",
+            "receipt_count": latest.pop("receipt_count", 0),
+            "latest": {**latest, "derived_verdict": value_reducer.verdict_for_run(run_store, latest["run_id"])},
+        }
     headline = {
         "active_runs": runs_by_state.get("running", 0) + runs_by_state.get("queued", 0) + runs_by_state.get("retry_pending", 0),
         "completed_goals": goals_by_state.get("completed", 0),
@@ -114,6 +123,7 @@ def build_status(run_store: RunStore, goal_store: GoalStore, *, pricing: dict[st
         "parked_goals": parked,
         "cost": cost,
         "value": value,
+        "evidence": evidence,
     }
 
 

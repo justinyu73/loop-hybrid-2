@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 from command_ingress import submit_command
@@ -246,6 +247,41 @@ def _stale_and_human_stop_case(root: Path) -> dict[str, Any]:
     }
 
 
+def _systemd_calendar_cadence_case() -> dict[str, Any]:
+    service_path = ROOT / "deploy" / "systemd" / "loop-hybrid-supervisor.service.in"
+    timer_path = ROOT / "deploy" / "systemd" / "loop-hybrid-supervisor.timer.in"
+    present = [service_path.is_file(), timer_path.is_file()]
+    if not any(present):
+        return {
+            "ok": True,
+            "detail": {
+                "deployment_adapter": "not_shipped",
+                "calendar_cadence_claimed": False,
+            },
+        }
+    if not all(present):
+        return {
+            "ok": False,
+            "detail": {
+                "deployment_adapter": "incomplete",
+                "service_present": present[0],
+                "timer_present": present[1],
+            },
+        }
+    service = service_path.read_text(encoding="utf-8")
+    timer = timer_path.read_text(encoding="utf-8")
+    checks = {
+        "calendar_owns_one_minute_cadence": "OnCalendar=*:0/1" in timer,
+        "timer_targets_supervisor_service": "Unit=loop-hybrid-supervisor.service" in timer,
+        "persistent_calendar_rearms": "Persistent=true" in timer,
+        "normal_ticks_are_not_start_rate_limited": "StartLimitIntervalSec=0" in service,
+        "stale_burst_limit_removed": "StartLimitBurst=" not in service,
+        "service_remains_bounded_oneshot": "Type=oneshot" in service and "Restart=" not in service,
+        "service_timeout_remains_bounded": "TimeoutStartSec=920" in service,
+    }
+    return {"ok": all(checks.values()), "detail": checks}
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="lh-supervisor-") as raw:
         root = Path(raw)
@@ -253,12 +289,14 @@ def main() -> int:
         scheduled = _scheduled_tick_case(root)
         crashed = _crash_restart_case(root / "crash-restart")
         stale_stop = _stale_and_human_stop_case(root / "stale-stop")
+        systemd_cadence = _systemd_calendar_cadence_case()
 
     cases = [
         {"id": "singleton-second-process-not-holder", **singleton},
         {"id": "scheduled-tick-consumes-idempotently", **scheduled},
         {"id": "crash-releases-owner-and-restart-reacquires", **crashed},
         {"id": "stale-heartbeat-and-stop-gate-observed", **stale_stop},
+        {"id": "calendar-cadence-is-not-rate-limited", **systemd_cadence},
     ]
     failures = [case for case in cases if not case["ok"]]
     print(json.dumps({

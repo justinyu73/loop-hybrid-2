@@ -10,12 +10,13 @@ inside a CLOSED two-choice decision space:
 - ``goal-broken``    — the final attempt is not spent; the goal routes to a
   human with the diagnosis attached
 
-Anything else — malformed output, extra keys, an over-long or empty
-diagnosis, a judge that raises — is rejected and the worker degrades to the
-original max_attempts behavior. The grill is advisory everywhere: it never
+Anything else — malformed output, extra keys, an over-long or empty diagnosis,
+a missing judge, or a judge that raises — is rejected and durably routed to
+``human_required`` once FC-P0 has raised a FailureCase; the loop may not
+silently consume another attempt. The grill is advisory everywhere: it never
 touches the lamp, scope, allowed paths, or goal content, and its output is
-never an acceptance authority. The async external-verdict path is out of
-scope (it has no local lamp output to read).
+never an acceptance authority. The async external-verdict path is out of scope
+(it has no local lamp output to read).
 """
 from __future__ import annotations
 
@@ -108,8 +109,8 @@ def validate_decision(raw: Any) -> dict[str, Any]:
     """Validate raw challenger output against the closed decision space.
 
     Returns ``{"type": "runner-fixable"|"goal-broken", "diagnosis": str}`` or
-    ``{"type": "reject", "reason": str}`` — a reject degrades to the original
-    final-attempt dispatch. The wire form is exactly
+    ``{"type": "reject", "reason": str}`` — once a FailureCase exists, a reject
+    is recorded and routed to a human. The wire form is exactly
     ``{"decision": <choice>, "diagnosis": <str>}``; extra keys reject.
     """
     if not isinstance(raw, dict):
@@ -172,8 +173,8 @@ def make_cli_judge(
     Mirrors the turning-point judge wiring: the returned callable sends
     build_judge_prompt(snapshot) to the CLI and returns the parsed raw
     decision for validate_decision. Any CLI failure or unparseable output
-    raises — the worker catches it and degrades to the original dispatch, so
-    a judge outage never stops the loop.
+    raises — the worker records it against the claimed FailureCase and routes
+    to a human without dispatching another executor attempt.
     """
 
     def grill(snapshot: dict[str, Any]) -> Any:

@@ -106,7 +106,13 @@ def _orca_json(orca_cli: str, args: list[str], *, cwd: Path, timeout_seconds: fl
 
 
 def _validate_provider_binding(binding: Any, *, agent: str) -> ProviderBinding:
-    """Validate one credential-free provider tuple before terminal creation."""
+    """Validate the explicit provider tuple before a terminal is created.
+
+    A binding is intentionally not read from ambient environment: callers must
+    pass the complete tuple for the individual run.  Credentials are not part
+    of this object and URLs with userinfo are rejected so a binding cannot
+    smuggle a secret into a terminal command or receipt.
+    """
     if not isinstance(binding, dict) or set(binding) != {"runner", "base_url", "model"}:
         raise ValueError("provider_binding must contain exactly runner, base_url, and model")
     values = {key: binding.get(key) for key in ("runner", "base_url", "model")}
@@ -126,7 +132,13 @@ def _validate_provider_binding(binding: Any, *, agent: str) -> ProviderBinding:
 
 
 def _bind_orca_provider_argv(agent: str, provider_argv: list[str], binding: Any) -> tuple[list[str], dict[str, str], dict[str, str] | None]:
-    """Bind one Orca terminal without mutating any machine-wide registry."""
+    """Apply only a proven provider-side channel inside one Orca terminal.
+
+    Orca's terminal-create API exposes a command string but no key/value env
+    option.  The wrapper therefore scopes an env overlay to its child shell,
+    while Codex uses its documented per-invocation config flags.  Kimi's known
+    global registry is deliberately rejected rather than silently using it.
+    """
     if binding is None:
         return provider_argv, {}, None
     normalized = _validate_provider_binding(binding, agent=agent)
@@ -158,7 +170,10 @@ def _orca_command(provider_argv: list[str], *, output_path: Path | None = None, 
     if not provider_argv:
         raise ValueError("provider argv must not be empty")
     executable = Path(provider_argv[0])
-    env_prefix = " ".join(f"{name}={shlex.quote(value)}" for name, value in sorted((env_overlay or {}).items()))
+    env_prefix = " ".join(
+        f"{name}={shlex.quote(value)}"
+        for name, value in sorted((env_overlay or {}).items())
+    )
     prefix = f"PATH={shlex.quote(str(executable.parent))}:$PATH"
     if env_prefix:
         prefix = f"{env_prefix} {prefix}"
@@ -177,12 +192,24 @@ def make_orca_agent(
     usage_parser: UsageParser | None = None, usage_collector: UsageCollector | None = None,
     snapshot_fn: SnapshotFn | None = None, orca_cli: str | None = None,
     provider_argv_builder: ArgvBuilder | None = None, output_limit: int = ORCA_OUTPUT_LIMIT,
-    provider_binding: ProviderBinding | None = None,
+    provider_binding: ProviderBinding | None = None, model: str | None = None,
 ) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
-    """Run one provider CLI in an Orca terminal inside LH's existing clone."""
+    """Run one model adapter in an Orca terminal inside LH's existing clone."""
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
-    builders: dict[str, ArgvBuilder] = {"codex": codex_orca_argv, "claude": claude_argv, "kimi": kimi_argv}
+    if provider_binding is not None and model is not None:
+        raise ValueError("model and provider_binding are mutually exclusive")
+    selected_model = model
+    builders: dict[str, ArgvBuilder] = {
+        name: (
+            lambda prompt, selected=name: hosted_provider_argv(
+                selected,
+                prompt,
+                selected_model,
+            )
+        )
+        for name in ("codex", "claude", "kimi")
+    }
     if provider_argv_builder is None:
         try:
             provider_argv_builder = builders[agent]
@@ -341,6 +368,16 @@ def make_orca_agent(
                 usage = usage_parser(stdout)
         except Exception:
             usage = None
+        if binding_projection is not None and isinstance(usage, dict) and usage.get("state") == token_cost.USAGE_MEASURED:
+            # A per-terminal endpoint may be a relay with different pricing or
+            # billing semantics.  The local provider parser proves token
+            # counts, but not that the provider's default pricing table applies
+            # to this binding.  Keep AC4 blocked until endpoint-specific
+            # attribution is supplied rather than emitting a misleading cost.
+            usage = token_cost.unknown_usage(
+                model=str(usage.get("model") or binding_projection.get("model") or agent),
+                reason="per-terminal provider binding has no verified usage/cost attribution",
+            )
         if not isinstance(usage, dict) or usage.get("state") not in {token_cost.USAGE_MEASURED, token_cost.USAGE_UNKNOWN}:
             usage = token_cost.unknown_usage(model=agent, reason="Orca-hosted provider usage unavailable")
         if exit_code != 0:
@@ -357,10 +394,18 @@ def make_orca_agent(
 
 def build_prompt(capsule: dict[str, Any]) -> str:
     goal = capsule.get("goal", {})
+    bootstrap = capsule.get("bootstrap_authority")
+    bootstrap_text = (
+        "\n\nBOOTSTRAP AUTHORITY (routing facts only; target repo authority still wins):\n"
+        + json.dumps(bootstrap, ensure_ascii=False, indent=2)
+        if isinstance(bootstrap, dict)
+        else ""
+    )
     return (
         f"You are the executor in an automated loop, attempt #{capsule.get('attempt')}.\n"
         f"Repository CWD is a disposable clone at base revision {capsule.get('base_revision')}.\n\n"
-        f"GOAL (satisfy exactly this, nothing more):\n{json.dumps(goal, ensure_ascii=False, indent=2)}\n\n"
+        f"GOAL (satisfy exactly this, nothing more):\n{json.dumps(goal, ensure_ascii=False, indent=2)}"
+        f"{bootstrap_text}\n\n"
         "Make the minimal change in this repo to satisfy the goal. Add/adjust tests only if the goal needs them. "
         "Do NOT git commit, push, or touch anything outside this repo. When done, stop."
     )
@@ -455,6 +500,26 @@ def kimi_argv(prompt: str) -> list[str]:
     return ["kimi", "-p", prompt]
 
 
+def hosted_provider_argv(
+    agent: str,
+    prompt: str,
+    model: str | None = None,
+) -> list[str]:
+    """Build provider argv for an Orca terminal without making Orca a model."""
+    if agent == "codex":
+        argv = ["codex", "exec"]
+        if model:
+            argv += ["-m", model]
+        return [
+            *argv,
+            "--ephemeral",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            prompt,
+        ]
+    return judge_argv(agent, prompt, model)
+
+
 def judge_argv(executor: str, prompt: str, model: str | None = None) -> list[str]:
     """Argv for one bounded turning-point judgment call (M1 model routing).
 
@@ -480,6 +545,92 @@ def judge_argv(executor: str, prompt: str, model: str | None = None) -> list[str
     else:
         raise ValueError(f"no judge argv for executor: {executor!r}")
     return argv
+
+
+def evaluation_argv(
+    executor: str,
+    prompt: str,
+    model: str,
+    *,
+    json_schema: dict[str, Any] | None = None,
+) -> list[str]:
+    """Build a no-write evaluation invocation for capability routing.
+
+    Provider transport still requires external network access.  Codex gets an
+    explicit read-only sandbox; Claude gets no tools and plan-only permission.
+    Kimi currently has no equivalent enforceable no-tools flag, so it is not a
+    capability evaluation adapter.
+    """
+    if executor == "codex":
+        return [
+            "codex", "exec", "-m", model,
+            "--sandbox", "read-only",
+            "--ephemeral",
+            prompt,
+        ]
+    if executor == "claude":
+        argv = [
+            "claude", "--model", model,
+            "-p", prompt,
+            "--permission-mode", "plan",
+            "--tools", "",
+            "--no-session-persistence",
+            "--safe-mode",
+            "--output-format", "json",
+        ]
+        if json_schema is not None:
+            argv += [
+                "--json-schema",
+                json.dumps(
+                    json_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        return argv
+    raise ValueError(f"no no-write evaluation adapter for executor: {executor!r}")
+
+
+def make_named_cli_agent(
+    name: str,
+    *,
+    model: str | None = None,
+    provider_binding: ProviderBinding | None = None,
+    timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
+) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
+    """Build one runtime-selected CLI adapter without assigning it a role."""
+    if name == "orca":
+        if model is not None:
+            raise ValueError("Orca model selection must use a complete provider_binding")
+        agent = (
+            provider_binding["runner"]
+            if isinstance(provider_binding, dict) and isinstance(provider_binding.get("runner"), str)
+            else os.environ.get("LH_ORCA_AGENT", "codex")
+        )
+        return make_orca_agent(
+            agent=agent,
+            provider_binding=provider_binding,
+            timeout_seconds=timeout_seconds,
+        )
+    if provider_binding is not None:
+        raise ValueError("provider_binding is supported only by the Orca execution host adapter")
+    builders: dict[str, ArgvBuilder] = {
+        "codex": codex_argv,
+        "claude": claude_argv,
+        "kimi": kimi_argv,
+    }
+    if name not in builders:
+        raise ValueError(f"unknown CLI adapter: {name!r}; choose one of {sorted([*builders, 'orca'])}")
+    builder = builders[name] if model is None else lambda prompt: judge_argv(name, prompt, model)
+    collector, snapshot = _usage_hooks(name)
+    return make_cli_agent(
+        builder,
+        name=name,
+        timeout_seconds=timeout_seconds,
+        usage_collector=collector,
+        snapshot_fn=snapshot,
+    )
 
 
 import claude_usage  # noqa: E402

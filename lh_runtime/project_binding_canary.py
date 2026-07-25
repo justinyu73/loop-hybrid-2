@@ -85,10 +85,14 @@ def main() -> int:
         compiler = worker.compilers["campaign-g2-fixture"]
         _seed(worker, compiler, goal_id="campaign-g2-fixture:stage-1", stage_id="stage-1", event_key="bind-seed-1")
         summary = run_driver(worker, holder="bind", model=_model, max_cycles=30, sleep_fn=lambda _s: None)
-        # binding works iff the resolved bundle cloned source_repo@base_revision and ran the loop
-        # (a run was dispatched and reduced to a terminal outcome); stage completion depends on the
-        # campaign's acceptance lamp, which is orthogonal to the binding.
-        drove = summary["runs_dispatched"] >= 1 and len(summary["outcomes"]) >= 1
+        # Binding works iff the resolved bundle cloned source_repo@base_revision and ran the loop.
+        # This fixture intentionally has no judge and a lamp that stays red; FC-P0 therefore parks
+        # the goal instead of silently consuming the final attempt. Completion versus the expected
+        # parked result is orthogonal to the project-binding contract.
+        drove = (
+            summary["runs_dispatched"] >= 1
+            and (len(summary["outcomes"]) >= 1 or len(summary["parked_goals"]) >= 1)
+        )
 
         def _bad(mutate) -> bool:
             bad = json.loads(contract_path.read_text())
@@ -104,10 +108,35 @@ def main() -> int:
         bad_schema = _bad(lambda c: c.__setitem__("schema", "wrong/v9"))
         missing_field = _bad(lambda c: c.__delitem__("source_repo"))
 
+        # B13: external_verdict.adapter.auto_merge is optional; true flows into
+        # run kwargs, false/absent stays absent, non-boolean is rejected.
+        def _with_adapter(auto_merge) -> Path:
+            contract = json.loads(contract_path.read_text())
+            adapter = {"type": "github_pr", "owner": "o", "repo": "r", "base_branch": "master"}
+            if auto_merge is not None:
+                adapter["auto_merge"] = auto_merge
+            contract["external_verdict"] = {"owner": "o", "repo": "r", "workflow": "CI", "adapter": adapter}
+            p = root / f"adapter-{auto_merge!r}.json"
+            p.write_text(json.dumps(contract), encoding="utf-8")
+            return p
+
+        auto_merge_ok = (
+            resolve_project(_with_adapter(True))["run_kwargs"]["github_pr_adapter"].get("auto_merge") is True
+            and "auto_merge" not in resolve_project(_with_adapter(False))["run_kwargs"]["github_pr_adapter"]
+            and "auto_merge" not in resolve_project(_with_adapter(None))["run_kwargs"]["github_pr_adapter"]
+        )
+        try:
+            resolve_project(_with_adapter("yes"))
+            auto_merge_rejects_nonbool = False
+        except SystemExit:
+            auto_merge_rejects_nonbool = True
+
         cases = [
             case("resolves-contract-to-run-kwargs", resolve_ok, json.dumps({k: kw[k] for k in ("source_repo", "base_revision", "goal_store_root")})),
             case("resolved-bundle-drives-the-loop", drove, str(summary)),
             case("bad-schema-and-missing-field-rejected", bad_schema and missing_field, f"bad_schema={bad_schema} missing_field={missing_field}"),
+            case("auto-merge-flag-validated", auto_merge_ok and auto_merge_rejects_nonbool,
+                 f"flow={auto_merge_ok} nonbool_rejected={auto_merge_rejects_nonbool}"),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({

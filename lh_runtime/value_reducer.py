@@ -23,6 +23,7 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import authority_surface
 
 VERDICT_SCHEMA = "loop-hybrid-value-verdict/v1"
 _DIFF_FILE_RE = re.compile(r"^diff --git a/.+? b/(.+)$", re.MULTILINE)
@@ -53,14 +54,6 @@ def _in_scope(path: str, allowed_paths: list[str]) -> bool:
     return False
 
 
-# S1 authority surface: the engine must never modify its own acceptance
-# authority. A touched file under any of these is value-RED and routes to a
-# human via the existing value-gate path — enforced in code, not by convention.
-AUTHORITY_PREFIXES = ("gate-pack/", "docs/contracts/", ".github/workflows/")
-AUTHORITY_FILES = {"AGENTS.md"}
-CANARY_SUFFIX = "_canary.py"
-
-
 def _lamp_script_paths(lamp_argv: list[str] | None) -> list[str]:
     """Repo-relative script paths referenced by the lamp's own argv (e.g.
     ["sh", "gate-pack/verify.sh"] -> "gate-pack/verify.sh"). Flags, absolute
@@ -77,17 +70,13 @@ def _lamp_script_paths(lamp_argv: list[str] | None) -> list[str]:
 
 
 def _authority_surface_reasons(touched: list[str], lamp_script_paths: list[str]) -> list[str]:
-    surface = set(lamp_script_paths)
-    reasons: list[str] = []
-    for path in touched:
-        if (
-            path in AUTHORITY_FILES
-            or path.endswith(CANARY_SUFFIX)
-            or any(path == prefix or path.startswith(prefix) for prefix in AUTHORITY_PREFIXES)
-            or path in surface
-        ):
-            reasons.append(f"authority surface touched: {path}")
-    return reasons
+    return [
+        f"authority surface touched: {path}"
+        for path in authority_surface.authority_paths(
+            touched,
+            lamp_paths=lamp_script_paths,
+        )
+    ]
 
 
 def value_verdict(*, exit_code: Any, diff_text: str | None, allowed_paths: list[str], precheck: bool = False, stderr_text: str | None = None, lamp_argv: list[str] | None = None) -> dict[str, Any]:

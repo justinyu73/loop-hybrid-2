@@ -110,7 +110,10 @@ def _fake_factory(calls: list[dict]):
             src = workspace / "src"
             src.mkdir(exist_ok=True)
             (src / "live-marker.txt").write_text(MARKER_LINE + "\n", encoding="utf-8")
-            return {"summary": "w9d offline fixture executor"}
+            return {
+                "summary": "w9d offline fixture executor",
+                "usage": token_cost.measured_usage(model="codex", input_tokens=2, output_tokens=1),
+            }
         return model
     return factory
 
@@ -127,6 +130,15 @@ def _dry() -> int:
         verification = receipt["verification"]
         goal_state = GoalStore(root / "goals").get_goal(GOAL_ID)["state"]
         verdict = verdict_for_run(run_store, run["run_id"])
+        persistent_root = root / "persistent"
+        persistent_root.mkdir()
+        persistent_calls: list[dict] = []
+        persistent_exit, persistent_report = _live_at(
+            persistent_root,
+            "fake",
+            persistent=True,
+            factory_overrides={"fake": _fake_factory(persistent_calls)},
+        )
         cases = [
             {"id": "production-entry-executes-the-chain",
              "ok": result.get("mode") == "execute" and result.get("invoked") is True,
@@ -145,6 +157,15 @@ def _dry() -> int:
             {"id": "exactly-one-executor-call",
              "ok": len(calls) == 1,
              "detail": json.dumps({"calls": len(calls)})},
+            {"id": "explicit-work-root-retains-rereadable-evidence",
+             "ok": persistent_exit == 0
+             and persistent_report["status"] == "pass"
+             and persistent_report["evidence"]["persistent"] is True
+             and Path(persistent_report["evidence"]["receipt"]).is_file()
+             and Path(persistent_report["evidence"]["provider"]).is_file()
+             and Path(persistent_report["evidence"]["report"]).is_file()
+             and len(persistent_calls) == 1,
+             "detail": json.dumps({"exit": persistent_exit, "evidence": persistent_report["evidence"]})},
         ]
     failures = [{"id": case["id"], "detail": case["detail"]} for case in cases if not case["ok"]]
     print(json.dumps({
@@ -185,57 +206,94 @@ def _preflight(executor: str) -> str | None:
     return None
 
 
-def _live(executor: str) -> int:
+def _live_at(
+    root: Path,
+    executor: str,
+    *,
+    persistent: bool,
+    factory_overrides: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    source, base = make_source_repo(root)
+    result = _drive(root, source, base, executor=executor, factory_overrides=factory_overrides)
+    run_store = RunStore(root / "runs")
+    run = _only_run(run_store)
+    receipt_meta = run_store.latest_receipt(run["run_id"])
+    receipt = _receipt(run_store, run["run_id"])
+    verification = receipt["verification"]
+    usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
+    total_tokens = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)) + int(usage.get("cache_read_tokens", 0))
+    cost = token_cost.compute_cost(usage)
+    goal_state = GoalStore(root / "goals").get_goal(GOAL_ID)["state"]
+    provider = receipt.get("provider") if isinstance(receipt.get("provider"), dict) else {}
+    provider_artifact = provider.get("artifact") if isinstance(provider.get("artifact"), dict) else {}
+    receipt_path = run_store.root / receipt_meta["receipt_ref"]
+    provider_path = run_store.root / provider_artifact["ref"] if isinstance(provider_artifact.get("ref"), str) else None
+    receipt_summary = {
+        "run_id": run["run_id"],
+        "attempt": receipt.get("attempt"),
+        "exit_code": verification.get("exit_code"),
+        "usage": usage,
+        "cost": cost,
+    }
+    checks = {
+        "run_verified_real_model_path": run["state"] == "verified" and verification.get("exit_code") == 0 and "precheck" not in verification,
+        "goal_completed": goal_state == "completed",
+        "usage_is_measured": usage.get("state") == "measured",
+        "usage_is_a_sane_delta": usage.get("state") == "measured" and total_tokens < MAX_LIVE_TOTAL_TOKENS,
+        "cost_under_one_usd": cost.get("state") == "measured" and float(cost.get("cost_usd", 0.0)) < MAX_LIVE_COST_USD,
+        "durable_receipt_exists": receipt_path.is_file(),
+        "durable_provider_artifact_exists": provider_path is not None and provider_path.is_file(),
+    }
+    failures = [{"id": name} for name, ok in checks.items() if not ok]
+    report = {
+        "check_id": "lh-live-smoke",
+        "mode": "live",
+        "executor": executor,
+        "status": "pass" if not failures else "fail",
+        "blocking_failures": failures,
+        "checks": checks,
+        "receipt": receipt_summary,
+        "driver": {"stop_reason": result.get("driver", {}).get("stop_reason"), "runs_dispatched": result.get("driver", {}).get("runs_dispatched")},
+        "evidence": {
+            "persistent": persistent,
+            "root": str(root),
+            "receipt": str(receipt_path),
+            "provider": str(provider_path) if provider_path is not None else None,
+        },
+    }
+    if persistent:
+        report_path = root / "live-report.json"
+        report["evidence"]["report"] = str(report_path)
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return (0 if not failures else 1), report
+
+
+def _live(executor: str, *, work_root: Path | None = None) -> int:
     reason = _preflight(executor)
     if reason is not None:
         print(json.dumps({"check_id": "lh-live-smoke", "mode": "live", "status": "skip", "reason": reason}, ensure_ascii=False, indent=2))
         return 0
+    if work_root is not None:
+        root = work_root.resolve()
+        root.mkdir(parents=True, exist_ok=False)
+        exit_code, report = _live_at(root, executor, persistent=True)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return exit_code
     with tempfile.TemporaryDirectory() as raw:
-        root = Path(raw)
-        source, base = make_source_repo(root)
-        result = _drive(root, source, base, executor=executor)
-        run_store = RunStore(root / "runs")
-        run = _only_run(run_store)
-        receipt = _receipt(run_store, run["run_id"])
-        verification = receipt["verification"]
-        usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
-        total_tokens = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)) + int(usage.get("cache_read_tokens", 0))
-        cost = token_cost.compute_cost(usage)
-        goal_state = GoalStore(root / "goals").get_goal(GOAL_ID)["state"]
-        receipt_summary = {
-            "run_id": run["run_id"],
-            "attempt": receipt.get("attempt"),
-            "exit_code": verification.get("exit_code"),
-            "usage": usage,
-            "cost": cost,
-        }
-        checks = {
-            "run_verified_real_model_path": run["state"] == "verified" and verification.get("exit_code") == 0 and "precheck" not in verification,
-            "goal_completed": goal_state == "completed",
-            "usage_is_measured": usage.get("state") == "measured",
-            "usage_is_a_sane_delta": usage.get("state") == "measured" and total_tokens < MAX_LIVE_TOTAL_TOKENS,
-            "cost_under_one_usd": cost.get("state") == "measured" and float(cost.get("cost_usd", 0.0)) < MAX_LIVE_COST_USD,
-        }
-        failures = [{"id": name} for name, ok in checks.items() if not ok]
-        print(json.dumps({
-            "check_id": "lh-live-smoke",
-            "mode": "live",
-            "executor": executor,
-            "status": "pass" if not failures else "fail",
-            "blocking_failures": failures,
-            "checks": checks,
-            "receipt": receipt_summary,
-            "driver": {"stop_reason": result.get("driver", {}).get("stop_reason"), "runs_dispatched": result.get("driver", {}).get("runs_dispatched")},
-        }, ensure_ascii=False, indent=2))
-        return 0 if not failures else 1
+        exit_code, report = _live_at(Path(raw), executor, persistent=False)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="W9d live smoke gate (dry by default; --live uses a real coding CLI)")
     parser.add_argument("--live", action="store_true", help="run the chain with a real coding CLI (never in verify.sh)")
     parser.add_argument("--executor", default="codex", choices=sorted(glr.EXECUTORS), help="live-mode executor CLI")
+    parser.add_argument("--work-root", type=Path, help="new durable evidence directory; valid only with --live")
     args = parser.parse_args(argv)
-    return _live(args.executor) if args.live else _dry()
+    if args.work_root is not None and not args.live:
+        parser.error("--work-root requires --live")
+    return _live(args.executor, work_root=args.work_root) if args.live else _dry()
 
 
 if __name__ == "__main__":

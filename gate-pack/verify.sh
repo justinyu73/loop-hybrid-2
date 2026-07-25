@@ -26,6 +26,9 @@ run_gate goal-hierarchy-h1 python3 -B lh_runtime/hierarchy_canary.py || exit $?
 run_gate goal-hierarchy-h2 python3 -B lh_runtime/selector_canary.py || exit $?
 run_gate goal-hierarchy-h3 python3 -B lh_runtime/turning_point_canary.py || exit $?
 run_gate lh-judge-wiring python3 -B lh_runtime/judge_wiring_canary.py || exit $?
+run_gate lh-capability-routing python3 -B lh_runtime/capability_resolver_canary.py || exit $?
+run_gate lh-routing-authority python3 -B lh_runtime/routing_authority_canary.py || exit $?
+run_gate lh-adaptive-routing python3 -B lh_runtime/adaptive_routing_canary.py || exit $?
 run_gate campaign-compiler-g2 python3 -B lh_runtime/campaign_canary.py || exit $?
 run_gate goal-matcher-g3 python3 -B lh_runtime/matcher_canary.py || exit $?
 run_gate admission-bridge-g4 python3 -B lh_runtime/admission_canary.py || exit $?
@@ -44,6 +47,8 @@ run_gate lh-command-ingress python3 -B lh_runtime/command_ingress_canary.py || e
 run_gate lh-intent-derivation python3 -B lh_runtime/intent_derivation_canary.py || exit $?
 run_gate lh-goal-loop-driver python3 -B lh_runtime/goal_loop_driver_canary.py || exit $?
 run_gate lh-supervisor python3 -B lh_runtime/supervisor_canary.py || exit $?
+run_gate lh-scheduler-entrypoint python3 -B lh_runtime/scheduler_entrypoint_canary.py || exit $?
+run_gate lh-dispatch-envelope python3 -B lh_runtime/dispatch_envelope_canary.py || exit $?
 run_gate lh-attempt-fencing python3 -B lh_runtime/attempt_fencing_canary.py || exit $?
 run_gate lh-attempt-timeout python3 -B lh_runtime/attempt_timeout_canary.py || exit $?
 run_gate lh-driver-heartbeat python3 -B lh_runtime/driver_heartbeat_canary.py || exit $?
@@ -52,6 +57,7 @@ run_gate lh-run-liveness python3 -B lh_runtime/run_liveness_canary.py || exit $?
 run_gate lh-durable-budget python3 -B lh_runtime/durable_budget_canary.py || exit $?
 run_gate lh-b12-live-smoke python3 -B lh_runtime/b12_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-executor-wiring python3 -B lh_runtime/executor_wiring_canary.py || exit $?
+run_gate lh-orca-executor-cut5 python3 -B lh_runtime/orca_executor_canary.py || exit $?
 run_gate lh-token-accounting python3 -B lh_runtime/token_accounting_canary.py || exit $?
 run_gate lh-project-status python3 -B lh_runtime/project_status_canary.py || exit $?
 run_gate lh-status-snapshot python3 -B lh_runtime/status_snapshot_canary.py || exit $?
@@ -61,6 +67,7 @@ run_gate lh-github-conclusion python3 -B lh_runtime/github_conclusion_canary.py 
 run_gate lh-github-verdict-wiring python3 -B lh_runtime/github_verdict_wiring_canary.py || exit $?
 run_gate lh-owner-durability python3 -B lh_runtime/owner_durability_canary.py || exit $?
 run_gate lh-grill-loop python3 -B lh_runtime/grill_loop_canary.py || exit $?
+run_gate lh-failure-case-live-acceptance python3 -B lh_runtime/failure_case_live_acceptance_canary.py || exit $?
 run_gate lh-stop-lines python3 -B lh_runtime/stop_lines_canary.py || exit $?
 run_gate lh-usage-delta python3 -B lh_runtime/usage_delta_canary.py || exit $?
 run_gate lh-cli-executor-flags python3 -B lh_runtime/cli_flags_canary.py || exit $?
@@ -69,6 +76,8 @@ run_gate lh-usage-void python3 -B lh_runtime/usage_void_canary.py || exit $?
 run_gate lh-standing-intent python3 -B lh_runtime/standing_intent_canary.py || exit $?
 run_gate lh-run-revival python3 -B lh_runtime/revival_canary.py || exit $?
 run_gate lh-github-pr-adapter python3 -B lh_runtime/github_pr_adapter_canary.py || exit $?
+run_gate lh-diff-grader python3 -B lh_runtime/diff_grader_canary.py || exit $?
+run_gate lh-merge-gate python3 -B lh_runtime/merge_gate_canary.py || exit $?
 run_gate lh-authority-surface python3 -B lh_runtime/s1_canary.py || exit $?
 run_gate lh-evidence-integrity python3 -B lh_runtime/evidence_integrity_canary.py || exit $?
 run_gate lh-b7-live-smoke python3 -B lh_runtime/b7_live_smoke_canary.py --dry-run || exit $?

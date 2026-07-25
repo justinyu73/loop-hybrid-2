@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -9,6 +11,7 @@ from typing import Any, Callable
 import external_action_port as eap
 import external_verdict as ev
 import grill_loop
+import merge_gate as merge_gate_mod
 import turning_point as tp
 import value_reducer
 from admission_bridge import GoalAdmissionBridge
@@ -17,6 +20,8 @@ from command_ingress import submit_command
 from controller import LoopController
 from goal_matcher import GoalMatcher
 from goal_store import GoalStore
+from knowledge_indexer import index_repo, index_run_evidence
+from knowledge_store import KnowledgeStore
 from run_store import RunStore
 
 
@@ -97,7 +102,10 @@ class GoalLoopWorker:
         action_ledger: eap.ActionLedger | None = None,
         external_adapter: eap.ExternalAdapter | None = None,
         grill_runner: grill_loop.GrillRunner | None = None,
+        merge_gate: merge_gate_mod.MergeGate | None = None,
         now_fn: Callable[[], datetime] | None = None,
+        knowledge_store: KnowledgeStore | None = None,
+        knowledge_repo_roots: tuple[Path, ...] = (),
     ):
         if (action_ledger is None) != (external_adapter is None):
             raise ValueError("action_ledger and external_adapter must be supplied together")
@@ -114,6 +122,9 @@ class GoalLoopWorker:
         # W6a: optional challenger grill before a sync run's last allowed
         # attempt. None = today's behavior; the grill is advisory everywhere.
         self.grill_runner = grill_runner
+        # B13: optional conditional auto-merge gate, consulted only when a
+        # parked run resolves. None = output stops at the draft PR.
+        self.merge_gate = merge_gate
         # W9f: clock for the standing-intent day window; injectable so the
         # emitter's window math stays testable without sleeping.
         self._now_fn = now_fn if now_fn is not None else lambda: datetime.now(timezone.utc)
@@ -121,6 +132,8 @@ class GoalLoopWorker:
         # authority: a lamp-passing but value-RED run does not auto-advance, it
         # routes to human_required (LH execution model: 报红 gates completion).
         self.value_gate = value_gate
+        self.knowledge_store = knowledge_store
+        self.knowledge_repo_roots = tuple(Path(item).resolve() for item in knowledge_repo_roots)
 
     def tick(
         self,
@@ -138,17 +151,23 @@ class GoalLoopWorker:
         external = []
         if verdict_store is not None and conclusion_source is not None:
             external = self.controller.resume_external(verdict_store=verdict_store, source=conclusion_source)
+        auto_merge = []
+        if self.merge_gate is not None and external:
+            # B13: human merges found on poll feed the trust ramp; runs that
+            # resolved verified-with-success go through the gate's conditions.
+            auto_merge = self.merge_gate.on_poll_resolved(external, at=time.time())
         terminal_before = self._reduce_one_terminal_run()
         event_result = self._process_one_event(holder)
         run_result = self._dispatch_one_run(holder, model, turning_point=turning_point, verdict_store=verdict_store)
         terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped"} else None
         campaign_stops = self._campaign_failure_lines()
-        progressed = any(item is not None and item != [] for item in (standing, startup, external, terminal_before, event_result, run_result, terminal_after, campaign_stops))
+        progressed = any(item is not None and item != [] for item in (standing, startup, external, auto_merge, terminal_before, event_result, run_result, terminal_after, campaign_stops))
         return {
             "status": "progress" if progressed else "idle",
             "standing_emitted": standing,
             "startup_reconciled": startup,
             "external_resumed": external,
+            "auto_merge": auto_merge,
             "terminal_before": terminal_before,
             "event": event_result,
             "run": run_result,
@@ -208,18 +227,13 @@ class GoalLoopWorker:
         human_required/stopped goals; any completed goal resets it to zero.
         When the count reaches the campaign's declared threshold, the
         remaining active/candidate goals of that campaign route to a human in
-        one batch and a durable event records the stop. The line fires once
-        per campaign (idempotent event key).
+        one batch and a durable event records the stop. A completed goal
+        establishes a new episode anchor, so a later independent failure
+        episode can fire once again without replaying the earlier stop.
         """
         stops: list[dict[str, Any]] = []
         for campaign_id, compiler in self.compilers.items():
             threshold = int(getattr(compiler, "failure_stop_threshold", 3))
-            event_key = f"campaign-failure-line:{campaign_id}"
-            try:
-                self.goal_store.get_event(event_key)
-                continue  # the line already fired for this campaign
-            except KeyError:
-                pass
             outcomes = [
                 goal
                 for state in ("human_required", "stopped", "completed")
@@ -228,10 +242,22 @@ class GoalLoopWorker:
             ]
             outcomes.sort(key=lambda goal: (float(goal.get("updated_at") or 0), goal["goal_id"]))
             consecutive = 0
+            episode_anchor = "initial"
             for goal in outcomes:
-                consecutive = 0 if goal["state"] == "completed" else consecutive + 1
+                if goal["state"] == "completed":
+                    consecutive = 0
+                    episode_anchor = f"{goal['goal_id']}:{float(goal.get('updated_at') or 0):.9f}"
+                else:
+                    consecutive += 1
             if consecutive < threshold:
                 continue
+            episode_id = hashlib.sha256(f"{campaign_id}\0{episode_anchor}".encode()).hexdigest()[:16]
+            event_key = f"campaign-failure-line:{campaign_id}:{episode_id}"
+            try:
+                self.goal_store.get_event(event_key)
+                continue
+            except KeyError:
+                pass
             routed: list[str] = []
             for goal in self.goal_store.active_goals(campaign_id=campaign_id):
                 self.goal_store.transition_goal(goal["goal_id"], "human_required", expected_state="active")
@@ -245,6 +271,7 @@ class GoalLoopWorker:
                 "campaign_id": campaign_id,
                 "consecutive_failures": consecutive,
                 "threshold": threshold,
+                "episode_id": episode_id,
                 "routed_goal_ids": sorted(routed),
             }
             event = self.goal_store.record_event(
@@ -255,7 +282,7 @@ class GoalLoopWorker:
                 payload=payload,
             )
             self.goal_store.transition_event(event["event_key"], "human_required", result=payload)
-            stops.append(payload)
+            stops.append({**payload, "event_key": event_key})
         return stops
 
     def _process_one_event(self, holder: str) -> dict[str, Any] | None:
@@ -268,8 +295,217 @@ class GoalLoopWorker:
                 self.goal_store.release_event(event["event_key"], holder)
         return None
 
+    def _process_control_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Durably acknowledge SH context control without creating work.
+
+        Host/provider handoff remains Orca-owned. LH records the policy result,
+        accepts bounded host evidence, and only permits the old-session stop
+        transition after a durable successor heartbeat event.
+        """
+        event_key = event["event_key"]
+        event_type = event["event_type"]
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        base = {
+            "schema": "lh-rollover-control-ack/v1",
+            "event_key": event_key,
+            "control_event": event_type,
+            "project_id": payload.get("project_id"),
+            "campaign_id": payload.get("campaign_id"),
+            "correlation_id": payload.get("correlation_id"),
+            "payload_digest": event.get("payload_digest"),
+            "context_ratio": payload.get("context_ratio"),
+            "goal_created": False,
+            "run_created": False,
+            "old_session_stopped": False,
+            "successor_heartbeat": "not_observed",
+        }
+
+        def control_receipt(status: str, evidence: dict[str, Any]) -> dict[str, Any]:
+            body = {
+                "schema": "lh-rollover-control-receipt/v2",
+                "event_key": event_key,
+                "event_type": event_type,
+                "project_id": payload.get("project_id"),
+                "campaign_id": payload.get("campaign_id"),
+                "correlation_id": payload.get("correlation_id"),
+                "payload_digest": event.get("payload_digest"),
+                "status": status,
+                "evidence": evidence,
+            }
+            digest = "sha256:" + hashlib.sha256(
+                json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            return {
+                "schema": "lh-rollover-control-receipt/v2",
+                "ref": f"goal_event://{event_key}",
+                "digest": digest,
+                "status": status,
+                "event_key": event_key,
+                "event_type": event_type,
+                "project_id": payload.get("project_id"),
+                "campaign_id": payload.get("campaign_id"),
+                "correlation_id": payload.get("correlation_id"),
+                "payload_digest": event.get("payload_digest"),
+                "evidence_digest": "sha256:" + hashlib.sha256(
+                    json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+            }
+
+        if event_type == "context_pressure":
+            result = {
+                **base,
+                "status": "context_pressure_ack",
+                "action": "notify_only",
+                "checkpoint": {"status": "not_requested"},
+            }
+            result["receipt"] = control_receipt("context_pressure_ack", {"action": "notify_only"})
+            self.goal_store.transition_event(event_key, "completed", result=result)
+            return result
+
+        if event_type == "successor_heartbeat":
+            rollover_key = payload.get("rollover_event_key")
+            try:
+                rollover = self.goal_store.get_event(str(rollover_key))
+            except (KeyError, TypeError):
+                rollover = None
+            rollover_result = rollover.get("result") if isinstance(rollover, dict) and isinstance(rollover.get("result"), dict) else {}
+            if rollover is None or rollover_result.get("status") != "rollover_accepted":
+                result = {
+                    **base,
+                    "status": "human_required",
+                    "reason": "rollover_acceptance_missing",
+                    "action": "host_handoff_blocked",
+                    "old_session_stop_allowed": False,
+                }
+                result["receipt"] = control_receipt("human_required", {"reason": result["reason"]})
+                self.goal_store.transition_event(event_key, "human_required", result=result)
+                return result
+            proof = payload.get("heartbeat_proof") if isinstance(payload.get("heartbeat_proof"), dict) else {}
+            evidence = {
+                "rollover_event_key": rollover_key,
+                "heartbeat_id": payload.get("heartbeat_id"),
+                "successor_handle": payload.get("successor_handle"),
+                "provider": payload.get("provider"),
+                "observed_at": payload.get("observed_at"),
+                "output_digest": proof.get("output_digest"),
+                "turn_completed": proof.get("turn_completed"),
+                "identity_pair_digest": payload.get("identity_pair_digest"),
+                "successor_identity_digest": payload.get("successor_identity_digest"),
+            }
+            result = {
+                **base,
+                "status": "successor_heartbeat_observed",
+                "action": "ready_for_old_session_stop",
+                "successor_heartbeat": "observed",
+                "old_session_stop_allowed": True,
+                "checkpoint": {
+                    "status": "control_acknowledged",
+                    "next_action": "stop predecessor only after this receipt is read back",
+                },
+                "heartbeat": evidence,
+            }
+            result["receipt"] = control_receipt("successor_heartbeat_observed", evidence)
+            self.goal_store.transition_event(event_key, "completed", result=result)
+            return result
+
+        if event_type == "rollover_finalized":
+            heartbeat_key = payload.get("heartbeat_event_key")
+            try:
+                heartbeat = self.goal_store.get_event(str(heartbeat_key))
+            except (KeyError, TypeError):
+                heartbeat = None
+            heartbeat_result = heartbeat.get("result") if isinstance(heartbeat, dict) and isinstance(heartbeat.get("result"), dict) else {}
+            if heartbeat is None or heartbeat_result.get("status") != "successor_heartbeat_observed":
+                result = {
+                    **base,
+                    "status": "human_required",
+                    "reason": "successor_heartbeat_required_before_stop",
+                    "action": "old_session_stop_blocked",
+                    "old_session_stop_allowed": False,
+                }
+                result["receipt"] = control_receipt("human_required", {"reason": result["reason"]})
+                self.goal_store.transition_event(event_key, "human_required", result=result)
+                return result
+            evidence = {
+                "heartbeat_event_key": heartbeat_key,
+                "old_session_handle": payload.get("old_session_handle"),
+                "old_session_stopped": payload.get("old_session_stopped"),
+                "checkpoint_digest": payload.get("checkpoint_digest"),
+                "next_action_digest": payload.get("next_action_digest"),
+                "stop_evidence": payload.get("stop_evidence"),
+                "identity_pair_digest": payload.get("identity_pair_digest"),
+                "routing_switch_digest": payload.get("routing_switch_digest"),
+                "successor_identity_digest": payload.get("successor_identity_digest"),
+                "predecessor_identity_digest": payload.get("predecessor_identity_digest"),
+                "post_close_digest": payload.get("post_close_digest"),
+                "transaction_path": payload.get("transaction_path"),
+            }
+            result = {
+                **base,
+                "status": "rollover_finalized",
+                "action": "handoff_complete",
+                "successor_heartbeat": "observed",
+                "old_session_stopped": True,
+                "old_session_stop_allowed": True,
+                "checkpoint": {"status": "handoff_complete", "digest": payload.get("checkpoint_digest")},
+                "stop": evidence,
+            }
+            result["receipt"] = control_receipt("rollover_finalized", evidence)
+            self.goal_store.transition_event(event_key, "completed", result=result)
+            return result
+
+        packet = payload.get("handoff_packet")
+        safe_point = payload.get("safe_point_observed") is True
+        if not safe_point:
+            result = {
+                **base,
+                "status": "human_required",
+                "reason": "safe_point_required",
+                "action": "host_handoff_blocked",
+                "checkpoint": {"status": "not_started"},
+                "handoff_packet_present": isinstance(packet, dict),
+            }
+            self.goal_store.transition_event(event_key, "human_required", result=result)
+            return result
+        if not isinstance(packet, dict) or packet.get("schema") != "external-hub-handoff-packet/v1":
+            result = {
+                **base,
+                "status": "human_required",
+                "reason": "handoff_packet_invalid",
+                "action": "host_handoff_blocked",
+                "checkpoint": {"status": "not_started"},
+            }
+            self.goal_store.transition_event(event_key, "human_required", result=result)
+            return result
+        result = {
+            **base,
+            "status": "rollover_accepted",
+            "action": "host_handoff_pending",
+            "checkpoint": {
+                "status": "control_acknowledged",
+                "park_state": "not_claimed",
+                "proof": "LH has not stopped or parked a host session in this bounded node",
+            },
+            "handoff_packet_present": True,
+            "successor_heartbeat_required": True,
+        }
+        predecessor = packet.get("predecessor_identity") if isinstance(packet.get("predecessor_identity"), dict) else {}
+        result["receipt"] = control_receipt(
+            "rollover_accepted",
+            {
+                "handoff_packet_present": True,
+                "safe_point_observed": True,
+                "predecessor_identity_digest": predecessor.get("identity_digest"),
+                "checkpoint_digest": packet.get("checkpoint_digest"),
+            },
+        )
+        self.goal_store.transition_event(event_key, "completed", result=result)
+        return result
+
     def _process_event(self, event: dict[str, Any]) -> dict[str, Any]:
         event_key = event["event_key"]
+        if event["event_type"] in {"context_pressure", "rollover_requested", "successor_heartbeat", "rollover_finalized"}:
+            return self._process_control_event(event)
         if event["event_type"] == "scheduled_tick":
             result = {
                 "status": "scheduled_tick_consumed",
@@ -479,6 +715,33 @@ class GoalLoopWorker:
         # reject (including parent_done and out-of-set select): deterministic fallback
         return eligible[0][0], None
 
+    def _goal_knowledge_context(self, run: dict[str, Any]) -> dict[str, Any] | None:
+        """Refresh bounded local sources and retrieve advisory next-Goal context."""
+        if self.knowledge_store is None:
+            return None
+        try:
+            for repo in self.knowledge_repo_roots:
+                index_repo(repo=repo, store=self.knowledge_store, source_prefix=repo.name)
+            index_run_evidence(run_store=self.run_store, store=self.knowledge_store)
+            goal = run.get("goal") if isinstance(run.get("goal"), dict) else {}
+            feature = goal.get("feature_contract", "")
+            if isinstance(feature, (dict, list)):
+                feature = json.dumps(feature, ensure_ascii=False, sort_keys=True)
+            query = f"{str(feature)[:700]} verification receipt failure restart retry budget"
+            return self.knowledge_store.bounded_context(query, max_results=4, max_chars=2400)
+        except Exception as exc:
+            # Retrieval is advisory.  A broken index must not stop execution or
+            # widen any acceptance path.
+            return {
+                "schema": "loop-hybrid-goal-context/v1",
+                "query": "",
+                "authority": "advisory_only",
+                "gate_mutation": "forbidden",
+                "hits": [],
+                "chars": 0,
+                "unavailable": type(exc).__name__,
+            }
+
     def _dispatch_one_run(
         self,
         holder: str,
@@ -501,10 +764,15 @@ class GoalLoopWorker:
         if isinstance(envelope, dict) and isinstance(envelope.get("acceptance_lamp"), dict):
             verifier_argv = envelope["acceptance_lamp"].get("verification_argv")
         if isinstance(verifier_argv, list) and verifier_argv and all(isinstance(item, str) and item.strip() for item in verifier_argv):
-            grill_note, grill_route = self._grill_before_final_attempt(run, goal_id)
+            grill_note, grill_route = self._grill_before_final_attempt(
+                run,
+                goal_id,
+                holder=holder,
+                acceptance_argv=verifier_argv,
+            )
             if grill_route is not None:
                 return grill_route
-            return self.controller.tick(run["run_id"], holder=holder, model=model, verifier_argv=verifier_argv, grill_note=grill_note)
+            return self.controller.tick(run["run_id"], holder=holder, model=model, verifier_argv=verifier_argv, grill_note=grill_note, knowledge_context=self._goal_knowledge_context(run))
         # W2: an envelope-declared external_verdict (and no local verifier) takes
         # the async leg — dispatch the external action at most once, park the run.
         external = envelope.get("external_verdict") if isinstance(envelope, dict) else None
@@ -516,7 +784,7 @@ class GoalLoopWorker:
             return self.controller.tick_async(
                 run["run_id"], holder=holder, model=model, verdict_store=verdict_store,
                 action_ledger=self.action_ledger, adapter=self.external_adapter,
-                action_id=external["action_id"].strip(),
+                action_id=external["action_id"].strip(), knowledge_context=self._goal_knowledge_context(run),
             )
         result = {"status": "human_required", "run_id": run["run_id"], "reason": "durable verification plan is missing"}
         self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
@@ -526,34 +794,128 @@ class GoalLoopWorker:
         self,
         run: dict[str, Any],
         goal_id: str,
+        *,
+        holder: str,
+        acceptance_argv: list[str],
     ) -> tuple[str | None, dict[str, Any] | None]:
         """W6a challenger grill before a sync run's last allowed attempt.
 
         Returns ``(note, route)``: ``note`` is the diagnosis to inject into the
-        final attempt's capsule; ``route`` short-circuits the dispatch when the
-        grill judged the goal broken. Every degrade — no runner configured, a
-        judge that raises, output outside the closed set — returns
-        ``(None, None)`` so the original final-attempt dispatch proceeds
-        unchanged. Advisory only: the grill never touches the lamp, the scope,
-        or the goal content, and its output is never an acceptance authority.
+        remediation capsule; ``route`` short-circuits dispatch when the goal is
+        broken, the claim is busy, or the challenger is unavailable/invalid.
+        FC-P0 claims and fences the generation before any challenger call.
+        Advisory only: the grill never touches the lamp, the scope, or the goal
+        content, and its output is never an acceptance authority.
         """
-        if self.grill_runner is None or not grill_loop.should_grill(run):
+        failure_case = self.run_store.failure_case_for_run(
+            run["run_id"],
+            states={"grill_required", "grill_claimed"},
+        )
+        if failure_case is None and grill_loop.should_grill(run):
+            signature = self.run_store.latest_failure_signature(run["run_id"])
+            if signature is not None:
+                failure_case = self.run_store.ensure_failure_case(
+                    run["run_id"],
+                    signature=signature,
+                    acceptance_argv=acceptance_argv,
+                    trigger="attempt_budget_before_final",
+                    receipt_digest=(self.run_store.latest_receipt(run["run_id"]) or {}).get("receipt_digest"),
+                )
+        if failure_case is None:
             return None, None
+        claim = self.run_store.claim_grill(
+            failure_case["failure_case_id"],
+            holder=holder,
+        )
+        if claim["status"] != "claimed":
+            return None, {
+                "status": "grill_busy",
+                "run_id": run["run_id"],
+                "goal_id": goal_id,
+                "failure_case_id": failure_case["failure_case_id"],
+                "claim": claim,
+            }
+        generation = int(claim["generation"])
+        fence = int(claim["fence"])
+        if self.grill_runner is None:
+            failure = self.run_store.record_grill_failure(
+                failure_case["failure_case_id"],
+                generation=generation,
+                fence=fence,
+                reason="judge_not_configured",
+            )
+            self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+            event = self.goal_store.record_event(
+                event_id=f"grill-unavailable:{failure_case['failure_case_id']}:{generation}",
+                idempotency_key=f"grill-unavailable:{failure_case['failure_case_id']}:{generation}",
+                source="grill_loop",
+                event_type="human_required",
+                payload={"run_id": run["run_id"], "goal_id": goal_id, "failure_case": failure},
+            )
+            self.goal_store.transition_event(event["event_key"], "human_required", result=failure)
+            return None, {
+                "status": "human_required",
+                "run_id": run["run_id"],
+                "goal_id": goal_id,
+                "reason": "failure case requires a configured challenger",
+                "failure_case": failure,
+            }
         snapshot = grill_loop.build_snapshot(self.run_store, run)
+        snapshot["failure_case_id"] = failure_case["failure_case_id"]
+        snapshot["grill_generation"] = generation
         try:
             raw = self.grill_runner(snapshot)
-        except Exception:  # a failing judge must never stop the loop
-            return None, None
+        except Exception as exc:
+            failure = self.run_store.record_grill_failure(
+                failure_case["failure_case_id"],
+                generation=generation,
+                fence=fence,
+                reason=f"judge_error:{type(exc).__name__}:{str(exc)[:300]}",
+            )
+            self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+            return None, {
+                "status": "human_required",
+                "run_id": run["run_id"],
+                "goal_id": goal_id,
+                "reason": "challenger failed; durable failure recorded",
+                "failure_case": failure,
+            }
         decision = grill_loop.validate_decision(raw)
         if decision["type"] == "reject":
-            return None, None
-        evidence = {"decision": decision["type"], "diagnosis": decision["diagnosis"], "attempts_used": int(run["attempts"])}
-        self.run_store.append_event(run["run_id"], "grill_decision", evidence)
+            failure = self.run_store.record_grill_failure(
+                failure_case["failure_case_id"],
+                generation=generation,
+                fence=fence,
+                reason=f"judge_output_rejected:{decision['reason']}",
+            )
+            self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+            return None, {
+                "status": "human_required",
+                "run_id": run["run_id"],
+                "goal_id": goal_id,
+                "reason": "challenger output rejected; durable failure recorded",
+                "failure_case": failure,
+            }
+        recorded = self.run_store.record_grill_result(
+            failure_case["failure_case_id"],
+            generation=generation,
+            fence=fence,
+            decision=decision["type"],
+            diagnosis=decision["diagnosis"],
+        )
+        evidence = {
+            "failure_case_id": failure_case["failure_case_id"],
+            "decision": decision["type"],
+            "diagnosis": decision["diagnosis"],
+            "attempts_used": int(run["attempts"]),
+            "grill_generation": generation,
+            "plan_digest": recorded.get("plan_digest"),
+        }
         if decision["type"] == "goal-broken":
             self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
             event = self.goal_store.record_event(
-                event_id=f"grill-goal-broken:{run['run_id']}",
-                idempotency_key=f"grill-goal-broken:{run['run_id']}",
+                event_id=f"grill-goal-broken:{failure_case['failure_case_id']}:{generation}",
+                idempotency_key=f"grill-goal-broken:{failure_case['failure_case_id']}:{generation}",
                 source="grill_loop",
                 event_type="human_required",
                 payload={"run_id": run["run_id"], "goal_id": goal_id, "grill": evidence},
@@ -600,6 +962,15 @@ class GoalLoopWorker:
             if self.value_gate:
                 verdict = value_reducer.verdict_for_run(self.run_store, run_id)
                 if verdict["verdict"] == "RED":
+                    failure_case = self.run_store.record_resolution(
+                        run_id,
+                        ordinal=run["attempts"],
+                        receipt_digest=receipt_meta["receipt_digest"],
+                        exit_code=int(receipt.get("verification", {}).get("exit_code", 0)),
+                        machine_resolved=False,
+                        allow_regrill=False,
+                        checker_reason="value_gate_red",
+                    )
                     self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
                     red_event = self.goal_store.record_event(
                         event_id=f"value-red:{run_id}:{receipt_meta['receipt_digest']}",
@@ -609,7 +980,21 @@ class GoalLoopWorker:
                         payload={"run_id": run_id, "goal_id": goal_id, "value_verdict": verdict},
                     )
                     self.goal_store.transition_event(red_event["event_key"], "human_required", result=verdict)
-                    return {"status": "value_red_human_required", "run_id": run_id, "event_key": red_event["event_key"], "reasons": verdict["reasons"]}
+                    return {
+                        "status": "value_red_human_required",
+                        "run_id": run_id,
+                        "event_key": red_event["event_key"],
+                        "reasons": verdict["reasons"],
+                        "failure_case": failure_case,
+                    }
+            resolution = self.run_store.record_resolution(
+                run_id,
+                ordinal=run["attempts"],
+                receipt_digest=receipt_meta["receipt_digest"],
+                exit_code=int(receipt.get("verification", {}).get("exit_code", 0)),
+                machine_resolved=True,
+                checker_reason="lamp_and_value_gate_green",
+            )
             compiler = self.compilers.get(goal["campaign_id"])
             if compiler is None:
                 self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
@@ -624,10 +1009,23 @@ class GoalLoopWorker:
             if advanced["status"] == "candidate_ready":
                 stored = self.goal_store.record_event(**advanced["event"])
                 self.goal_store.transition_goal(goal_id, "completed", expected_state="active")
-                return {"status": "completed_with_next_event", "run_id": run_id, "derived_event_key": stored["event_key"]}
+                closed = self.run_store.record_next_node(
+                    run_id,
+                    next_node_id=advanced["candidate"]["goal_id"],
+                )
+                return {
+                    "status": "completed_with_next_event",
+                    "run_id": run_id,
+                    "derived_event_key": stored["event_key"],
+                    "failure_case": closed or resolution,
+                }
             if advanced["status"] == "completed":
                 self.goal_store.transition_goal(goal_id, "completed", expected_state="active")
-                return {"status": "completed", "run_id": run_id}
+                closed = self.run_store.record_next_node(
+                    run_id,
+                    next_node_id="campaign_completed",
+                )
+                return {"status": "completed", "run_id": run_id, "failure_case": closed or resolution}
             self.goal_store.transition_goal(goal_id, "completed", expected_state="active")
             result_event = self.goal_store.record_event(
                 event_id=f"run-result:{run_id}:{receipt_meta['receipt_digest']}",
@@ -638,6 +1036,28 @@ class GoalLoopWorker:
             )
             self.goal_store.transition_event(result_event["event_key"], "human_required", result=advanced)
             return {"status": "human_required", "run_id": run_id, "event_key": result_event["event_key"], "reason": advanced.get("reason")}
+        routing = receipt.get("routing")
+        if isinstance(routing, dict) and routing.get("route") == "human_required":
+            self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+            result_event = self.goal_store.record_event(
+                event_id=f"routing-human:{run_id}:{receipt_meta['receipt_digest']}",
+                idempotency_key=f"routing-human:{run_id}:{receipt_meta['receipt_digest']}",
+                source="capability_resolver",
+                event_type="human_required",
+                payload={"run_id": run_id, "goal_id": goal_id, "routing": routing},
+            )
+            self.goal_store.transition_event(
+                result_event["event_key"],
+                "human_required",
+                result={"run_id": run_id, "routing": routing},
+            )
+            return {
+                "status": "human_required",
+                "run_id": run_id,
+                "event_key": result_event["event_key"],
+                "reason": "capability resolver requested human routing",
+                "routing": routing,
+            }
         grill = grill_loop.grill_evidence(self.run_store, run_id)
         if grill is not None:
             # W6a: the final attempt ran with grill guidance and still failed —
@@ -662,3 +1082,51 @@ class GoalLoopWorker:
         )
         self.goal_store.transition_event(result_event["event_key"], "stopped", result={"run_id": run_id, "verification": receipt.get("verification")})
         return {"status": "stopped", "run_id": run_id, "event_key": result_event["event_key"]}
+
+
+def process_control_event_by_key(
+    goal_store: GoalStore,
+    *,
+    event_key: str,
+    holder: str,
+) -> dict[str, Any]:
+    """Process exactly one named control event without starting the Goal loop.
+
+    This foreground seam exists for operator windows where resident workers are
+    intentionally stopped. It never scans pending events, dispatches a run,
+    invokes a provider, or processes a non-control event.
+    """
+    event = goal_store.get_event(event_key)
+    control_types = {
+        "context_pressure",
+        "rollover_requested",
+        "successor_heartbeat",
+        "rollover_finalized",
+    }
+    if event.get("event_type") not in control_types:
+        raise ValueError("foreground processor only accepts LH control events")
+    if event.get("state") != "event_received":
+        return {
+            "status": "reused" if event.get("state") in {"completed", "human_required"} else "rejected",
+            "event_key": event_key,
+            "event_state": event.get("state"),
+            "result": event.get("result"),
+        }
+    if not goal_store.claim_event(event_key, holder):
+        return {
+            "status": "busy",
+            "event_key": event_key,
+            "event_state": goal_store.get_event(event_key).get("state"),
+        }
+    try:
+        processor = object.__new__(GoalLoopWorker)
+        processor.goal_store = goal_store
+        result = processor._process_control_event(event)
+        return {
+            "status": "processed",
+            "event_key": event_key,
+            "event_state": goal_store.get_event(event_key).get("state"),
+            "result": result,
+        }
+    finally:
+        goal_store.release_event(event_key, holder)

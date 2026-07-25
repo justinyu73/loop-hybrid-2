@@ -4,9 +4,9 @@
 Proves, offline with a fixture transport, that a contract-declared
 ``external_verdict`` block flows from ``resolve_project`` into ``run()``,
 which builds the durable VerdictStore plus the GitHub conclusion source and
-resumes parked runs: success verifies, failure retries, pending stays
-parked, a missing token raises before anything is dispatched or polled, a
-missing head_sha is not a verdict, an undeclared contract behaves exactly as
+resumes parked runs: success verifies, failure retries, pending stays parked,
+a missing token leaves the run parked while the resident driver still ticks,
+a missing head_sha is not a verdict, an undeclared contract behaves exactly as
 before, and the token never lands in any written file. No network, no real
 GitHub, no real credentials.
 """
@@ -143,7 +143,8 @@ def main() -> int:
             (case_root / "result.json").write_text(
                 json.dumps(result, ensure_ascii=False, sort_keys=True), encoding="utf-8")
 
-        # Missing token: raise before dispatch, no poll, no driver call.
+        # Missing token: the external verdict stays parked, no transport call
+        # occurs, and the resident driver still runs to refresh liveness.
         missing_root = root / "missing-token"
         missing_root.mkdir()
         _seed(missing_root, source, base)
@@ -223,8 +224,8 @@ def main() -> int:
              and pending["verdict"] == {"state": "awaiting_external_verdict", "conclusion": None}
              and pending["transport"].calls == 1,
              "detail": json.dumps({"run_state": pending["run_state"], "verdict": pending["verdict"]})},
-            {"id": "missing-token-raises-before-dispatch",
-             "ok": missing_error == "GitHubCredentialsMissing" and not driver_called["value"]
+            {"id": "missing-token-keeps-verdict-parked-and-driver-live",
+             "ok": missing_error is None and driver_called["value"]
              and missing_transport.calls == 0 and missing_run_state == "awaiting_external_verdict",
              "detail": json.dumps({"error": missing_error, "driver_called": driver_called["value"],
                                    "transport_calls": missing_transport.calls, "run_state": missing_run_state})},
