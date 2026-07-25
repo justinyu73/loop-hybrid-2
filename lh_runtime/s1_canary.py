@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Committed S1 smoke: authority-surface safety bolt + improvement bridge.
 
-Part 1: a diff touching the acceptance authority (gate-pack/, *_canary.py,
-the lamp's own script, AGENTS.md, docs/contracts/, .github/workflows/) is
+Part 1: a diff touching the acceptance authority (governance/current-state
+files, active/contracts docs, runtime contract, enforcement code, deploy/,
+gate-pack/, *_canary.py, or the lamp's own script) is
 deterministically value-RED — the engine can never modify its own exam, and
 such work routes to a human through the existing value-gate path. Part 2:
 improvement findings become standard manual_intent commands 1:1 with
@@ -27,6 +28,7 @@ from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
 from improvement_intent import load_findings, submit_findings
 from run_store import RunStore
+from authority_surface import authority_paths, is_authority_path
 from value_reducer import value_verdict, verdict_for_run
 
 CAMPAIGN_ID = "campaign-s1"
@@ -77,11 +79,26 @@ def main() -> int:
         root = Path(raw)
 
         # Part 1, verdict-level.
-        gate_pack = _verdict("gate-pack/verify.sh")
-        canary_file = _verdict("lh_runtime/foo_canary.py")
-        agents = _verdict("AGENTS.md")
-        contracts = _verdict("docs/contracts/goal-lifecycle-v1.md")
-        workflows = _verdict(".github/workflows/ci.yml")
+        protected = (
+            "gate-pack/verify.sh",
+            "lh_runtime/foo_canary.py",
+            "AGENTS.md",
+            "GOVERNANCE.md",
+            "CURSOR.md",
+            "docs/contracts/goal-lifecycle-v1.md",
+            "docs/active/lh-auto-runner-gap-review-plan.md",
+            ".github/workflows/ci.yml",
+            "project_runtime_contract.json",
+            "projects/example-project/project_runtime_contract.json",
+            "lh_runtime/authority_surface.py",
+            "lh_runtime/value_reducer.py",
+            "lh_runtime/diff_grader.py",
+            "lh_runtime/merge_gate.py",
+            "lh_runtime/project_binding.py",
+            "deploy/systemd/lh-driver.service",
+            "docs/promotion-policy.md",
+        )
+        protected_verdicts = {path: _verdict(path) for path in protected}
         src_green = _verdict("src/out.txt")
 
         # Part 1, lamp-script derived from the run's own envelope.
@@ -117,24 +134,23 @@ def main() -> int:
             bad_error = str(exc)
 
         cases = [
-            {"id": "gate-pack-touch-is-red",
-             "ok": gate_pack["verdict"] == "RED" and any("authority surface touched: gate-pack/verify.sh" in r for r in gate_pack["reasons"]),
-             "detail": json.dumps(gate_pack["reasons"])},
-            {"id": "canary-file-touch-is-red",
-             "ok": canary_file["verdict"] == "RED" and any("authority surface touched: lh_runtime/foo_canary.py" in r for r in canary_file["reasons"]),
-             "detail": json.dumps(canary_file["reasons"])},
+            {"id": "all-static-authority-classes-route-red",
+             "ok": all(
+                 verdict["verdict"] == "RED"
+                 and f"authority surface touched: {path}" in verdict["reasons"]
+                 and is_authority_path(path)
+                 for path, verdict in protected_verdicts.items()
+             ),
+             "detail": json.dumps({
+                 path: verdict["reasons"]
+                 for path, verdict in protected_verdicts.items()
+             }, sort_keys=True)},
+            {"id": "canonical-predicate-is-the-single-static-classifier",
+             "ok": authority_paths([*protected, "src/out.txt"]) == sorted(protected),
+             "detail": json.dumps(authority_paths([*protected, "src/out.txt"]))},
             {"id": "lamp-script-touch-is-red-via-envelope",
              "ok": lamp_verdict["verdict"] == "RED" and any("authority surface touched: tests/stage-2-smoke.py" in r for r in lamp_verdict["reasons"]),
              "detail": json.dumps(lamp_verdict["reasons"])},
-            {"id": "agents-md-touch-is-red",
-             "ok": agents["verdict"] == "RED" and any("authority surface touched: AGENTS.md" in r for r in agents["reasons"]),
-             "detail": json.dumps(agents["reasons"])},
-            {"id": "contracts-touch-is-red",
-             "ok": contracts["verdict"] == "RED" and any("authority surface touched: docs/contracts/goal-lifecycle-v1.md" in r for r in contracts["reasons"]),
-             "detail": json.dumps(contracts["reasons"])},
-            {"id": "workflows-touch-is-red",
-             "ok": workflows["verdict"] == "RED" and any("authority surface touched: .github/workflows/ci.yml" in r for r in workflows["reasons"]),
-             "detail": json.dumps(workflows["reasons"])},
             {"id": "normal-src-diff-stays-green",
              "ok": src_green["verdict"] == "GREEN",
              "detail": json.dumps(src_green["reasons"])},

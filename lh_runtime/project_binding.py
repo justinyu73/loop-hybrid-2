@@ -15,11 +15,23 @@ import json
 from pathlib import Path
 from typing import Any
 
+import capability_resolver as cr
+
 CONTRACT_SCHEMA = "lh-project-runtime-contract/v1"
 REQUIRED_RUNTIME = ("goal_store", "run_store", "workspace_root")
+ROUTING_PROFILE_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "deploy"
+    / "model-routing"
+    / "profiles"
+)
 
 
-def resolve_project(contract_path: str | Path) -> dict[str, Any]:
+def resolve_project(
+    contract_path: str | Path,
+    *,
+    routing_profile_dir: str | Path | None = None,
+) -> dict[str, Any]:
     """Load a contract file and return {project_id, run_kwargs} for run()."""
     path = Path(contract_path).resolve()
     if not path.exists():
@@ -53,7 +65,59 @@ def resolve_project(contract_path: str | Path) -> dict[str, Any]:
         run_kwargs["status_snapshot_out"] = resolve(runtime["status_snapshot_out"])
     if runtime.get("pause_flag"):
         run_kwargs["pause_flag"] = resolve(runtime["pause_flag"])
+    if runtime.get("knowledge_store"):
+        run_kwargs["knowledge_store_root"] = resolve(runtime["knowledge_store"])
+    knowledge_repos = runtime.get("knowledge_repos")
+    if knowledge_repos is not None:
+        if not isinstance(knowledge_repos, list) or not all(isinstance(item, str) and item.strip() for item in knowledge_repos):
+            raise SystemExit("contract.runtime.knowledge_repos must be an array of non-empty strings")
+        run_kwargs["knowledge_repo_roots"] = tuple(resolve(item) for item in knowledge_repos)
     models = contract.get("models")
+    execution_graph = contract.get("execution_graph")
+    work_graph = contract.get("work_graph")
+    configured = [
+        name for name, value in (
+            ("models", models),
+            ("execution_graph", execution_graph),
+            ("work_graph", work_graph),
+        )
+        if value is not None
+    ]
+    if len(configured) > 1:
+        raise SystemExit(
+            "contract models, execution_graph, and work_graph are mutually exclusive"
+        )
+    if work_graph is not None:
+        try:
+            normalized_work = cr.validate_work_graph(work_graph)
+            profile_root = Path(
+                routing_profile_dir
+                if routing_profile_dir is not None
+                else ROUTING_PROFILE_DIR
+            ).resolve()
+            profile_path = (
+                profile_root / f"{normalized_work['routing_profile']}.json"
+            ).resolve()
+            if not profile_path.is_relative_to(profile_root):
+                raise ValueError("routing profile escapes the operator profile directory")
+            if not profile_path.is_file():
+                raise ValueError(
+                    f"operator routing profile not found: {profile_path}"
+                )
+            routing_authority = json.loads(
+                profile_path.read_text(encoding="utf-8")
+            )
+            run_kwargs["execution_graph"] = cr.compose_graph(
+                normalized_work,
+                routing_authority,
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise SystemExit(f"contract.work_graph invalid: {exc}") from exc
+    if execution_graph is not None:
+        try:
+            run_kwargs["execution_graph"] = cr.validate_graph(execution_graph)
+        except ValueError as exc:
+            raise SystemExit(f"contract.execution_graph invalid: {exc}") from exc
     if models is not None:
         if not isinstance(models, dict) or not isinstance(models.get("execute"), str):
             raise SystemExit("contract.models must be an object with a string 'execute' field")
@@ -61,10 +125,21 @@ def resolve_project(contract_path: str | Path) -> dict[str, Any]:
             if optional in models and not isinstance(models[optional], str):
                 raise SystemExit(f"contract.models.{optional} must be a string")
         run_kwargs["executor"] = models["execute"]
+        execute_binding = models.get("execute_binding")
+        if execute_binding is not None:
+            if not isinstance(execute_binding, dict) or set(execute_binding) != {"runner", "base_url", "model"}:
+                raise SystemExit("contract.models.execute_binding must contain exactly runner, base_url, and model")
+            if any(not isinstance(execute_binding.get(field), str) or not execute_binding[field].strip() for field in ("runner", "base_url", "model")):
+                raise SystemExit("contract.models.execute_binding fields must be non-empty strings")
+            run_kwargs["executor_binding"] = {field: execute_binding[field].strip() for field in ("runner", "base_url", "model")}
         if models.get("judge"):
             run_kwargs["judge_executor"] = models["judge"]
         if models.get("judge_model"):
             run_kwargs["judge_model"] = models["judge_model"]
+        run_kwargs["compatibility_authority"] = {
+            "authority_ref": str(path),
+            "authority_digest": cr.digest_json(contract),
+        }
     external_verdict = contract.get("external_verdict")
     if external_verdict is not None:
         if not isinstance(external_verdict, dict):
@@ -80,7 +155,14 @@ def resolve_project(contract_path: str | Path) -> dict[str, Any]:
             for field in ("owner", "repo", "base_branch"):
                 if not isinstance(adapter.get(field), str) or not adapter[field].strip():
                     raise SystemExit(f"contract.external_verdict.adapter.{field} must be a non-empty string")
+            # B13: opt-in conditional auto-merge for this repo. Absent/false
+            # means no gate is built and behavior is unchanged.
+            auto_merge = adapter.get("auto_merge", False)
+            if not isinstance(auto_merge, bool):
+                raise SystemExit("contract.external_verdict.adapter.auto_merge must be a boolean")
             run_kwargs["github_pr_adapter"] = {field: adapter[field].strip() for field in ("owner", "repo", "base_branch")}
+            if auto_merge:
+                run_kwargs["github_pr_adapter"]["auto_merge"] = True
     return {"project_id": contract["project_id"], "run_kwargs": run_kwargs}
 
 

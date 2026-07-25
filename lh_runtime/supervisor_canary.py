@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 from command_ingress import submit_command
@@ -19,6 +22,7 @@ from goal_loop_driver import run_driver
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
 from run_store import RunStore
+from status_snapshot import build_snapshot
 
 
 class _EmptyGoalStore:
@@ -56,6 +60,11 @@ def _model(_workspace: Path, _capsule: dict[str, Any]) -> dict[str, Any]:
 
 
 def _child(mode: str, root: Path) -> int:
+    if mode == "crash":
+        marker = root / "crash-entered"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("crash-before-release\n", encoding="utf-8")
+        os._exit(17)
     worker = _BlockingWorker(root) if mode == "holder" else _ProbeWorker(root)
     result = run_driver(
         worker,
@@ -164,15 +173,130 @@ def _scheduled_tick_case(root: Path) -> dict[str, Any]:
     }
 
 
+def _crash_restart_case(root: Path) -> dict[str, Any]:
+    """Prove the host can re-arm after a real process exit, not just return idle."""
+    script = str(Path(__file__).resolve())
+    crashed = subprocess.Popen([sys.executable, "-B", script, "--child", "crash", str(root)])
+    marker = root / "crash-entered"
+    deadline = time.monotonic() + 5.0
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    crash_exit = crashed.wait(timeout=5.0)
+    restarted = subprocess.run(
+        [sys.executable, "-B", script, "--child", "restart", str(root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    result_path = root / "restart-result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
+    return {
+        "ok": (
+            marker.exists()
+            and crash_exit == 17
+            and restarted.returncode == 0
+            and result.get("cycles") == 1
+            and result.get("stop_reason") == "max_cycles"
+            and (root / "contender-ticked").exists()
+        ),
+        "detail": {
+            "crash_exit": crash_exit,
+            "restart_exit": restarted.returncode,
+            "restart_result": result,
+            "restart_stdout": restarted.stdout,
+        },
+    }
+
+
+def _stale_and_human_stop_case(root: Path) -> dict[str, Any]:
+    runs = RunStore(root / "runs")
+    goals = GoalStore(root / "goals")
+    old_heartbeat = {
+        "schema": "loop-hybrid-driver-heartbeat/v1",
+        "holder": "driver:stale",
+        "monotonic_ts": 1.0,
+        "wall_ts": (datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat(),
+        "phase": "progress",
+        "cycles": 1,
+    }
+    snapshot = build_snapshot(
+        runs,
+        goals,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        heartbeat=old_heartbeat,
+        attempt_timeout_seconds=1.0,
+    )
+    pause = root / "pause"
+    pause.write_text("operator-stop\n", encoding="utf-8")
+    stopped = run_driver(
+        _ProbeWorker(root / "stopped"),
+        holder="operator-stop",
+        model=_model,
+        pause_flag=pause,
+        max_cycles=1,
+        backoff_seconds=0,
+    )
+    return {
+        "ok": (
+            snapshot["stale"] is True
+            and stopped["stop_reason"] == "paused"
+            and stopped["cycles"] == 0
+            and not (root / "stopped" / "contender-ticked").exists()
+        ),
+        "detail": {"snapshot": {"stale": snapshot["stale"], "heartbeat_age_seconds": snapshot["heartbeat_age_seconds"], "threshold": snapshot["staleness_threshold_seconds"]}, "stop": stopped},
+    }
+
+
+def _systemd_calendar_cadence_case() -> dict[str, Any]:
+    service_path = ROOT / "deploy" / "systemd" / "loop-hybrid-supervisor.service.in"
+    timer_path = ROOT / "deploy" / "systemd" / "loop-hybrid-supervisor.timer.in"
+    present = [service_path.is_file(), timer_path.is_file()]
+    if not any(present):
+        return {
+            "ok": True,
+            "detail": {
+                "deployment_adapter": "not_shipped",
+                "calendar_cadence_claimed": False,
+            },
+        }
+    if not all(present):
+        return {
+            "ok": False,
+            "detail": {
+                "deployment_adapter": "incomplete",
+                "service_present": present[0],
+                "timer_present": present[1],
+            },
+        }
+    service = service_path.read_text(encoding="utf-8")
+    timer = timer_path.read_text(encoding="utf-8")
+    checks = {
+        "calendar_owns_one_minute_cadence": "OnCalendar=*:0/1" in timer,
+        "timer_targets_supervisor_service": "Unit=loop-hybrid-supervisor.service" in timer,
+        "persistent_calendar_rearms": "Persistent=true" in timer,
+        "normal_ticks_are_not_start_rate_limited": "StartLimitIntervalSec=0" in service,
+        "stale_burst_limit_removed": "StartLimitBurst=" not in service,
+        "service_remains_bounded_oneshot": "Type=oneshot" in service and "Restart=" not in service,
+        "service_timeout_remains_bounded": "TimeoutStartSec=920" in service,
+    }
+    return {"ok": all(checks.values()), "detail": checks}
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="lh-supervisor-") as raw:
         root = Path(raw)
         singleton = _singleton_case(root / "singleton")
         scheduled = _scheduled_tick_case(root)
+        crashed = _crash_restart_case(root / "crash-restart")
+        stale_stop = _stale_and_human_stop_case(root / "stale-stop")
+        systemd_cadence = _systemd_calendar_cadence_case()
 
     cases = [
         {"id": "singleton-second-process-not-holder", **singleton},
         {"id": "scheduled-tick-consumes-idempotently", **scheduled},
+        {"id": "crash-releases-owner-and-restart-reacquires", **crashed},
+        {"id": "stale-heartbeat-and-stop-gate-observed", **stale_stop},
+        {"id": "calendar-cadence-is-not-rate-limited", **systemd_cadence},
     ]
     failures = [case for case in cases if not case["ok"]]
     print(json.dumps({

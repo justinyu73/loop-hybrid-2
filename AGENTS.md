@@ -7,7 +7,7 @@
 ## What this is
 LH is a deterministic goal-loop engine: durable SQLite goal/run store, serial
 single-holder worker, disposable-clone executors, committed canaries as the
-acceptance authority, promotion always human-owned.
+acceptance authority, and goal-scoped execution authority.
 
 ## Conventions
 - This repo has no docs layer; the three-layer docs convention does not apply.
@@ -16,5 +16,8 @@ acceptance authority, promotion always human-owned.
   PATTERNS); any new site outside the sealed baseline turns that gate red.
 - Commit new files before running `npm test` (boundary-seal scans tracked files
   only).
-- git commit/push only on explicit user request; merge and promotion are always
-  human-owned.
+- The human/project owns the Goal, authority envelope, stop conditions, terminal
+  acceptance, public release, and publication.
+- Inside an approved Project Runtime Contract, the loop may commit, push an
+  `lh/*` branch, or conditionally merge only when that exact action is granted
+  and its committed gate passes. Per-node reminders are not required.

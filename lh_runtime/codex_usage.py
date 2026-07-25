@@ -32,7 +32,7 @@ DEFAULT_SESSION_ROOTS: tuple[Path, ...] = (
 def _find_token_usage(obj: Any) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     if isinstance(obj, dict):
-        if all(key in obj for key in ("input_tokens", "output_tokens", "total_tokens")):
+        if all(key in obj for key in ("input_tokens", "output_tokens")) and _usage_total(obj) is not None:
             found.append(obj)
         for value in obj.values():
             found.extend(_find_token_usage(value))
@@ -40,6 +40,18 @@ def _find_token_usage(obj: Any) -> list[dict[str, Any]]:
         for value in obj:
             found.extend(_find_token_usage(value))
     return found
+
+
+def _usage_total(usage: dict[str, Any]) -> int | None:
+    """Return the cumulative ordering counter in either Codex usage shape."""
+    total = usage.get("total_tokens")
+    if isinstance(total, int):
+        return total
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+        return input_tokens + output_tokens
+    return None
 
 
 def _find_model_ids(obj: Any) -> list[str]:
@@ -80,8 +92,8 @@ def extract_usage_from_session_file(path: str | Path, *, model: str = "codex") -
             continue
         model_ids.extend(_find_model_ids(obj))
         for usage in _find_token_usage(obj):
-            total = usage.get("total_tokens")
-            if isinstance(total, int) and (best is None or total > int(best.get("total_tokens", -1))):
+            total = _usage_total(usage)
+            if total is not None and (best is None or total > int(_usage_total(best) or -1)):
                 best = usage
     if best is None:
         return None
@@ -93,6 +105,45 @@ def extract_usage_from_session_file(path: str | Path, *, model: str = "codex") -
     output_tokens = int(best.get("output_tokens", 0))
     fresh_input = max(input_tokens - cached, 0)
     return token_cost.measured_usage(model=model, input_tokens=fresh_input, output_tokens=output_tokens, cache_read_tokens=cached)
+
+
+def extract_usage_from_jsonl(text: str, *, model: str = "codex") -> dict[str, Any] | None:
+    """Extract cumulative token usage from Codex ``--json`` output.
+
+    Orca-hosted Codex runs with ``--ephemeral --json`` so the child provider
+    cannot attribute the outer agent's session history to the LH attempt. The
+    JSONL stream carries the same cumulative usage shape as the rollout file,
+    but it is scoped to this invocation.
+    """
+    best: dict[str, Any] | None = None
+    model_ids: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        model_ids.extend(_find_model_ids(obj))
+        for usage in _find_token_usage(obj):
+            total = _usage_total(usage)
+            if total is not None and (best is None or total > int(_usage_total(best) or -1)):
+                best = usage
+    if best is None:
+        return None
+    if model_ids:
+        counts = {mid: model_ids.count(mid) for mid in set(model_ids)}
+        model = max(counts, key=lambda mid: (counts[mid], mid))
+    input_tokens = int(best.get("input_tokens", 0))
+    cached = int(best.get("cached_input_tokens", 0))
+    output_tokens = int(best.get("output_tokens", 0))
+    return token_cost.measured_usage(
+        model=model,
+        input_tokens=max(input_tokens - cached, 0),
+        output_tokens=output_tokens,
+        cache_read_tokens=cached,
+    )
 
 
 def find_latest_session(session_roots: tuple[Path, ...] = DEFAULT_SESSION_ROOTS, *, since_ts: float = 0.0) -> Path | None:

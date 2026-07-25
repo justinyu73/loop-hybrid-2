@@ -141,13 +141,23 @@ def main() -> int:
             "source_repo": str(source),
             "base_revision": base,
             "runtime": {"goal_store": "runtime/goals", "run_store": "runtime/runs", "workspace_root": "runtime/ws"},
-            "models": {"execute": "codex", "judge": "kimi", "judge_model": "k3"},
+            "models": {
+                "execute": "orca",
+                "execute_binding": {"runner": "codex", "base_url": "https://mock.example/v1", "model": "fixture-codex"},
+                "judge": "kimi",
+                "judge_model": "k3",
+            },
         }
         contract_path = root / "c" / "project_runtime_contract.json"
         contract_path.parent.mkdir()
         contract_path.write_text(json.dumps(contract), encoding="utf-8")
         kw = project_binding.resolve_project(contract_path)["run_kwargs"]
-        mapping_ok = kw.get("executor") == "codex" and kw.get("judge_executor") == "kimi" and kw.get("judge_model") == "k3"
+        mapping_ok = (
+            kw.get("executor") == "orca"
+            and kw.get("executor_binding") == {"runner": "codex", "base_url": "https://mock.example/v1", "model": "fixture-codex"}
+            and kw.get("judge_executor") == "kimi"
+            and kw.get("judge_model") == "k3"
+        )
 
         def _bad_models(mutate) -> bool:
             bad = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -162,10 +172,11 @@ def main() -> int:
 
         bad_missing = _bad_models(lambda c: c.__setitem__("models", {"judge": "kimi"}))
         bad_type = _bad_models(lambda c: c.__setitem__("models", {"execute": 42}))
+        bad_binding = _bad_models(lambda c: c["models"].__setitem__("execute_binding", {"runner": "codex", "model": "fixture-codex"}))
         cases.append(case(
             "contract-models-resolve-and-validated",
-            mapping_ok and bad_missing and bad_type,
-            json.dumps({"executor": kw.get("executor"), "judge": kw.get("judge_executor")}),
+            mapping_ok and bad_missing and bad_type and bad_binding,
+            json.dumps({"executor": kw.get("executor"), "binding": kw.get("executor_binding"), "judge": kw.get("judge_executor")}),
         ))
 
     # resolve_cli: PATH 外的標準安裝位置可解（systemd/cron 環境沒有 login PATH）。

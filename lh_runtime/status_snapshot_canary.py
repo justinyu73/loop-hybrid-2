@@ -80,6 +80,15 @@ def main() -> int:
                 reloaded["status"]["headline"]["needs_human_events"] == 1,
                 json.dumps({"needs_human_events": reloaded["status"]["headline"].get("needs_human_events")}),
             ),
+            case(
+                "receipt-and-derived-verdict-are-projectable-without-raw-output",
+                reloaded["status"]["evidence"]["receipt_count"] == 1
+                and reloaded["status"]["evidence"]["latest"]["receipt"]["digest"].startswith("sha256:")
+                and reloaded["status"]["evidence"]["latest"]["derived_verdict"]["verdict"] == "RED"
+                and '"stdout": "a"' not in json.dumps(reloaded["status"]["evidence"])
+                and '"stderr": "b"' not in json.dumps(reloaded["status"]["evidence"]),
+                json.dumps(reloaded["status"]["evidence"]),
+            ),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({

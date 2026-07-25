@@ -221,6 +221,26 @@ def main() -> int:
             factory_overrides={"fake": lambda *, timeout_seconds=900: (lambda _ws, _cap: {"summary": "unused"})},
             driver_fn=capture_driver,
         )
+        deferred_runtime: dict[str, Any] = {}
+
+        def capture_deferred_driver(worker: Any, **_kwargs: Any) -> dict[str, Any]:
+            deferred_runtime["ledger"] = worker.action_ledger is not None
+            deferred_runtime["adapter"] = worker.external_adapter is not None
+            return {"stop_reason": "idle", "cycles": 1, "runs_dispatched": 0}
+
+        deferred_result = glr.run(
+            executor="fake", execute=True,
+            goal_store_root=root / "deferred-goals", run_store_root=root / "deferred-runs",
+            workspace_root=root / "deferred-ws",
+            campaign=make_campaign("campaign-r1-deferred"),
+            source_repo=wired_source, base_revision=wired_base,
+            executor_timeout_seconds=0.25,
+            github_verdict={"owner": "o", "repo": "r", "workflow": "CI"},
+            github_pr_adapter={"owner": "o", "repo": "r", "base_branch": "master"},
+            github_environ={},
+            factory_overrides={"fake": lambda *, timeout_seconds=900: (lambda _ws, _cap: {"summary": "unused"})},
+            driver_fn=capture_deferred_driver,
+        )
         plain_worker = glr.build_worker(
             goal_store_root=root / "plain-goals", run_store_root=root / "plain-runs", workspace_root=root / "plain-ws",
             campaign=make_campaign("campaign-r1p"), source_repo=wired_source, base_revision=wired_base,
@@ -266,6 +286,10 @@ def main() -> int:
              "ok": captured.get("ledger") is True and captured.get("adapter") is True
              and plain_worker.action_ledger is None and plain_worker.external_adapter is None,
              "detail": json.dumps({"wired": captured, "plain": [plain_worker.action_ledger, plain_worker.external_adapter]})},
+            {"id": "idle-runtime-does-not-require-write-credential",
+             "ok": deferred_runtime == {"ledger": True, "adapter": True}
+             and deferred_result["driver"]["stop_reason"] == "idle",
+             "detail": json.dumps({"wired": deferred_runtime, "driver": deferred_result["driver"]})},
         ]
     failures = [{"id": case["id"], "detail": case["detail"]} for case in cases if not case["ok"]]
     print(json.dumps({

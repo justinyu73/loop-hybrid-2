@@ -297,3 +297,54 @@ class GitHubPrAdapter:
                                    base_revision=str(run.get("base_revision") or ""), diff_text=diff_text)
         pr = self._find_or_open_pr(branch, title=title, body=body)
         return {"head_sha": head_sha, "pr_url": pr["url"], "pr_number": pr["number"], "branch": branch}
+
+
+class DeferredGitHubPrAdapter:
+    """Bind the write credential only when an external action is performed.
+
+    Resident scheduler ticks must still acquire their owner lock and refresh
+    heartbeat evidence when no run currently needs a draft PR. The concrete
+    adapter retains the credential boundary: a missing token is raised before
+    its first git or API call, and the controller records that action failure
+    on the Attempt instead of crashing the project-wide scheduler tick.
+    """
+
+    def __init__(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        base_branch: str,
+        run_store: Any,
+        environ: Mapping[str, str] | None = None,
+        remote_url: str | None = None,
+        api_root: str = "https://api.github.com",
+        git_runner: GitRunner | None = None,
+        transport: PrTransport | None = None,
+    ):
+        for name, value in (("owner", owner), ("repo", repo), ("base_branch", base_branch)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"GitHub {name} must be a non-empty string")
+        self.owner = owner.strip()
+        self.repo = repo.strip()
+        self.base_branch = base_branch.strip()
+        self.run_store = run_store
+        self.environ = os.environ if environ is None else environ
+        self.remote_url = remote_url
+        self.api_root = api_root
+        self.git_runner = git_runner
+        self.transport = transport
+
+    def perform(self, op_key: str, request: dict[str, Any]) -> dict[str, Any]:
+        adapter = GitHubPrAdapter(
+            owner=self.owner,
+            repo=self.repo,
+            base_branch=self.base_branch,
+            run_store=self.run_store,
+            environ=self.environ,
+            remote_url=self.remote_url,
+            api_root=self.api_root,
+            git_runner=self.git_runner,
+            transport=self.transport,
+        )
+        return adapter.perform(op_key, request)

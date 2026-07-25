@@ -1,6 +1,7 @@
 """SQLite-backed durable state for the native Loop Hybrid MVP."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -76,6 +77,34 @@ class RunStore:
                     created_at REAL NOT NULL,
                     PRIMARY KEY(run_id, ordinal)
                 );
+                CREATE TABLE IF NOT EXISTS failure_cases (
+                    failure_case_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    goal_id TEXT NOT NULL,
+                    signature_json TEXT NOT NULL,
+                    acceptance_digest TEXT NOT NULL,
+                    base_revision TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    grill_generation INTEGER NOT NULL DEFAULT 1,
+                    claim_fence INTEGER NOT NULL DEFAULT 0,
+                    claim_holder TEXT,
+                    claim_expires_at REAL,
+                    plan_digest TEXT,
+                    latest_check_receipt_digest TEXT,
+                    next_node_id TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                );
+                CREATE TABLE IF NOT EXISTS failure_outbox (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    failure_case_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(failure_case_id) REFERENCES failure_cases(failure_case_id)
+                );
                 """
             )
             run_columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
@@ -127,18 +156,543 @@ class RunStore:
             raise KeyError(f"unknown run_id: {run_id}")
         return value
 
-    def append_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> str:
-        event_id = "evt-" + uuid.uuid4().hex
+    @staticmethod
+    def _stable_id(prefix: str, payload: Any) -> str:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        return prefix + hashlib.sha256(encoded).hexdigest()[:32]
+
+    @staticmethod
+    def _append_event_conn(
+        conn: sqlite3.Connection,
+        *,
+        event_id: str,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        created_at: float,
+    ) -> str:
+        encoded = json.dumps(payload, sort_keys=True)
+        prior = conn.execute(
+            "SELECT run_id, event_type, payload_json FROM events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if prior is not None:
+            if (prior["run_id"], prior["event_type"], prior["payload_json"]) != (run_id, event_type, encoded):
+                raise ValueError("event_id is already bound to different event content")
+            return event_id
+        conn.execute(
+            "INSERT INTO events(event_id, run_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, run_id, event_type, encoded, created_at),
+        )
+        return event_id
+
+    @staticmethod
+    def _append_outbox_conn(
+        conn: sqlite3.Connection,
+        *,
+        event_id: str,
+        failure_case_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        created_at: float,
+    ) -> str:
+        encoded = json.dumps(payload, sort_keys=True)
+        prior = conn.execute(
+            "SELECT failure_case_id, event_type, payload_json FROM failure_outbox WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if prior is not None:
+            if (prior["failure_case_id"], prior["event_type"], prior["payload_json"]) != (
+                failure_case_id,
+                event_type,
+                encoded,
+            ):
+                raise ValueError("outbox event_id is already bound to different event content")
+            return event_id
+        conn.execute(
+            "INSERT INTO failure_outbox(event_id, failure_case_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, failure_case_id, event_type, encoded, created_at),
+        )
+        return event_id
+
+    def append_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        event_id: str | None = None,
+    ) -> str:
+        event_id = event_id or "evt-" + uuid.uuid4().hex
         with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO events(event_id, run_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
-                (event_id, run_id, event_type, json.dumps(payload, sort_keys=True), time.time()),
+            self._append_event_conn(
+                conn,
+                event_id=event_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload=payload,
+                created_at=time.time(),
             )
         return event_id
 
     def events(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM events WHERE run_id = ? ORDER BY sequence", (run_id,)).fetchall()
+        return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
+
+    @staticmethod
+    def _failure_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        value = dict(row)
+        value["signature"] = json.loads(value.pop("signature_json"))
+        return value
+
+    def latest_failure_signature(self, run_id: str) -> dict[str, Any] | None:
+        receipt = self.latest_receipt(run_id)
+        if receipt is None:
+            return None
+        try:
+            payload = json.loads((self.root / receipt["receipt_ref"]).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        verification = payload.get("verification") if isinstance(payload, dict) else None
+        diff = payload.get("diff") if isinstance(payload, dict) else None
+        exit_code = verification.get("exit_code") if isinstance(verification, dict) else None
+        diff_digest = diff.get("digest") if isinstance(diff, dict) else None
+        if not isinstance(exit_code, int) or exit_code == 0 or not isinstance(diff_digest, str):
+            return None
+        return {"exit_code": exit_code, "diff_digest": diff_digest}
+
+    def ensure_failure_case(
+        self,
+        run_id: str,
+        *,
+        signature: dict[str, Any],
+        acceptance_argv: list[str],
+        trigger: str,
+        receipt_digest: str | None = None,
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        goal = run["goal"] if isinstance(run.get("goal"), dict) else {}
+        goal_id = str(goal.get("goal_id") or run_id)
+        acceptance_digest = self._stable_id("sha256:", acceptance_argv)
+        identity = {
+            "source_repo": run["source_repo"],
+            "campaign_id": goal.get("campaign_id"),
+            "goal_id": goal_id,
+            "feature_contract": goal.get("feature_contract"),
+            "base_revision": run["base_revision"],
+            "acceptance_digest": acceptance_digest,
+            "signature": signature,
+        }
+        failure_case_id = self._stable_id("fc-", identity)
+        now = time.time()
+        payload = {
+            "schema": "loop-hybrid-failure-case-event/v1",
+            "failure_case_id": failure_case_id,
+            "run_id": run_id,
+            "goal_id": goal_id,
+            "state": "grill_required",
+            "grill_generation": 1,
+            "trigger": trigger,
+            "signature": signature,
+            "acceptance_digest": acceptance_digest,
+            "base_revision": run["base_revision"],
+            "receipt_digest": receipt_digest,
+        }
+        outbox_id = f"failure-case:{failure_case_id}:opened"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM failure_cases WHERE failure_case_id = ?",
+                (failure_case_id,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO failure_cases(failure_case_id, run_id, goal_id, signature_json, acceptance_digest, base_revision, state, grill_generation, claim_fence, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'grill_required', 1, 0, ?, ?)",
+                    (
+                        failure_case_id,
+                        run_id,
+                        goal_id,
+                        json.dumps(signature, sort_keys=True),
+                        acceptance_digest,
+                        run["base_revision"],
+                        now,
+                        now,
+                    ),
+                )
+                self._append_event_conn(
+                    conn,
+                    event_id=outbox_id,
+                    run_id=run_id,
+                    event_type="failure_case_opened",
+                    payload=payload,
+                    created_at=now,
+                )
+                self._append_outbox_conn(
+                    conn,
+                    event_id=outbox_id,
+                    failure_case_id=failure_case_id,
+                    event_type="failure_case_opened",
+                    payload=payload,
+                    created_at=now,
+                )
+            conn.execute("COMMIT")
+        case = self.failure_case(failure_case_id)
+        case["created"] = existing is None
+        return case
+
+    def failure_case(self, failure_case_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM failure_cases WHERE failure_case_id = ?",
+                (failure_case_id,),
+            ).fetchone()
+        value = self._failure_row(row)
+        if value is None:
+            raise KeyError(f"unknown failure_case_id: {failure_case_id}")
+        return value
+
+    def failure_case_for_run(
+        self,
+        run_id: str,
+        *,
+        states: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM failure_cases WHERE run_id = ?"
+        values: list[Any] = [run_id]
+        if states:
+            ordered = sorted(states)
+            query += " AND state IN (" + ",".join("?" for _ in ordered) + ")"
+            values.extend(ordered)
+        query += " ORDER BY updated_at DESC, failure_case_id DESC LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(query, values).fetchone()
+        return self._failure_row(row)
+
+    def claim_grill(
+        self,
+        failure_case_id: str,
+        *,
+        holder: str,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM failure_cases WHERE failure_case_id = ?",
+                (failure_case_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise KeyError(f"unknown failure_case_id: {failure_case_id}")
+            if row["state"] == "grill_claimed" and float(row["claim_expires_at"] or 0) > now:
+                conn.execute("COMMIT")
+                return {
+                    "status": "busy",
+                    "failure_case_id": failure_case_id,
+                    "generation": int(row["grill_generation"]),
+                    "fence": int(row["claim_fence"]),
+                }
+            if row["state"] not in {"grill_required", "grill_claimed"}:
+                conn.execute("COMMIT")
+                return {
+                    "status": "not_claimable",
+                    "failure_case_id": failure_case_id,
+                    "state": row["state"],
+                }
+            fence = int(row["claim_fence"]) + 1
+            generation = int(row["grill_generation"])
+            updated = conn.execute(
+                "UPDATE failure_cases SET state = 'grill_claimed', claim_fence = ?, claim_holder = ?, claim_expires_at = ?, updated_at = ? "
+                "WHERE failure_case_id = ? AND claim_fence = ?",
+                (fence, holder, now + lease_seconds, now, failure_case_id, int(row["claim_fence"])),
+            ).rowcount
+            if updated != 1:
+                conn.execute("ROLLBACK")
+                return {"status": "busy", "failure_case_id": failure_case_id}
+            conn.execute("COMMIT")
+        return {
+            "status": "claimed",
+            "failure_case_id": failure_case_id,
+            "generation": generation,
+            "fence": fence,
+        }
+
+    def record_grill_result(
+        self,
+        failure_case_id: str,
+        *,
+        generation: int,
+        fence: int,
+        decision: str,
+        diagnosis: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        plan_digest = self._stable_id("sha256:", {"decision": decision, "diagnosis": diagnosis})
+        state = "remediation_running" if decision == "runner-fixable" else "human_required"
+        event_id = f"failure-case:{failure_case_id}:grill:{generation}:result"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM failure_cases WHERE failure_case_id = ?",
+                (failure_case_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise KeyError(f"unknown failure_case_id: {failure_case_id}")
+            if row["state"] != "grill_claimed" or int(row["grill_generation"]) != generation or int(row["claim_fence"]) != fence:
+                prior = conn.execute(
+                    "SELECT payload_json FROM failure_outbox WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                conn.execute("COMMIT")
+                if prior is not None:
+                    return {**json.loads(prior["payload_json"]), "status": "reused"}
+                return {"status": "fence_rejected", "failure_case_id": failure_case_id}
+            payload = {
+                "schema": "loop-hybrid-failure-case-event/v1",
+                "failure_case_id": failure_case_id,
+                "run_id": row["run_id"],
+                "goal_id": row["goal_id"],
+                "event": "grill_result",
+                "state": state,
+                "grill_generation": generation,
+                "grill_fence": fence,
+                "decision": decision,
+                "diagnosis": diagnosis,
+                "plan_digest": plan_digest,
+            }
+            run_attempts = conn.execute(
+                "SELECT attempts FROM runs WHERE run_id = ?",
+                (row["run_id"],),
+            ).fetchone()
+            conn.execute(
+                "UPDATE failure_cases SET state = ?, plan_digest = ?, claim_holder = NULL, claim_expires_at = NULL, updated_at = ? "
+                "WHERE failure_case_id = ?",
+                (state, plan_digest, now, failure_case_id),
+            )
+            self._append_event_conn(
+                conn,
+                event_id=event_id,
+                run_id=row["run_id"],
+                event_type="grill_decision",
+                payload={
+                    "failure_case_id": failure_case_id,
+                    "decision": decision,
+                    "diagnosis": diagnosis,
+                    "attempts_used": int(run_attempts["attempts"]) if run_attempts is not None else 0,
+                    "grill_generation": generation,
+                    "plan_digest": plan_digest,
+                },
+                created_at=now,
+            )
+            self._append_outbox_conn(
+                conn,
+                event_id=event_id,
+                failure_case_id=failure_case_id,
+                event_type="grill_result",
+                payload=payload,
+                created_at=now,
+            )
+            conn.execute("COMMIT")
+        return {**payload, "status": "recorded"}
+
+    def record_grill_failure(
+        self,
+        failure_case_id: str,
+        *,
+        generation: int,
+        fence: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        event_id = f"failure-case:{failure_case_id}:grill:{generation}:failed"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM failure_cases WHERE failure_case_id = ?",
+                (failure_case_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise KeyError(f"unknown failure_case_id: {failure_case_id}")
+            if row["state"] != "grill_claimed" or int(row["grill_generation"]) != generation or int(row["claim_fence"]) != fence:
+                prior = conn.execute("SELECT payload_json FROM failure_outbox WHERE event_id = ?", (event_id,)).fetchone()
+                conn.execute("COMMIT")
+                if prior is not None:
+                    return {**json.loads(prior["payload_json"]), "status": "reused"}
+                return {"status": "fence_rejected", "failure_case_id": failure_case_id}
+            payload = {
+                "schema": "loop-hybrid-failure-case-event/v1",
+                "failure_case_id": failure_case_id,
+                "run_id": row["run_id"],
+                "goal_id": row["goal_id"],
+                "event": "grill_failed",
+                "state": "human_required",
+                "grill_generation": generation,
+                "grill_fence": fence,
+                "reason": reason[:500],
+            }
+            conn.execute(
+                "UPDATE failure_cases SET state = 'human_required', claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE failure_case_id = ?",
+                (now, failure_case_id),
+            )
+            self._append_event_conn(
+                conn,
+                event_id=event_id,
+                run_id=row["run_id"],
+                event_type="grill_failed",
+                payload=payload,
+                created_at=now,
+            )
+            self._append_outbox_conn(
+                conn,
+                event_id=event_id,
+                failure_case_id=failure_case_id,
+                event_type="grill_failed",
+                payload=payload,
+                created_at=now,
+            )
+            conn.execute("COMMIT")
+        return {**payload, "status": "recorded"}
+
+    def record_resolution(
+        self,
+        run_id: str,
+        *,
+        ordinal: int,
+        receipt_digest: str,
+        exit_code: int,
+        machine_resolved: bool | None = None,
+        allow_regrill: bool = True,
+        checker_reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM failure_cases WHERE run_id = ? AND state = 'remediation_running' ORDER BY updated_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            run = conn.execute("SELECT max_attempts FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            resolved = exit_code == 0 if machine_resolved is None else machine_resolved
+            has_budget = allow_regrill and run is not None and ordinal < int(run["max_attempts"])
+            if resolved:
+                state = "resolved"
+            elif has_budget:
+                state = "grill_required"
+            else:
+                state = "human_required"
+            next_generation = int(row["grill_generation"]) if resolved or not has_budget else int(row["grill_generation"]) + 1
+            event_id = f"failure-case:{row['failure_case_id']}:check:{ordinal}:{receipt_digest}"
+            payload = {
+                "schema": "loop-hybrid-failure-case-event/v1",
+                "failure_case_id": row["failure_case_id"],
+                "run_id": run_id,
+                "goal_id": row["goal_id"],
+                "event": "resolution_checked",
+                "state": state,
+                "machine_resolved": resolved,
+                "checker": "approved_deterministic_verifier_and_value_gate",
+                "checker_reason": checker_reason,
+                "verifier_exit_code": exit_code,
+                "attempt": ordinal,
+                "receipt_digest": receipt_digest,
+                "grill_generation": int(row["grill_generation"]),
+                "next_grill_generation": next_generation if not resolved and has_budget else None,
+                "regrill_required": not resolved and has_budget,
+            }
+            conn.execute(
+                "UPDATE failure_cases SET state = ?, grill_generation = ?, latest_check_receipt_digest = ?, plan_digest = CASE WHEN ? THEN NULL ELSE plan_digest END, "
+                "claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE failure_case_id = ?",
+                (
+                    state,
+                    next_generation,
+                    receipt_digest,
+                    1 if not resolved and has_budget else 0,
+                    now,
+                    row["failure_case_id"],
+                ),
+            )
+            self._append_event_conn(
+                conn,
+                event_id=event_id,
+                run_id=run_id,
+                event_type="resolution_checked",
+                payload=payload,
+                created_at=now,
+            )
+            self._append_outbox_conn(
+                conn,
+                event_id=event_id,
+                failure_case_id=row["failure_case_id"],
+                event_type="resolution_checked",
+                payload=payload,
+                created_at=now,
+            )
+            conn.execute("COMMIT")
+        return payload
+
+    def record_next_node(self, run_id: str, *, next_node_id: str | None) -> dict[str, Any] | None:
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM failure_cases WHERE run_id = ? AND state = 'resolved' ORDER BY updated_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            receipt_digest = row["latest_check_receipt_digest"]
+            event_id = f"failure-case:{row['failure_case_id']}:closed:{receipt_digest}"
+            payload = {
+                "schema": "loop-hybrid-failure-case-event/v1",
+                "failure_case_id": row["failure_case_id"],
+                "run_id": run_id,
+                "goal_id": row["goal_id"],
+                "event": "failure_case_closed",
+                "state": "resolved",
+                "machine_resolved": True,
+                "checker_receipt_digest": receipt_digest,
+                "next_node_id": next_node_id,
+            }
+            conn.execute(
+                "UPDATE failure_cases SET next_node_id = ?, updated_at = ? WHERE failure_case_id = ?",
+                (next_node_id, now, row["failure_case_id"]),
+            )
+            self._append_event_conn(
+                conn,
+                event_id=event_id,
+                run_id=run_id,
+                event_type="failure_case_closed",
+                payload=payload,
+                created_at=now,
+            )
+            self._append_outbox_conn(
+                conn,
+                event_id=event_id,
+                failure_case_id=row["failure_case_id"],
+                event_type="failure_case_closed",
+                payload=payload,
+                created_at=now,
+            )
+            conn.execute("COMMIT")
+        return payload
+
+    def failure_outbox(self, *, after_sequence: int = 0) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM failure_outbox WHERE sequence > ? ORDER BY sequence",
+                (int(after_sequence),),
+            ).fetchall()
         return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
 
     def summary(self) -> dict[str, Any]:
@@ -161,7 +715,73 @@ class RunStore:
 
     def latest_receipt(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT receipt_ref, receipt_digest FROM attempts WHERE run_id = ? AND receipt_ref IS NOT NULL ORDER BY ordinal DESC LIMIT 1", (run_id,)).fetchone()
+            row = conn.execute(
+                "SELECT ordinal, receipt_ref, receipt_digest "
+                "FROM attempts WHERE run_id = ? AND receipt_ref IS NOT NULL "
+                "ORDER BY ordinal DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def latest_receipt_projection(self) -> dict[str, Any] | None:
+        """Return the newest receipt pointer without exposing artifact content.
+
+        This is the read-only bridge used by status snapshots.  Receipt bytes,
+        provider output, and verifier stdout/stderr remain in the RunStore
+        artifact boundary; callers receive only durable identity and digest.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT r.run_id, r.goal_json, r.state AS run_state, r.updated_at,
+                       a.ordinal, a.state AS attempt_state, a.workspace_ref,
+                       a.receipt_ref, a.receipt_digest, a.finished_at,
+                       (SELECT COUNT(*) FROM attempts WHERE receipt_ref IS NOT NULL) AS receipt_count
+                FROM runs r
+                JOIN attempts a ON a.run_id = r.run_id
+                WHERE a.receipt_ref IS NOT NULL
+                  AND a.ordinal = (
+                      SELECT MAX(a2.ordinal) FROM attempts a2
+                      WHERE a2.run_id = r.run_id AND a2.receipt_ref IS NOT NULL
+                  )
+                ORDER BY r.updated_at DESC, a.ordinal DESC, r.run_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            goal = json.loads(row["goal_json"])
+        except (TypeError, json.JSONDecodeError):
+            goal = {}
+        return {
+            "schema": "loop-hybrid-receipt-projection/v1",
+            "run_id": row["run_id"],
+            "goal_id": goal.get("goal_id") if isinstance(goal, dict) else None,
+            "run_state": row["run_state"],
+            "attempt": row["ordinal"],
+            "attempt_state": row["attempt_state"],
+            "workspace_ref": row["workspace_ref"],
+            "receipt": {"ref": row["receipt_ref"], "digest": row["receipt_digest"]},
+            "updated_at": row["updated_at"],
+            "finished_at": row["finished_at"],
+            "receipt_count": row["receipt_count"],
+        }
+
+    def latest_attempt(self, run_id: str) -> dict[str, Any] | None:
+        """Read the newest attempt metadata without exposing the SQLite store.
+
+        Command/report adapters use this projection to correlate a goal with
+        the durable run/attempt boundary.  It is intentionally read-only;
+        attempt ownership, fencing, and receipt writes remain RunStore's
+        responsibility.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT run_id, ordinal, state, workspace_ref, fence, receipt_ref, receipt_digest, created_at, finished_at "
+                "FROM attempts WHERE run_id = ? ORDER BY ordinal DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
         return None if row is None else dict(row)
 
     def usage_corrections(self) -> list[dict[str, Any]]:
