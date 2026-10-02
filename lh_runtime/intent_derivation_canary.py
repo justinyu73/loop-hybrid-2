@@ -9,12 +9,17 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_campaign, make_source_repo
 from campaign_compiler import CampaignCompiler
 from controller import LoopController
+from goal_loop_driver import run_driver
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_bundle
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 CAMPAIGN = "intent-campaign"
 
@@ -30,9 +35,51 @@ def model(workspace: Path, capsule: dict) -> dict:
     return {"summary": "w1 intent fixture"}
 
 
+def bind_campaign(campaign: dict, source: Path, base: str) -> dict:
+    """Attach an explicit producer-owned binding to each authorized stage.
+
+    Manual intent only names the campaign/stage.  The real derivation path
+    copies the persisted stage definition; this fixture therefore supplies
+    the contract from explicit scope/check/verifier inputs instead of letting
+    the worker synthesize one from an intent string.
+    """
+    compiled = CampaignCompiler(campaign).compile()["stages"]
+    for stage in campaign["stages"]:
+        stage_id = stage["stage_id"]
+        binding = make_native_bundle(
+            source,
+            base,
+            f"{campaign['campaign_id']}:{stage_id}",
+            stage_id,
+            [{
+                "id": "intent-source-check",
+                "commands": [{
+                    "id": "diff-check",
+                    "argv": ["git", "diff", "--cached", "--check"],
+                    "cwd": "${WORKTREE}",
+                    "expect_exit": 0,
+                    "timeout_seconds": 10,
+                }],
+                "required_receipts": ["executor"],
+            }],
+            [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if any(Path('src').glob('attempt-*.txt')) else 1)"],
+            ["src/"],
+            int(stage["max_attempts"]),
+            goal={"feature_contract": stage["goal"], "admission_envelope": compiled[stage_id]},
+        )
+        stage["goal"] = {
+            **stage["goal"],
+            "delivery_required": True,
+            "delivery_contract": binding["contract"],
+            "delivery_plan": binding["plan"],
+            "delivery_packet": binding["packet"],
+        }
+    return campaign
+
+
 def make_worker(root: Path, name: str, source: Path, base: str, campaign: dict) -> tuple[GoalLoopWorker, GoalStore, RunStore]:
     goals = GoalStore(root / f"{name}-goals")
-    runs = RunStore(root / f"{name}-runs")
+    runs = RunStore(root / f"{name}-runs", command_runner=fixture_command_runner)
     worker = GoalLoopWorker(
         goal_store=goals,
         run_store=runs,
@@ -58,7 +105,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         source, base = make_source_repo(root)
-        campaign = make_campaign(CAMPAIGN, stage_id="stage-work")
+        campaign = bind_campaign(make_campaign(CAMPAIGN, stage_id="stage-work"), source, base)
 
         # Full chain: intent -> derived candidate -> admit -> dispatch -> completed.
         worker, goals, runs = make_worker(root, "chain", source, base, campaign)
@@ -78,6 +125,35 @@ def main() -> int:
             "derived-candidate-admits-dispatches-completes",
             goal["state"] == "completed" and runs.summary()["runs_by_state"].get("verified") == 1,
             json.dumps({"goal": goal["state"], "runs": runs.summary()["runs_by_state"]}),
+        ))
+
+        # The App Gateway bounds an execution to one driver cycle.  The
+        # command and its derived candidate must therefore reach one
+        # Goal/Run/Attempt in that same cycle.
+        bounded_worker, bounded_goals, bounded_runs = make_worker(root, "bounded", source, base, campaign)
+        seed_intent(bounded_goals, stage_id="stage-work", key="cmd-w1-bounded")
+        bounded = run_driver(
+            bounded_worker,
+            holder="w1-bounded",
+            model=model,
+            max_cycles=1,
+            sleep_fn=lambda _seconds: None,
+        )
+        bounded_goal = bounded_goals.get_goal("intent-campaign:stage-work")
+        cases.append(case(
+            "one-cycle-intent-admits-and-dispatches",
+            bounded["cycles"] == 1
+            and bounded["runs_dispatched"] == 1
+            and bounded_goal["state"] == "completed"
+            and bounded_runs.summary()["runs_by_state"].get("verified") == 1,
+            json.dumps(
+                {
+                    "driver": bounded,
+                    "goal": bounded_goal["state"],
+                    "runs": bounded_runs.summary()["runs_by_state"],
+                },
+                ensure_ascii=False,
+            ),
         ))
 
         # Replay: the same command key never double-writes.
@@ -110,6 +186,7 @@ def main() -> int:
         # Non-auto-admissible stage (forbidden side effect) stays human_required.
         wild = make_campaign(CAMPAIGN, stage_id="stage-wild")
         wild["stages"][0]["allowed_side_effects"] = ["workspace", "push"]
+        wild = bind_campaign(wild, source, base)
         wild_worker, wild_goals, wild_runs = make_worker(root, "wild", source, base, wild)
         seed_intent(wild_goals, stage_id="stage-wild", key="cmd-w1-wild")
         wild_result = wild_worker.tick(holder="w1", model=model)
@@ -128,11 +205,25 @@ def main() -> int:
         # Revision-bump 自跑復活：goal 的 run 耗盡（stopped）後，重發 intent
         # 不需人復位——worker 自動把 stopped goal 轉回 candidate，admission
         # bump revision（新 run_id），新 run 跑完，舊 run 留作歷史。
-        retry_campaign = make_campaign(CAMPAIGN, stage_id="stage-retry")
+        retry_campaign = bind_campaign(make_campaign(CAMPAIGN, stage_id="stage-retry"), source, base)
         rworker, rgoals, rruns = make_worker(root, "retry2", source, base, retry_campaign)
-        from _fixture import make_goal
-        make_goal(rgoals, "intent-campaign:stage-retry", campaign_id=CAMPAIGN, stage_id="stage-retry")
-        rgoals.transition_event("fixture-event:intent-campaign:stage-retry", "completed")
+        retry_goal_id = "intent-campaign:stage-retry"
+        retry_event_key = f"fixture-event:{retry_goal_id}"
+        rgoals.record_event(
+            event_id=f"evt-{retry_goal_id}",
+            idempotency_key=retry_event_key,
+            source="manual",
+            event_type="manual_intent",
+            payload={"campaign_id": CAMPAIGN, "goal_id": retry_goal_id},
+        )
+        rgoals.create_candidate(
+            retry_event_key,
+            goal_id=retry_goal_id,
+            campaign_id=CAMPAIGN,
+            stage_id="stage-retry",
+            goal=retry_campaign["stages"][0]["goal"],
+        )
+        rgoals.transition_event(retry_event_key, "completed")
         from admission_bridge import GoalAdmissionBridge
         envelope = CampaignCompiler(retry_campaign).compile()["stages"]["stage-retry"]
         first_admit = GoalAdmissionBridge(rgoals, rruns).admit(
@@ -140,7 +231,16 @@ def main() -> int:
         )
         first_run_id = first_admit["run_id"]
         rruns.begin_attempt(first_run_id, "workspace://retry2/1")
-        rruns.finish_attempt(first_run_id, 1, state="stopped", receipt_ref="artifacts/retry2/1/r.json", receipt_digest="sha256:r2")
+        receipt = {
+            "schema": "loop-hybrid-attempt-receipt/v1",
+            "run_id": first_run_id,
+            "attempt": 1,
+            "verification": {"exit_code": 1},
+            "usage": {"state": "unknown", "reason": "intent revision-bump fixture"},
+        }
+        receipt_ref = rruns.write_artifact(first_run_id, 1, "receipt.json", json.dumps(receipt, sort_keys=True))
+        if not rruns.finish_attempt(first_run_id, 1, state="stopped", receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"]):
+            raise AssertionError("stopped intent fixture attempt did not finish")
         rgoals.transition_goal("intent-campaign:stage-retry", "stopped", expected_state="active")
         seed_intent(rgoals, stage_id="stage-retry", key="cmd-w1-rev")
         rworker.tick(holder="w1", model=model)  # derive candidate

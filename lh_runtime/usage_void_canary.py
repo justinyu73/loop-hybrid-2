@@ -22,8 +22,11 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import token_cost
 from dispatch_gate import DispatchGate
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
 
 # gpt-5.6-luna is priced in token_cost.DEFAULT_PRICING; these counts price at
@@ -34,7 +37,13 @@ VOID_REASON = "phantom cache_read from pre-W7 cumulative attribution (live incid
 
 
 def _seed(store: RunStore, run_id: str, usage: dict[str, Any]) -> None:
-    store.create_run(goal={"goal_id": f"goal-{run_id}"}, source_repo=HERE, base_revision="base", run_id=run_id)
+    base = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    make_native_run(
+        store, ROOT, base, f"goal-{run_id}", "usage-void",
+        [{"id": "usage-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+        ["git", "rev-parse", "HEAD"], ["loop-hybrid/"], 4,
+        goal={"goal_id": f"goal-{run_id}"}, run_id=run_id,
+    )
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
     receipt = {
         "schema": "loop-hybrid-attempt-receipt/v1",
@@ -44,7 +53,7 @@ def _seed(store: RunStore, run_id: str, usage: dict[str, Any]) -> None:
         "verification": {"argv": ["true"], "exit_code": 0},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
 
 
 def _receipt_bytes(store: RunStore, run_id: str) -> bytes:

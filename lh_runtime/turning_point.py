@@ -21,13 +21,10 @@ verification lamps and the value gate decide completion exactly as before.
 from __future__ import annotations
 
 import json
-import os
 import re
-import subprocess
-from pathlib import Path
 from typing import Any, Callable
 
-from cli_agent_executor import resolve_cli
+from cli_agent_executor import run_bounded_judge
 
 SNAPSHOT_SCHEMA = "lh-turning-point/v1"
 
@@ -129,6 +126,10 @@ def parse_decision(text: str) -> dict[str, Any]:
         value = json.loads(text)
         if isinstance(value, dict) and "decision" in value:
             return value
+        if isinstance(value, dict) and "status" in value:
+            if value.get("status") != "SUCCESS" or not isinstance(value.get("response"), str):
+                raise ValueError("judge JSON envelope is not successful")
+            return parse_decision(value["response"])
     except json.JSONDecodeError:
         pass
     for match in re.finditer(r"\{[^{}]*\}", text):
@@ -158,12 +159,6 @@ def make_cli_judge(
     def judge(snapshot: dict[str, Any]) -> Any:
         prompt = build_judge_prompt(snapshot)
         argv = argv_builder(prompt)
-        argv[0] = resolve_cli(argv[0])
-        env = dict(os.environ)
-        env["PATH"] = f"{Path(argv[0]).parent}:{env.get('PATH', '')}"
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds, env=env)
-        if proc.returncode != 0:
-            raise RuntimeError(f"judge {name} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-        return parse_decision(proc.stdout)
+        return parse_decision(run_bounded_judge(argv, name=name, timeout_seconds=timeout_seconds))
 
     return judge

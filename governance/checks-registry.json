@@ -1,0 +1,31 @@
+{
+  "schema": "host-check-registry/v1",
+  "purpose": "The only commands a progress receipt may run against loop-hybrid. A progress event names a check id from this file and never a command string, because re-running a command an agent wrote into an event is arbitrary execution driven by that agent. Sealed in governance/decision-seal.json: editing a check here without a reseal in the same pull request breaks the seal.",
+  "target_project": "loop-hybrid",
+  "target_project_note": "Every command below runs in a verifier snapshot of this repository and proves something about it alone. Registered 2026-08-10 under the owner ruling (option A) that closes external-host's docs/open-questions/loop-hybrid-has-no-check-registry.md — before this file existed, HOST-CHECK-OWNERSHIP-014 consequence 2 meant every loop-hybrid receipt request was refused by design, so demo-scope crossings could never finalize.",
+  "checks": {
+    "lh-gate-pack-verify": {
+      "command": [
+        "sh",
+        "-c",
+        "PYTHONDONTWRITEBYTECODE=1 sh gate-pack/verify.sh"
+      ],
+      "expect_exit_code": 0,
+      "description": "The committed gate-pack (npm test) — this repository's own verification authority."
+    },
+    "lh-lint": {
+      "command": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "expect_exit_code": 0,
+      "description": "Shell syntax checks plus a compile pass over gate-pack and lh_runtime Python (npm run lint)."
+    }
+  },
+  "cannot_claim": [
+    "that a green check is target acceptance or promotion; terminal human acceptance stays outside machine completion",
+    "that any project other than target_project can be verified from here",
+    "that running as the same user makes the check untamperable; the seal removes 'claimed without doing', not 'edited the check'"
+  ]
+}

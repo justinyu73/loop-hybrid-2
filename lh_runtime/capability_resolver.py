@@ -282,9 +282,9 @@ def _validate_resource(
             key: _text(f"{binding_id}.provider_binding.{key}", provider_binding.get(key))
             for key in ("runner", "base_url", "model")
         }
-        if provider_binding["runner"] not in {"codex", "claude"}:
+        if _PROFILE_RE.fullmatch(provider_binding["runner"]) is None or provider_binding["runner"] == "orca":
             raise ValueError(
-                f"{binding_id}.provider_binding.runner must be codex or claude"
+                f"{binding_id}.provider_binding.runner must be an explicit provider adapter"
             )
         if provider_binding["runner"] != runner:
             raise ValueError(
@@ -829,6 +829,19 @@ def finalize_binding(
         "exit_status": exit_status,
         "usage": provider.get("usage") if isinstance(provider.get("usage"), dict) else {"state": "unknown"},
     })
+    # goal-lifecycle-v1 provider-input binding: receipts retain the records
+    # and digests, never raw prompt or context. `input_digest` and
+    # `prompt_or_command_digest` keep their legacy recipe semantics.
+    projection = capsule.get("provider_context_projection")
+    if isinstance(projection, dict):
+        receipt["provider_context_projection"] = projection
+    for key in ("provider_input_binding", "provider_input_attestation"):
+        value = provider.get(key)
+        if isinstance(value, dict):
+            receipt[key] = value
+    bound = provider.get("provider_input_binding")
+    if isinstance(bound, dict):
+        receipt["provider_input_digest"] = bound.get("provider_input_digest")
     return receipt
 
 

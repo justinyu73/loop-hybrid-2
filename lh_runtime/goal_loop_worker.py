@@ -1,6 +1,7 @@
 """One serial G5 worker that closes the provider-free Goal loop."""
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import time
@@ -14,6 +15,7 @@ import grill_loop
 import merge_gate as merge_gate_mod
 import turning_point as tp
 import value_reducer
+import verifier_normalizer
 from admission_bridge import GoalAdmissionBridge
 from campaign_compiler import GOAL_CANDIDATE_SCHEMA, CampaignCompiler
 from command_ingress import submit_command
@@ -106,6 +108,7 @@ class GoalLoopWorker:
         now_fn: Callable[[], datetime] | None = None,
         knowledge_store: KnowledgeStore | None = None,
         knowledge_repo_roots: tuple[Path, ...] = (),
+        recovery_binding=None,
     ):
         if (action_ledger is None) != (external_adapter is None):
             raise ValueError("action_ledger and external_adapter must be supplied together")
@@ -132,6 +135,7 @@ class GoalLoopWorker:
         # authority: a lamp-passing but value-RED run does not auto-advance, it
         # routes to human_required (LH execution model: 报红 gates completion).
         self.value_gate = value_gate
+        self.recovery_binding = recovery_binding
         self.knowledge_store = knowledge_store
         self.knowledge_repo_roots = tuple(Path(item).resolve() for item in knowledge_repo_roots)
 
@@ -150,16 +154,29 @@ class GoalLoopWorker:
         startup = self.controller.startup()
         external = []
         if verdict_store is not None and conclusion_source is not None:
-            external = self.controller.resume_external(verdict_store=verdict_store, source=conclusion_source)
+            # The asynchronous boundary: a success conclusion crosses to
+            # verified only through the LH-owned normalized record and its
+            # value_reduction_ready event (goal-lifecycle-v1).
+            def normalize(**kwargs: Any) -> dict[str, Any]:
+                return verifier_normalizer.normalize_resolved_run(
+                    goal_store=self.goal_store, run_store=self.run_store,
+                    verdict_store=verdict_store, **kwargs,
+                )
+
+            external = self.controller.resume_external(
+                verdict_store=verdict_store, source=conclusion_source,
+                normalizer=normalize,
+            )
         auto_merge = []
         if self.merge_gate is not None and external:
             # B13: human merges found on poll feed the trust ramp; runs that
             # resolved verified-with-success go through the gate's conditions.
             auto_merge = self.merge_gate.on_poll_resolved(external, at=time.time())
         terminal_before = self._reduce_one_terminal_run()
+        self._enqueue_campaign_recoveries()
         event_result = self._process_one_event(holder)
         run_result = self._dispatch_one_run(holder, model, turning_point=turning_point, verdict_store=verdict_store)
-        terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped"} else None
+        terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped", "human_required"} else None
         campaign_stops = self._campaign_failure_lines()
         progressed = any(item is not None and item != [] for item in (standing, startup, external, auto_merge, terminal_before, event_result, run_result, terminal_after, campaign_stops))
         return {
@@ -242,13 +259,16 @@ class GoalLoopWorker:
             ]
             outcomes.sort(key=lambda goal: (float(goal.get("updated_at") or 0), goal["goal_id"]))
             consecutive = 0
+            failed_goals: list[dict[str, Any]] = []
             episode_anchor = "initial"
             for goal in outcomes:
                 if goal["state"] == "completed":
                     consecutive = 0
+                    failed_goals = []
                     episode_anchor = f"{goal['goal_id']}:{float(goal.get('updated_at') or 0):.9f}"
                 else:
                     consecutive += 1
+                    failed_goals.append(goal)
             if consecutive < threshold:
                 continue
             episode_id = hashlib.sha256(f"{campaign_id}\0{episode_anchor}".encode()).hexdigest()[:16]
@@ -259,14 +279,15 @@ class GoalLoopWorker:
             except KeyError:
                 pass
             routed: list[str] = []
-            for goal in self.goal_store.active_goals(campaign_id=campaign_id):
-                self.goal_store.transition_goal(goal["goal_id"], "human_required", expected_state="active")
-                routed.append(goal["goal_id"])
-            for goal in self.goal_store.goals_in_state("candidate"):
-                if goal.get("campaign_id") != campaign_id:
-                    continue
-                self.goal_store.transition_goal(goal["goal_id"], "human_required", expected_state="candidate")
-                routed.append(goal["goal_id"])
+            pending = [*self.goal_store.active_goals(campaign_id=campaign_id),
+                       *(goal for goal in self.goal_store.goals_in_state("candidate")
+                         if goal.get("campaign_id") == campaign_id)]
+            affected = (self._campaign_affected_goals(failed_goals, pending)
+                        if self.recovery_binding is not None else {goal["goal_id"] for goal in pending})
+            for goal in pending:
+                if goal["goal_id"] in affected:
+                    self.goal_store.transition_goal(goal["goal_id"], "human_required", expected_state=goal["state"])
+                    routed.append(goal["goal_id"])
             payload = {
                 "campaign_id": campaign_id,
                 "consecutive_failures": consecutive,
@@ -274,6 +295,9 @@ class GoalLoopWorker:
                 "episode_id": episode_id,
                 "routed_goal_ids": sorted(routed),
             }
+            if self.recovery_binding is not None:
+                payload["failed_goal_ids"] = [goal["goal_id"] for goal in failed_goals]
+                payload["dispatch"] = self.recovery_binding.native_runtime["dispatch"]
             event = self.goal_store.record_event(
                 event_id=event_key,
                 idempotency_key=event_key,
@@ -285,14 +309,345 @@ class GoalLoopWorker:
             stops.append({**payload, "event_key": event_key})
         return stops
 
+
+    @staticmethod
+    def _campaign_scope(goal: dict[str, Any]) -> dict[str, Any]:
+        revision = goal.get("current_revision") or {}
+        payload = revision.get("goal") or {}
+        envelope = payload.get("admission_envelope") or {}
+        return {"write_set": envelope.get("allowed_paths") or [],
+                "read_set": payload.get("read_set") or []}
+
+    def _campaign_affected_goals(self, failed, pending) -> set[str]:
+        from lh_runtime.work_unit_store import read_write_conflicts
+        affected = {goal["goal_id"]: goal for goal in failed}
+        changed = True
+        while changed:
+            changed = False
+            for goal in pending:
+                if goal["goal_id"] in affected:
+                    continue
+                scope = self._campaign_scope(goal)
+                if (set(goal.get("depends_on") or []) & affected.keys()
+                    or not scope["write_set"]
+                    or any(not self._campaign_scope(other)["write_set"]
+                           or read_write_conflicts(scope, self._campaign_scope(other))
+                           for other in affected.values())):
+                    affected[goal["goal_id"]] = goal
+                    changed = True
+        return set(affected)
+
+    def _campaign_artifact(self, reference: dict[str, Any]) -> bytes:
+        path = (self.run_store.root / reference["ref"]).resolve()
+        if not path.is_relative_to(self.run_store.root.resolve()):
+            raise ValueError("campaign_recovery_child_receipt_mismatch")
+        raw = path.read_bytes()
+        if "sha256:" + hashlib.sha256(raw).hexdigest() != reference["digest"]:
+            raise ValueError("campaign_recovery_child_receipt_mismatch")
+        return raw
+
+    def _campaign_child(self, goal_id: str) -> dict[str, Any]:
+        from lh_runtime.work_unit_store import digest_json
+        runtime = self.recovery_binding.native_runtime
+        goal = self.goal_store.get_goal(goal_id)
+        run = self.run_store.get_run(goal["run_id"])
+        attempt = self.run_store.latest_attempt(run["run_id"])
+        revision = goal["current_revision"]
+        if (goal["campaign_id"] != runtime["campaign_id"] or goal["state"] not in {"stopped", "human_required"}
+            or run["state"] not in {"stopped", "human_required"} or not attempt
+            or attempt["state"] not in {"stopped", "human_required"}
+            or revision["revision_id"] != run["goal"]["revision_id"]
+            or run["goal"]["goal_id"] != goal_id
+            or run["attempts"] != attempt["ordinal"] or run["fence"] != attempt["fence"]
+            or not self.run_store._receipt_artifact_valid(
+                run["run_id"], attempt["ordinal"], attempt["receipt_ref"], attempt["receipt_digest"])):
+            raise ValueError("campaign_recovery_child_receipt_mismatch")
+        identity = {**self.run_store._delivery_identity(run, ordinal=attempt["ordinal"], fence=attempt["fence"]),
+                    "authority_store": "run", "identity_profile": "native-run-v1"}
+        self.recovery_binding._native_command_identity(identity, "planner")
+        receipt = json.loads(self._campaign_artifact({"ref": attempt["receipt_ref"], "digest": attempt["receipt_digest"]}))
+        verification = receipt.get("verification") or {}
+        envelope = run["goal"]["admission_envelope"]
+        if (receipt.get("dispatch") != runtime["dispatch"]
+            or receipt.get("workspace", {}).get("base_revision") != runtime["base_revision"]
+            or verification.get("exit_code") in (None, 0) or verification.get("precheck")
+            or verification.get("argv") != envelope["acceptance_lamp"]["verification_argv"]):
+            raise ValueError("campaign_recovery_child_receipt_mismatch")
+        # Validate the actual evidence artifacts too; retain references, not model prose.
+        patch = self._campaign_artifact(receipt["diff"])
+        self._campaign_artifact(verification["stdout"])
+        self._campaign_artifact(verification["stderr"])
+        self._campaign_artifact(receipt["provider"]["artifact"])
+        ceiling = self.run_store.effective_max_attempts(run["run_id"])
+        return {**identity, "revision_id": revision["revision_id"],
+                "receipt_ref": attempt["receipt_ref"], "receipt_digest": attempt["receipt_digest"],
+                "candidate_digest": receipt["diff"]["digest"], "diff_ref": receipt["diff"],
+                "diff_excerpt": patch[:32768].decode("utf-8", errors="replace"),
+                "diff_excerpt_truncated": len(patch) > 32768,
+                "verification": verification,
+                "packet_digest": digest_json(run["goal"]["delivery_packet"]),
+                "envelope_digest": digest_json(envelope),
+                "write_set": list(envelope["allowed_paths"]),
+                "attempt_limit": ceiling, "remaining_attempts": max(0, ceiling - run["attempts"])}
+
+    def _enqueue_campaign_recoveries(self) -> None:
+        """Replay durable stop inputs, not completed effects or synthetic Runs."""
+        if self.recovery_binding is None:
+            return
+        from lh_runtime.work_unit_store import digest_json
+        runtime = self.recovery_binding.native_runtime
+        for stop in self.goal_store.events_from("stop_lines"):
+            payload = stop["payload"]
+            if (payload.get("campaign_id") != runtime["campaign_id"]
+                or payload.get("dispatch") != runtime["dispatch"]
+                or not payload.get("failed_goal_ids")):
+                continue
+            key = "campaign-recovery:" + stop["event_key"]
+            try:
+                self.goal_store.get_event(key)
+                continue
+            except KeyError:
+                pass
+            try:
+                children = [self._campaign_child(goal_id) for goal_id in payload["failed_goal_ids"]]
+            except (KeyError, ValueError, OSError) as exc:
+                event = self.goal_store.record_event(event_id=key, idempotency_key=key,
+                    source="campaign_recovery", event_type="campaign_recovery_rejected",
+                    payload={"stop_event_key": stop["event_key"], "reason": "campaign_recovery_child_receipt_mismatch",
+                             "detail": type(exc).__name__})
+                self.goal_store.transition_event(event["event_key"], "human_required", result=event["payload"])
+                continue
+            anchor = children[-1]
+            evidence = [{"goal_id": child["goal_id"], "run_id": child["run_id"],
+                         "attempt": child["attempt"], "fence": child["fence"],
+                         "receipt_ref": child["receipt_ref"], "receipt_digest": child["receipt_digest"],
+                         "diff_ref": child["diff_ref"]} for child in children]
+            tests = [{"id": child["goal_id"] + ":acceptance",
+                      "command_digest": digest_json(child["verification"]["argv"]),
+                      "argv": child["verification"]["argv"]} for child in children]
+            write_set = sorted({path for child in children for path in child["write_set"]})
+            authority = {"contract_digest": runtime["contract_digest"], "dispatch": runtime["dispatch"],
+                         "stop_payload_digest": stop["payload_digest"],
+                         "children": [{key: child[key] for key in
+                             ("goal_id", "revision_id", "unit_id", "run_id", "attempt_limit", "write_set",
+                              "packet_digest", "envelope_digest")} for child in children]}
+            request = {key: anchor[key] for key in
+                       ("goal_id", "goal_revision", "node_id", "unit_id", "run_id", "attempt", "fence",
+                        "base_sha", "authority_store", "identity_profile", "packet_digest", "envelope_digest")}
+            request.update({
+                "request_id": key, "reason_code": "campaign_consecutive_failures", "phase": "checks",
+                "campaign_id": runtime["campaign_id"], "project_id": runtime["project_id"],
+                "stop_event_key": stop["event_key"], "stop_payload_digest": stop["payload_digest"],
+                "contract_digest": runtime["contract_digest"], "dispatch": runtime["dispatch"],
+                "child_receipts": children, "sanitized_evidence_refs": evidence, "test_refs": tests,
+                "candidate_digest": digest_json([child["candidate_digest"] for child in children]),
+                "input_evidence_digest": digest_json(evidence), "authority_digest": digest_json(authority),
+                "authority": authority, "write_set": write_set,
+                "remaining_budget": {"child_attempts": {child["run_id"]: child["remaining_attempts"] for child in children},
+                                     **runtime["planner_recovery"]["budget"]},
+                "completed_effects": evidence,
+                "repair_packet": {"child_receipts": evidence, "write_set": write_set, "test_refs": tests},
+                "capability_binding": self.recovery_binding.runner.native_binding(
+                    "coding", unit_id=anchor["unit_id"], attempt_id=str(anchor["attempt"])),
+            })
+            record = {"schema": "lh-recovery-record/v1", "request_id": key,
+                      "request_digest": digest_json(request), "request": request, "status": "requested",
+                      "result": None, "verdict": None, "apply": None, "claims": [], "events": [],
+                      "budget_limits": runtime["planner_recovery"]["budget"],
+                      "incident_started_at": None, "incident_deadline_at": None}
+            self.goal_store.record_event(event_id=key, idempotency_key=key, source="campaign_recovery",
+                event_type="campaign_recovery_requested", payload={"record": record})
+
+    def _consume_campaign_recovery(self, event: dict[str, Any]) -> dict[str, Any]:
+        """The existing claimed Goal event owns bounded review, never child retry authority."""
+        from lh_runtime.lifecycle import NativeProcessIdentityPort, observe_process_identity
+        from lh_runtime.work_unit_store import digest_json, validate_recovery_plan
+        if self.recovery_binding is None:
+            return {"status": "campaign_recovery_optin_missing", "event_key": event["event_key"]}
+        event = self.goal_store.get_event(event["event_key"])
+        record = copy.deepcopy(event["result"] or event["payload"]["record"])
+        request = record["request"]
+        runtime = self.recovery_binding.native_runtime
+
+        def save(status, *, reason=None, terminal=False):
+            nonlocal event
+            record["status"] = status
+            if reason is not None:
+                record["reason"] = reason
+            record["events"].append({"type": status, "at": time.time(), "reason": reason})
+            event = self.goal_store.transition_event(event["event_key"],
+                "human_required" if terminal else "event_received", result=record,
+                expected_result_digest=digest_json(event["result"]))
+
+        def validate_inputs():
+            stop = self.goal_store.get_event(request["stop_event_key"])
+            if (record["request_digest"] != digest_json(request)
+                or request["identity_profile"] != "native-run-v1"
+                or request["contract_digest"] != runtime["contract_digest"]
+                or request["dispatch"] != runtime["dispatch"]
+                or stop["payload_digest"] != request["stop_payload_digest"]
+                or stop["payload"].get("failed_goal_ids") != [child["goal_id"] for child in request["child_receipts"]]
+                or record["budget_limits"] != runtime["planner_recovery"]["budget"]
+                or "sha256:" + hashlib.sha256(Path(runtime["contract_ref"]).read_bytes()).hexdigest()
+                   != runtime["contract_digest"]):
+                raise ValueError("campaign_recovery_authority_mismatch")
+            for child in request["child_receipts"]:
+                if self._campaign_child(child["goal_id"]) != child:
+                    raise ValueError("campaign_recovery_child_receipt_mismatch")
+
+        if record["status"] in {"awaiting_authority", "rejected", "outcome_unknown"}:
+            return record
+        try:
+            validate_inputs()  # after claim_event, so claim-time receipt drift is observable
+        except (ValueError, KeyError, OSError) as exc:
+            reason = str(exc) if str(exc).startswith("campaign_recovery_") else "campaign_recovery_child_receipt_mismatch"
+            save("rejected", reason=reason, terminal=True)
+            return record
+        capabilities = self.recovery_binding.runner.contract["capabilities"]
+        principals = [capabilities[name]["identity"]["principal"] for name in ("coding", "planning", "verifier")]
+        if len(set(principals)) != 3:
+            save("rejected", reason="campaign_recovery_verifier_not_independent", terminal=True)
+            return record
+
+        unresolved = [claim for claim in record["claims"] if claim["state"] == "claimed"]
+        if unresolved:
+            for claim in unresolved:
+                observation = observe_process_identity(claim.get("owner_process_identity"))
+                if observation.status == "alive":
+                    return {"status": "campaign_recovery_role_inflight", "request_id": record["request_id"]}
+                claim["state"] = "outcome_unknown"
+                claim["owner_observation"] = observation.status
+            save("outcome_unknown", reason="campaign_recovery_role_outcome_unknown", terminal=True)
+            return record
+
+        for phase, field in (("planner", "result"), ("plan_verifier", "verdict")):
+            if record[field] is not None:
+                continue
+            if any(claim["phase"] == phase for claim in record["claims"]):
+                save("outcome_unknown", reason="campaign_recovery_role_outcome_unknown", terminal=True)
+                return record
+            owner = NativeProcessIdentityPort().current()
+            if owner is None:
+                save("rejected", reason="campaign_recovery_owner_identity_unknown", terminal=True)
+                return record
+            now = time.time()
+            if record["incident_started_at"] is None:
+                record["incident_started_at"] = now
+                record["incident_deadline_at"] = now + record["budget_limits"]["incident_timeout_seconds"]
+            remaining = record["incident_deadline_at"] - now
+            if remaining <= 0:
+                save("awaiting_authority", reason="campaign_recovery_incident_deadline_exhausted", terminal=True)
+                return record
+            limit = record["budget_limits"][phase + "_calls"]
+            if sum(claim["phase"] == phase for claim in record["claims"]) >= limit:
+                save("awaiting_authority", reason="campaign_recovery_role_budget_exhausted", terminal=True)
+                return record
+            claim = {"call_id": digest_json([record["request_id"], phase]), "phase": phase, "state": "claimed",
+                     "started_at": now, "owner_process_identity": owner.as_dict(),
+                     "incident_started_at": record["incident_started_at"],
+                     "incident_deadline_at": record["incident_deadline_at"]}
+            record["claims"].append(claim)
+            save("claimed" if phase == "planner" else "verifier_claimed")
+
+            def on_started(process):
+                identity = NativeProcessIdentityPort().observe(process.pid)
+                if identity is None:
+                    raise ValueError("campaign_recovery_role_process_identity_unknown")
+                claim["process_identity"] = identity.as_dict()
+                save(record["status"])
+
+            try:
+                validate_inputs()
+                timeout = min(record["budget_limits"][phase + "_timeout_seconds"],
+                              record["incident_deadline_at"] - time.time())
+                if timeout <= 0:
+                    raise ValueError("campaign_recovery_incident_deadline_exhausted")
+                frame = {"mode": phase, "recovery_request": request}
+                if phase == "plan_verifier":
+                    frame["planner_result"] = record["result"]
+                completed, binding, _ = self.recovery_binding.command(request, phase=phase,
+                    argv=runtime["planner_recovery"][phase + "_argv"], worktree=runtime["source_repo"],
+                    timeout_seconds=timeout, input_request=frame, writable=False, on_started=on_started)
+                if completed.returncode != 0:
+                    raise ValueError("campaign_recovery_role_failed")
+                result = json.loads(completed.stdout)
+                if not isinstance(result, dict):
+                    raise ValueError("campaign_recovery_role_result_invalid")
+                # Metadata is from the real command boundary, not provider-authored claims.
+                result.update(binding)
+                claim["state"] = "success"
+                claim["finished_at"] = time.time()
+                claim["stdout_digest"] = "sha256:" + hashlib.sha256(completed.stdout.encode()).hexdigest()
+                record[field] = result
+            except Exception as exc:
+                claim["state"] = "outcome_unknown" if "process_identity" in claim else "failed"
+                save("outcome_unknown" if claim["state"] == "outcome_unknown" else "rejected",
+                     reason=str(exc) if str(exc).startswith("campaign_recovery_") else "campaign_recovery_role_failed",
+                     terminal=True)
+                return record
+            # Public durable seam: a restart here skips the recorded role.
+            save("result_recorded" if phase == "planner" else "verdict_recorded")
+
+        try:
+            validate_inputs()
+            validate_recovery_plan(record, identity_profile=runtime["identity_profile"])
+        except (ValueError, KeyError, OSError) as exc:
+            save("rejected", reason="campaign_recovery_plan_invalid", terminal=True)
+            return record
+        # A valid review is not authority to replenish a child's native ceiling.
+        exhausted = any(child["remaining_attempts"] == 0 for child in request["child_receipts"])
+        reason = ("campaign_recovery_child_attempt_budget_exhausted" if exhausted
+                  else "campaign_recovery_requires_authority")
+        record["apply"] = {"status": "awaiting_authority", "reason": reason, "request_digest": record["request_digest"]}
+        save("awaiting_authority", reason=reason, terminal=True)
+        return record
+
     def _process_one_event(self, holder: str) -> dict[str, Any] | None:
         for event in self.goal_store.pending_events():
             if not self.goal_store.claim_event(event["event_key"], holder):
                 continue
             try:
-                return self._process_event(event)
+                result = self._process_event(event)
             finally:
                 self.goal_store.release_event(event["event_key"], holder)
+            # A command-down manual_intent is intentionally normalized into a
+            # derived candidate event before admission.  Consume that one
+            # deterministic follow-up in the same bounded tick so a
+            # max_cycles=1 execution can still create its single Goal/Run and
+            # dispatch its Attempt.  Only this explicit derivation is followed;
+            # arbitrary event chains remain one event per tick.
+            derived_key = (
+                result.get("derived_event_key")
+                if isinstance(result, dict)
+                and result.get("status") == "derived_candidate_event"
+                else None
+            )
+            if (
+                event.get("event_type") == "manual_intent"
+                and event.get("source") != "standing_intent"
+                and isinstance(event.get("payload"), dict)
+                and isinstance(event["payload"].get("correlation_id"), str)
+                and event["payload"]["correlation_id"].strip()
+                and isinstance(derived_key, str)
+                and derived_key
+            ):
+                try:
+                    derived = self.goal_store.get_event(derived_key)
+                except KeyError:
+                    derived = None
+                if (
+                    derived is not None
+                    and derived.get("state") in {"event_received", "candidate"}
+                    and self.goal_store.claim_event(derived_key, holder)
+                ):
+                    try:
+                        result = {
+                            **result,
+                            "derived_event_result": self._process_event(derived),
+                        }
+                    finally:
+                        self.goal_store.release_event(derived_key, holder)
+            return result
         return None
 
     def _process_control_event(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -504,6 +859,8 @@ class GoalLoopWorker:
 
     def _process_event(self, event: dict[str, Any]) -> dict[str, Any]:
         event_key = event["event_key"]
+        if event["source"] == "campaign_recovery" and event["event_type"] == "campaign_recovery_requested":
+            return self._consume_campaign_recovery(event)
         if event["event_type"] in {"context_pressure", "rollover_requested", "successor_heartbeat", "rollover_finalized"}:
             return self._process_control_event(event)
         if event["event_type"] == "scheduled_tick":
@@ -535,18 +892,18 @@ class GoalLoopWorker:
                 # A re-issued command for a goal that already exists from a
                 # different source event must not crash the tick.  When the
                 # goal is already a candidate, proceed to admission with it;
-                # terminal goals (stopped/completed) revive as candidates;
-                # anything else (active/conflicting payload) is a human decision.
+                # parked/terminal goals (human_required/stopped/completed)
+                # revive as candidates; admission re-checks the complete
+                # envelope and context before any fresh Run is created.
                 try:
                     existing = self.goal_store.get_goal(candidate["goal_id"])
                 except KeyError:
                     existing = None
-                if existing is not None and existing["state"] in {"stopped", "completed"}:
-                    # Re-issued command for a terminal goal: revive it as a
-                    # candidate; admission decides revision-bump vs cap.
-                    # completed mirrors stopped (daily standing intents recur
-                    # after a successful cycle — the fresh run comes from the
-                    # W9g verified-run bump at admission).
+                if existing is not None and existing["state"] in {"human_required", "stopped", "completed"}:
+                    # A new explicit candidate is the re-admission signal for
+                    # a parked or terminal goal.  The full admission policy
+                    # still decides whether it may run; invalid or human-only
+                    # candidates remain human_required.
                     self.goal_store.transition_goal(existing["goal_id"], "candidate", expected_state=existing["state"])
                 elif existing is None or existing["state"] != "candidate":
                     result = {
@@ -959,8 +1316,28 @@ class GoalLoopWorker:
             self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
             return {"status": "human_required", "run_id": run_id, "reason": f"receipt unreadable: {exc}"}
         if run["state"] == "verified":
+            if self.run_store.delivery_required(run_id):
+                delivery = self.run_store.verify_delivery(run_id, phase="final")
+                if delivery.get("verdict") != "GREEN":
+                    # Historical/legacy verified Runs remain readable, but a
+                    # new Goal completion may not project them as a fresh
+                    # success without the same RunStore-owned final binding.
+                    self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
+                    return {
+                        "status": "human_required",
+                        "run_id": run_id,
+                        "reason": delivery.get("reason", "delivery_final_not_green"),
+                        "delivery": delivery,
+                    }
+            lamp_equivalent = False
             if self.value_gate:
-                verdict = value_reducer.verdict_for_run(self.run_store, run_id)
+                verdict = value_reducer.value_evidence_for_run(
+                    self.run_store, run_id, goal_store=self.goal_store,
+                )
+                # An async GREEN carries the ready proof; the compiler's own
+                # lamp check downstream receives the lamp-equivalent form
+                # only on that proof, never on the bare async receipt.
+                lamp_equivalent = bool(verdict.get("ready_event_key"))
                 if verdict["verdict"] == "RED":
                     failure_case = self.run_store.record_resolution(
                         run_id,
@@ -999,11 +1376,14 @@ class GoalLoopWorker:
             if compiler is None:
                 self.goal_store.transition_goal(goal_id, "human_required", expected_state="active")
                 return {"status": "human_required", "run_id": run_id, "reason": "no compiled campaign for verified run"}
+            completion_verification = receipt.get("verification")
+            if lamp_equivalent and isinstance(completion_verification, dict):
+                completion_verification = {**completion_verification, "exit_code": 0}
             completion = {
                 "campaign_id": goal["campaign_id"],
                 "stage_id": goal["stage_id"],
                 "receipt_id": receipt_meta["receipt_digest"],
-                "verification": receipt.get("verification"),
+                "verification": completion_verification,
             }
             advanced = compiler.advance(completion)
             if advanced["status"] == "candidate_ready":

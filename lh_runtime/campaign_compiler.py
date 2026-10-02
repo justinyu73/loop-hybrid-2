@@ -5,11 +5,17 @@ import hashlib
 import json
 from typing import Any
 
+try:
+    from . import goal_assignment
+except ImportError:  # direct script execution keeps lh_runtime on sys.path
+    import goal_assignment
+
 
 CAMPAIGN_SCHEMA = "lh-campaign/v1"
 ENVELOPE_SCHEMA = "lh-campaign-admission-envelope/v1"
 GOAL_CANDIDATE_SCHEMA = "lh-goal-candidate/v1"
 FORBIDDEN_SIDE_EFFECTS = {"push", "merge", "publish", "external_action", "credential"}
+BOUNDED_REPO_EDIT_REQUIREMENT = "disposable clone receives a bounded repo edit"
 
 
 def _digest(value: Any) -> str:
@@ -35,6 +41,17 @@ def _strings(name: str, value: Any, *, required: bool = True) -> list[str]:
     if required and not value:
         raise ValueError(f"{name} must not be empty")
     return [item.strip() for item in value]
+
+
+def _requires_non_empty_diff(goal: dict[str, Any]) -> bool:
+    """Derive the edit requirement from the target-owned goal contract.
+
+    The target C5 contract names a bounded repo edit as a required outcome.
+    Carrying that fact into the admission envelope prevents the controller's
+    lamp fast path from treating an untouched disposable clone as success.
+    """
+    must_have = goal.get("must_have")
+    return isinstance(must_have, list) and BOUNDED_REPO_EDIT_REQUIREMENT in must_have
 
 
 class CampaignCompiler:
@@ -125,6 +142,12 @@ class CampaignCompiler:
                 "smoke": _text(f"{stage_id}.acceptance_lamp.smoke", lamp.get("smoke")),
                 "verification_argv": _strings(f"{stage_id}.acceptance_lamp.verification_argv", lamp.get("verification_argv")),
             }
+        raw_assignment = stage.get("goal_assignment")
+        assignment = (
+            goal_assignment.normalize_assignment(raw_assignment)
+            if raw_assignment is not None
+            else None
+        )
         reasons: list[str] = []
         if human_only:
             reasons.append("human_only_stage")
@@ -148,6 +171,7 @@ class CampaignCompiler:
             "campaign_id": self.campaign_id,
             "stage_id": stage_id,
             "goal": goal,
+            "requires_non_empty_diff": _requires_non_empty_diff(goal),
             "allowed_paths": allowed_paths,
             "allowed_side_effects": allowed_side_effects,
             "acceptance_lamp": lamp,
@@ -158,6 +182,8 @@ class CampaignCompiler:
         }
         if external_verdict is not None:
             compiled["external_verdict"] = external_verdict
+        if assignment is not None:
+            compiled["goal_assignment"] = assignment
         return compiled
 
     def compile(self) -> dict[str, Any]:

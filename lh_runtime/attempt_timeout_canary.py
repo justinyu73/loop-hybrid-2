@@ -11,7 +11,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from controller import LoopController
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
 
 
@@ -45,23 +48,41 @@ def main() -> int:
         budget_seconds = 2.0
         sleep_seconds = 10
         controller = LoopController(store, root / "workspaces", timeout_seconds=budget_seconds)
-        run_id = store.create_run(goal={"case": "hanging-verifier"}, source_repo=source, base_revision=base, run_id="run-timeout")
+        run_id = make_native_run(
+            store,
+            source,
+            base,
+            "attempt-timeout",
+            "timeout",
+            [{
+                "id": "timeout-check",
+                "commands": [{"id": "bounded-file", "argv": ["test", "-f", "bounded.txt"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}],
+                "required_receipts": ["executor"],
+            }],
+            [sys.executable, "-c", f"print('before-timeout', flush=True); import time; time.sleep({sleep_seconds})"],
+            ["bounded.txt"],
+            4,
+            goal={"case": "hanging-verifier"},
+            run_id="run-timeout",
+        )["run_id"]
         started = time.monotonic()
         result = controller.tick(
             run_id,
             holder="timeout-canary",
             model=_model,
-            verifier_argv=[sys.executable, "-c", f"import time; time.sleep({sleep_seconds})"],
+            verifier_argv=[sys.executable, "-c", f"print('before-timeout', flush=True); import time; time.sleep({sleep_seconds})"],
         )
         elapsed = time.monotonic() - started
         run = store.get_run(run_id)
         receipt_meta = store.latest_receipt(run_id)
         receipt = json.loads((store.root / receipt_meta["receipt_ref"]).read_text(encoding="utf-8")) if receipt_meta else {}
+        stdout_ref = receipt.get("verification", {}).get("stdout", {}).get("ref")
+        verifier_stdout = (store.root / stdout_ref).read_text(encoding="utf-8") if stdout_ref else ""
         cases = [
             {
                 "id": "verifier-timeout-converges-to-retry",
-                "ok": result.get("status") == "retry_pending" and run["state"] == "retry_pending" and receipt.get("verification", {}).get("exit_code") == 124,
-                "detail": {"result": result, "run_state": run["state"], "exit_code": receipt.get("verification", {}).get("exit_code")},
+                "ok": result.get("status") == "retry_pending" and run["state"] == "retry_pending" and receipt.get("verification", {}).get("exit_code") == 124 and "before-timeout" in verifier_stdout,
+                "detail": {"result": result, "run_state": run["state"], "exit_code": receipt.get("verification", {}).get("exit_code"), "verifier_stdout": verifier_stdout},
             },
             {
                 "id": "hanging-verifier-does-not-block-indefinitely",

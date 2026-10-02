@@ -10,13 +10,17 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from campaign_compiler import CAMPAIGN_SCHEMA, CampaignCompiler
 from controller import LoopController
 from goal_loop_driver import run_driver
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_bundle
 from project_status import build_status
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 
 def git(*args: str) -> None:
@@ -27,7 +31,31 @@ def case(case_id: str, ok: bool, detail: str) -> dict:
     return {"id": case_id, "ok": ok, "detail": detail}
 
 
-def campaign() -> dict:
+def _binding(source: Path, base: str, goal_id: str, stage_id: str, envelope: dict) -> dict:
+    return make_native_bundle(
+        source,
+        base,
+        goal_id,
+        stage_id,
+        [{
+            "id": "driver-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if any(Path('src').glob('attempt-*.txt')) else 1)"],
+        ["src/"],
+        int(envelope.get("max_attempts", 4)),
+        goal={"feature_contract": stage_id, "admission_envelope": envelope},
+    )
+
+
+def campaign(source: Path, base: str) -> dict:
     def stage(stage_id: str, next_stage_id: str | None) -> dict:
         return {
             "stage_id": stage_id,
@@ -38,7 +66,19 @@ def campaign() -> dict:
             "max_attempts": 4,
             "next_stage_id": next_stage_id,
         }
-    return {"schema": CAMPAIGN_SCHEMA, "campaign_id": "campaign-drv", "stages": [stage("stage-1", "stage-2"), stage("stage-2", None)]}
+    campaign = {"schema": CAMPAIGN_SCHEMA, "campaign_id": "campaign-drv", "stages": [stage("stage-1", "stage-2"), stage("stage-2", None)]}
+    compiled = CampaignCompiler(campaign).compile()["stages"]
+    for stage_row in campaign["stages"]:
+        stage_id = stage_row["stage_id"]
+        binding = _binding(source, base, f"campaign-drv:{stage_id}", stage_id, compiled[stage_id])
+        stage_row["goal"] = {
+            **stage_row["goal"],
+            "delivery_required": True,
+            "delivery_contract": binding["contract"],
+            "delivery_plan": binding["plan"],
+            "delivery_packet": binding["packet"],
+        }
+    return campaign
 
 
 def model(workspace: Path, capsule: dict) -> dict:
@@ -91,7 +131,7 @@ def _source_repo(root: Path) -> tuple[Path, str]:
 
 
 def _worker(root: Path, tag: str, source: Path, base: str, compiler: CampaignCompiler) -> GoalLoopWorker:
-    runs = RunStore(root / f"{tag}-runs")
+    runs = RunStore(root / f"{tag}-runs", command_runner=fixture_command_runner)
     return GoalLoopWorker(
         goal_store=GoalStore(root / f"{tag}-goals"),
         run_store=runs,
@@ -101,10 +141,11 @@ def _worker(root: Path, tag: str, source: Path, base: str, compiler: CampaignCom
     )
 
 
-def _seed(goal_store: GoalStore, compiler: CampaignCompiler, *, goal_id: str, stage_id: str, event_key: str) -> None:
+def _seed(goal_store: GoalStore, compiler: CampaignCompiler, *, goal_id: str, stage_id: str, event_key: str, source: Path, base: str) -> None:
     envelope = compiler.compile()["stages"][stage_id]
+    binding = _binding(source, base, goal_id, stage_id, envelope)
     goal_store.record_event(event_id=event_key, idempotency_key=event_key, source="manual_intent", event_type="goal_candidate", payload={
-        "candidate": {"goal_id": goal_id, "campaign_id": "campaign-drv", "stage_id": stage_id, "goal": {"feature_contract": stage_id, "admission_envelope": envelope}}
+        "candidate": {"goal_id": goal_id, "campaign_id": "campaign-drv", "stage_id": stage_id, "goal": binding["goal"]}
     })
 
 
@@ -112,17 +153,17 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         source, base = _source_repo(root)
-        compiler = CampaignCompiler(campaign())
+        compiler = CampaignCompiler(campaign(source, base))
 
         # 1) drive one seeded campaign to completion with no manual re-tick.
         w1 = _worker(root, "done", source, base, compiler)
-        _seed(w1.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-seed-1")
+        _seed(w1.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-seed-1", source=source, base=base)
         done = run_driver(w1, holder="drv-a", model=model, max_cycles=30, sleep_fn=_noop_sleep)
         stage2_done = w1.goal_store.get_goal("campaign-drv:stage-2")["state"] == "completed"
 
         # 2) kill switch halts before any tick.
         w2 = _worker(root, "pause", source, base, compiler)
-        _seed(w2.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-pause-1")
+        _seed(w2.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-pause-1", source=source, base=base)
         flag = root / "loop-pause-all"
         flag.write_text("stop\n", encoding="utf-8")
         paused = run_driver(w2, holder="drv-b", model=model, pause_flag=flag, max_cycles=30, sleep_fn=_noop_sleep)
@@ -130,18 +171,18 @@ def main() -> int:
         # 3) empty store idles to a clean stop, then a restart makes progress.
         w3 = _worker(root, "idle", source, base, compiler)
         idled = run_driver(w3, holder="drv-c", model=model, idle_limit=3, max_cycles=30, sleep_fn=_noop_sleep)
-        _seed(w3.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-idle-1")
+        _seed(w3.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-idle-1", source=source, base=base)
         resumed = run_driver(w3, holder="drv-c", model=model, max_cycles=30, sleep_fn=_noop_sleep)
 
         # 4) budget cap stops after one dispatched run.
         w4 = _worker(root, "budget", source, base, compiler)
-        _seed(w4.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-budget-1")
+        _seed(w4.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-budget-1", source=source, base=base)
         budget = run_driver(w4, holder="drv-d", model=model, max_runs=1, max_cycles=30, sleep_fn=_noop_sleep)
         budget_stage2 = w4.goal_store.get_goal("campaign-drv:stage-2")["state"] if _goal_exists(w4.goal_store, "campaign-drv:stage-2") else "absent"
 
         # 5) max-cycles cap stops a still-progressing loop.
         w5 = _worker(root, "cap", source, base, compiler)
-        _seed(w5.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-cap-1")
+        _seed(w5.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-cap-1", source=source, base=base)
         capped = run_driver(w5, holder="drv-e", model=model, max_cycles=1, sleep_fn=_noop_sleep)
 
         # 6) idle only because goals are parked in human_required -> stop_reason parked (driver branch).
@@ -152,14 +193,14 @@ def main() -> int:
 
         # 8) opt-in status snapshot auto-refreshes as the driver progresses.
         w8 = _worker(root, "snap", source, base, compiler)
-        _seed(w8.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-snap-1")
+        _seed(w8.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-snap-1", source=source, base=base)
         snap_out = root / "runtime" / "platform_status.json"
         run_driver(w8, holder="drv-h", model=model, max_cycles=30, status_snapshot_out=snap_out, sleep_fn=_noop_sleep)
         snap_reloaded = json.loads(snap_out.read_text(encoding="utf-8")) if snap_out.exists() else {}
         snap_matches = snap_out.exists() and snap_reloaded.get("status") == build_status(w8.run_store, w8.goal_store) and not snap_out.with_name(snap_out.name + ".tmp").exists()
         # a driver run without the flag writes nothing.
         w9 = _worker(root, "nosnap", source, base, compiler)
-        _seed(w9.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-nosnap-1")
+        _seed(w9.goal_store, compiler, goal_id="campaign-drv:stage-1", stage_id="stage-1", event_key="drv-nosnap-1", source=source, base=base)
         nosnap_out = root / "runtime-off" / "platform_status.json"
         run_driver(w9, holder="drv-i", model=model, max_cycles=30, sleep_fn=_noop_sleep)
 

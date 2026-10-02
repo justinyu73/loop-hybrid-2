@@ -9,6 +9,16 @@ from pathlib import Path
 from typing import Any
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Keep the transaction context contract while closing on context exit."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class KnowledgeStore:
     """A rebuildable knowledge index; it never stores run state or leases."""
 
@@ -46,7 +56,7 @@ class KnowledgeStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5, isolation_level=None)
+        conn = sqlite3.connect(self.db_path, timeout=5, isolation_level=None, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 

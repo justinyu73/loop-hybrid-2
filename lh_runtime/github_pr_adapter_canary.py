@@ -22,14 +22,18 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tests"))
 import external_action_port as eap
 import external_verdict as ev
 import goal_loop_run as glr
 from _fixture import make_campaign, make_source_repo
+from controller import LoopController
 from github_pr_adapter import GitHubPrAdapter, GitHubPrError, _validate_lh_branch
 from github_conclusion_source import GitHubCredentialsMissing
+from native_delivery_fixture import make_native_run
 from project_binding import CONTRACT_SCHEMA, resolve_project
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 TOKEN = "r1-fixture-token"
 GOAL_ID = "campaign-r1:stage-pr"
@@ -89,14 +93,73 @@ def _counting_git(calls: list[list[str]]):
 
 
 def _seed_store(root: Path, *, stdout: str = "lamp ok\n", stderr: str = "") -> tuple[RunStore, str, str]:
-    store = RunStore(root / "runs")
+    source = root / "seed"
+    if not source.exists():
+        _make_remote(root)
+    base = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    store = RunStore(root / "runs", command_runner=fixture_command_runner)
     run_id = "run-r1-parked"
-    goal = {"goal_id": GOAL_ID, "admission_envelope": {
-        "allowed_paths": ["src/"],
-        "acceptance_lamp": {"id": "lamp", "smoke": "marker", "verification_argv": LAMP_ARGV},
-    }}
-    store.create_run(goal=goal, source_repo=root, base_revision="base-r1", run_id=run_id)
+    goal = {
+        "goal_id": GOAL_ID,
+        "goal_revision": 1,
+        "node_id": "github-pr",
+        "feature_contract": "open a bounded draft PR",
+        "admission_envelope": {
+            "allowed_paths": ["src/"],
+            "acceptance_lamp": {"id": "lamp", "smoke": "marker", "verification_argv": LAMP_ARGV},
+        },
+    }
+    native = make_native_run(
+        store,
+        source,
+        base,
+        GOAL_ID,
+        "github-pr",
+        [{
+            "id": "r1-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        ["sh", "-c", "grep -q lh-r1 src/out.txt"],
+        ["src/"],
+        4,
+        phase="async",
+        goal=goal,
+        run_id=run_id,
+    )
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
+    candidate = root / "candidate"
+    _git("clone", "-q", str(source), str(candidate))
+    patch = root / "change.patch"
+    patch.write_text(DIFF_TEXT, encoding="utf-8")
+    _git("-C", str(candidate), "apply", str(patch))
+    diff_digest = "sha256:" + hashlib.sha256(DIFF_TEXT.encode()).hexdigest()
+    controller = LoopController(store, root / "workspaces")
+    delivery = controller._record_delivery_from_provider(
+        run_id=run_id,
+        ordinal=ordinal,
+        fence=store.attempt_fence(run_id, ordinal),
+        phase="source",
+        provider={"summary": "r1 bounded source fixture"},
+        workspace=candidate,
+        diff_digest=diff_digest,
+        changed_paths=["src/out.txt"],
+        checker={"argv": LAMP_ARGV, "exit_code": 0, "stdout": stdout, "stderr": stderr},
+        dispatch_key=f"r1:{run_id}:{ordinal}:{diff_digest}",
+    )
+    if delivery.get("verdict") != "GREEN":
+        raise AssertionError(f"source delivery fixture was not GREEN: {delivery}")
     diff_ref = store.write_artifact(run_id, ordinal, "diff.patch", DIFF_TEXT)
     stdout_ref = store.write_artifact(run_id, ordinal, "verifier.stdout", stdout)
     stderr_ref = store.write_artifact(run_id, ordinal, "verifier.stderr", stderr)
@@ -107,7 +170,14 @@ def _seed_store(root: Path, *, stdout: str = "lamp ok\n", stderr: str = "") -> t
         "verification": {"argv": LAMP_ARGV, "exit_code": 0, "stdout": stdout_ref, "stderr": stderr_ref},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    if not store.park_external_verdict(
+        run_id,
+        ordinal,
+        receipt_ref=ref["ref"],
+        receipt_digest=ref["digest"],
+        fence=store.attempt_fence(run_id, ordinal),
+    ):
+        raise AssertionError("source delivery fixture could not park external verdict")
     return store, run_id, diff_ref["digest"]
 
 
@@ -157,6 +227,7 @@ def main() -> int:
                                     check=True, capture_output=True, text=True).stdout.split()[0]
 
         pr_body = transport.prs[0]["body"] if transport.prs else ""
+        persisted_base_revision = store.get_run(run_id)["base_revision"]
 
         # Ledger + parked verdict record: what W4's sha_resolver reads back.
         verdicts = ev.VerdictStore(root / "runs" / "verdict.sqlite3")
@@ -256,8 +327,9 @@ def main() -> int:
              and transport.prs[0]["base"] == "master"
              and "exit_code: 0" in pr_body and "GREEN" in pr_body
              and "input 100" in pr_body and "1 file(s), +1/-0" in pr_body
-             and GOAL_ID in pr_body and run_id in pr_body and "base-r1" in pr_body,
-             "detail": json.dumps({"draft": transport.prs[0]["draft"], "body_len": len(pr_body)})},
+             and GOAL_ID in pr_body and run_id in pr_body and persisted_base_revision in pr_body,
+             "detail": json.dumps({"draft": transport.prs[0]["draft"], "body_len": len(pr_body),
+                                   "base_revision": persisted_base_revision})},
             {"id": "evidence-body-is-bounded",
              "ok": "truncated" in long_body and len(long_body) <= 8000,
              "detail": json.dumps({"body_len": len(long_body)})},

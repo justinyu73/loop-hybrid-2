@@ -17,6 +17,26 @@ def case(case_id: str, ok: bool, detail: str) -> dict[str, object]:
     return {"id": case_id, "ok": ok, "detail": detail}
 
 
+def goal_assignment() -> dict:
+    return {
+        "schema": "loop-hybrid-goal-assignment/v2",
+        "project_id": "project-g2-fixture",
+        "assigner_ref": "campaign:campaign-g2-fixture",
+        "base_revision": "1" * 40,
+        "verification_budget": {
+            "schema": "loop-hybrid-verification-budget/v1",
+            "max_seconds": 30.0,
+        },
+        "criteria": [{
+            "criterion_id": "AC-G2",
+            "criterion_authority_ref": "docs/acceptance.md#ac-g2",
+            "criterion_authority_digest": "sha256:" + "a" * 64,
+            "check_id": "project-g2-check",
+            "check_definition_digest": "sha256:" + "b" * 64,
+        }],
+    }
+
+
 def campaign() -> dict:
     lamp = {"id": "stage-1-smoke", "smoke": "python3 -B tests/stage-1-smoke.py", "verification_argv": ["python3", "-B", "tests/stage-1-smoke.py"]}
     return {
@@ -38,6 +58,7 @@ def campaign() -> dict:
                 "allowed_paths": ["src/"],
                 "allowed_side_effects": ["workspace", "artifact"],
                 "acceptance_lamp": {"id": "stage-2-smoke", "smoke": "python3 -B tests/stage-2-smoke.py", "verification_argv": ["python3", "-B", "tests/stage-2-smoke.py"]},
+                "goal_assignment": goal_assignment(),
                 "max_attempts": 4,
                 "next_stage_id": None,
             },
@@ -109,6 +130,24 @@ def main() -> int:
             case("compiler-emits-versioned-envelope", compiled["schema"] == "lh-campaign-admission-envelope/v1" and compiled["digest"].startswith("sha256:"), compiled["digest"]),
             case("green-deterministic-stage-emits-stable-candidate", first["status"] == "candidate_ready" and second["candidate_key"] == first["candidate_key"] and first["event"]["idempotency_key"] == second["event"]["idempotency_key"], first["candidate_key"]),
             case("goal-store-deduplicates-compiled-candidate", stored_first["status"] == "received" and stored_second["status"] == "reused" and candidate_first["status"] == "created" and candidate_second["status"] == "reused" and store.summary()["goal_count"] == 1, str(store.summary())),
+            case(
+                "compiler-carries-exact-goal-assignment-into-candidate",
+                compiled["stages"]["stage-2"]["goal_assignment"]
+                == goal_assignment()
+                and first["candidate"]["goal"]["admission_envelope"][
+                    "goal_assignment"
+                ]
+                == goal_assignment(),
+                json.dumps(
+                    compiled["stages"]["stage-2"].get("goal_assignment"),
+                    sort_keys=True,
+                ),
+            ),
+            case(
+                "compiler-rejects-malformed-goal-assignment",
+                _malformed_assignment_rejected(),
+                "malformed goal_assignment rejected",
+            ),
             case("human-only-next-stage-does-not-queue", human_result["status"] == "human_required" and human_result["event"] is None, str(human_result)),
             case("non_green_lamp_does_not_queue", compiler.advance({**completion, "verification": {"exit_code": 1}})["status"] == "human_required", "human_required"),
             case("unknown_next_stage_is_rejected", _unknown_stage_rejected(), "unknown stage rejected"),
@@ -147,6 +186,19 @@ def _unknown_stage_rejected() -> bool:
 
 
 def _malformed_external_rejected(broken: dict) -> bool:
+    try:
+        CampaignCompiler(broken)
+    except ValueError:
+        return True
+    return False
+
+
+def _malformed_assignment_rejected() -> bool:
+    broken = campaign()
+    broken["stages"][1]["goal_assignment"] = {
+        **goal_assignment(),
+        "base_revision": "HEAD",
+    }
     try:
         CampaignCompiler(broken)
     except ValueError:

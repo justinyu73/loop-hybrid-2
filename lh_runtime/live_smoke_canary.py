@@ -27,6 +27,8 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import goal_loop_run as glr
 import token_cost
 from _fixture import make_source_repo
@@ -34,7 +36,9 @@ from campaign_compiler import CAMPAIGN_SCHEMA
 from cli_agent_executor import resolve_cli
 from goal_store import GoalStore
 from run_store import RunStore
+from p7_native_runstore_fixture import explicit_runstore_factory
 from value_reducer import verdict_for_run
+from native_delivery_fixture import make_native_bundle
 
 CAMPAIGN_ID = "campaign-w9d"
 STAGE_ID = "stage-live"
@@ -65,12 +69,33 @@ def _campaign() -> dict:
     }
 
 
-def _seed_goal(goal_store: GoalStore) -> None:
+def _seed_goal(goal_store: GoalStore, source: Path, base: str) -> None:
     from campaign_compiler import CampaignCompiler
     envelope = CampaignCompiler(_campaign()).compile()["stages"][STAGE_ID]
+    binding = make_native_bundle(
+        source,
+        base,
+        GOAL_ID,
+        STAGE_ID,
+        [{
+            "id": "live-smoke-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('src/live-marker.txt').is_file() else 1)"],
+        ["src/"],
+        int(envelope["max_attempts"]),
+        goal={"feature_contract": envelope["goal"], "admission_envelope": envelope},
+    )
     goal_store.record_event(event_id="w9d-seed", idempotency_key="w9d-seed", source="manual_intent", event_type="goal_candidate", payload={
         "candidate": {"goal_id": GOAL_ID, "campaign_id": CAMPAIGN_ID, "stage_id": STAGE_ID,
-                      "goal": {"feature_contract": STAGE_ID, "admission_envelope": envelope}}
+                      "goal": binding["goal"]}
     })
 
 
@@ -86,7 +111,7 @@ def _receipt(run_store: RunStore, run_id: str) -> dict[str, Any]:
 
 def _drive(root: Path, source: Path, base: str, *, executor: str, factory_overrides=None) -> dict[str, Any]:
     goal_store = GoalStore(root / "goals")
-    _seed_goal(goal_store)
+    _seed_goal(goal_store, source, base)
     return glr.run(
         executor=executor,
         execute=True,
@@ -123,7 +148,8 @@ def _dry() -> int:
         root = Path(raw)
         source, base = make_source_repo(root)
         calls: list[dict] = []
-        result = _drive(root, source, base, executor="fake", factory_overrides={"fake": _fake_factory(calls)})
+        with explicit_runstore_factory(glr):
+            result = _drive(root, source, base, executor="fake", factory_overrides={"fake": _fake_factory(calls)})
         run_store = RunStore(root / "runs")
         run = _only_run(run_store)
         receipt = _receipt(run_store, run["run_id"])
@@ -133,12 +159,13 @@ def _dry() -> int:
         persistent_root = root / "persistent"
         persistent_root.mkdir()
         persistent_calls: list[dict] = []
-        persistent_exit, persistent_report = _live_at(
-            persistent_root,
-            "fake",
-            persistent=True,
-            factory_overrides={"fake": _fake_factory(persistent_calls)},
-        )
+        with explicit_runstore_factory(glr):
+            persistent_exit, persistent_report = _live_at(
+                persistent_root,
+                "fake",
+                persistent=True,
+                factory_overrides={"fake": _fake_factory(persistent_calls)},
+            )
         cases = [
             {"id": "production-entry-executes-the-chain",
              "ok": result.get("mode") == "execute" and result.get("invoked") is True,

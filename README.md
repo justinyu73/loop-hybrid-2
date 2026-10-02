@@ -79,6 +79,25 @@ flowchart TB
 
 不設 `models.judge` 時整個 loop 走純決定性選路，行為不變。
 
+## 本版新增的引擎能力
+
+- **平行排程與 work-unit store**（`parallel_scheduler.py`、`work_unit_store.py`、`plan_node_controller.py`）：依賴與寫入範圍相容時，獨立 work unit 在隔離 workspace 中並行；完成依核准順序整合。
+- **交付契約與完成判定**（`delivery_contract.py`、`work_unit_completion.py`、`source_result.py`）：規劃、執行、驗證共用同一個封存的契約引擎。
+- **Verifier 協定**（`verifier_protocol.py`、`verifier_normalizer.py`）：verifier 結果先正規化並綁定到該次 attempt，才算數。
+- **Execution fence**（`execution_fence*.py`）：可選的 agent CLI 預防性隔離（Linux 用 bubblewrap）。需要 egress policy 檔（`LH_EGRESS_POLICY`）；沒有就拒絕啟動，不會無隔離執行。
+- **Platform ports**（`platform_ports.py`、`host_ports.py`、`instance_config.py`、`lifecycle.py`）：鎖、路徑、程序控制等主機差異集中在 port，核心不含固定主機路徑。
+- **Provider registry 與輸入綁定**（`provider_registry.py`、`provider_input_binding.py`、`runner_adapter.py`）：依 capability 選路，專案節點不指定 provider／model。
+
+## 平台支援
+
+| 平台 | 狀態 |
+|---|---|
+| Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：86 個 gate 中 72 個通過；其餘 14 個依賴 POSIX 行為（執行位元假 CLI、bubblewrap fence、POSIX signal／程序語義、15.6 ms monotonic 時鐘）。 |
+| macOS | 未測試。 |
+
+不需要 Orca App、VS Code 或 WSL。Orca 只是可選的 execution-host adapter；預設 executor 是在一次性 clone 中執行的本機 coding CLI。
+
 ## 安裝
 
 需求：**Python 3.12+** 與 **Node.js**（npm script 只是 shell/Python 的薄包裝）。

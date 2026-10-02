@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import token_cost
 from cli_agent_executor import make_cli_agent
+from _fixture import FixtureExecutionFencePort, capsule_with_fence
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
 
 
@@ -37,7 +42,7 @@ def _write_receipt(store: RunStore, run_id: str, usage: dict) -> None:
         "usage": usage, "verification": {"argv": ["true"], "exit_code": 0, "stdout": "x", "stderr": "y"},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
 
 
 def main() -> int:
@@ -53,13 +58,25 @@ def main() -> int:
         (root / "ws1").mkdir()
         (root / "ws2").mkdir()
         argv = lambda _prompt: [sys.executable, "-c", "print('USAGE 100 20 5000')"]
-        with_parser = make_cli_agent(argv, name="m1", usage_parser=_measured_usage_line_parser)(root / "ws1", {"attempt": 1, "goal": {}, "base_revision": "r"})
-        without_parser = make_cli_agent(argv, name="m1")(root / "ws2", {"attempt": 1, "goal": {}, "base_revision": "r"})
+        fixture_fence = FixtureExecutionFencePort()
+        with_parser = make_cli_agent(
+            argv,
+            name="m1",
+            usage_parser=_measured_usage_line_parser,
+            execution_fence_port=fixture_fence,
+        )(root / "ws1", capsule_with_fence(fixture_fence, root / "ws1", {"attempt": 1, "goal": {}, "base_revision": "r"}))
+        without_parser = make_cli_agent(
+            argv,
+            name="m1",
+            execution_fence_port=fixture_fence,
+        )(root / "ws2", capsule_with_fence(fixture_fence, root / "ws2", {"attempt": 1, "goal": {}, "base_revision": "r"}))
 
         # receipt -> usage_records -> aggregate, with a measured + an unknown attempt.
         store = RunStore(root / "runs")
-        r1 = store.create_run(goal={"feature_contract": "x"}, source_repo=root, base_revision="r")
-        r2 = store.create_run(goal={"feature_contract": "y"}, source_repo=root, base_revision="r")
+        base = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        check = [{"id": "token-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}]
+        r1 = make_native_run(store, ROOT, base, "token-measured", "accounting", check, ["git", "rev-parse", "HEAD"], ["loop-hybrid/"], 4, goal={"feature_contract": "x"})["run_id"]
+        r2 = make_native_run(store, ROOT, base, "token-unknown", "accounting", check, ["git", "rev-parse", "HEAD"], ["loop-hybrid/"], 4, goal={"feature_contract": "y"})["run_id"]
         _write_receipt(store, r1, token_cost.measured_usage(model="m1", input_tokens=500_000, output_tokens=100_000, cache_read_tokens=0))
         _write_receipt(store, r2, token_cost.unknown_usage(model="m1"))
         records = store.usage_records()

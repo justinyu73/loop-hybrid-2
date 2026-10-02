@@ -9,6 +9,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import turning_point as tp
 from _fixture import make_campaign, make_goal as _make_goal, make_source_repo
 from admission_bridge import GoalAdmissionBridge
@@ -16,7 +18,9 @@ from campaign_compiler import CampaignCompiler
 from controller import LoopController
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 CAMPAIGN = "turning-point-fixture"
 
@@ -62,14 +66,26 @@ def make_source(root: Path) -> tuple[Path, str]:
 def make_worker(root: Path, name: str, source: Path, base: str, children: tuple[tuple[str, int], ...]) -> tuple[GoalLoopWorker, GoalStore, RunStore]:
     """Parent + admitted children (priority per tuple), ready to dispatch."""
     goals = GoalStore(root / f"{name}-goals")
-    runs = RunStore(root / f"{name}-runs")
+    runs = RunStore(root / f"{name}-runs", command_runner=fixture_command_runner)
     make_goal(goals, "parent")
     goals.transition_goal("parent", "active", expected_state="candidate")
     envelope = CampaignCompiler(campaign()).compile()["stages"]["stage-t"]
-    bridge = GoalAdmissionBridge(goals, runs)
     for goal_id, priority in children:
         make_goal(goals, goal_id, parent_goal_id="parent", priority=priority)
-        bridge.admit(goal_id, source_repo=source, base_revision=base, envelope=envelope)
+        native_goal = {
+            "goal_id": goal_id,
+            "campaign_id": CAMPAIGN,
+            "stage_id": "stage-t",
+            "parent_goal_id": "parent",
+            "admission_envelope": envelope,
+        }
+        native = make_native_run(
+            runs, source, base, goal_id, "turning-point",
+            [{"id": "turning-point-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+            ["git", "rev-parse", "HEAD"], ["src/"], 4,
+            goal=native_goal,
+        )
+        goals.activate_with_run(goal_id, native["run_id"])
     worker = GoalLoopWorker(
         goal_store=goals,
         run_store=runs,
@@ -177,7 +193,12 @@ def main() -> int:
         envelope = CampaignCompiler(campaign()).compile()["stages"]["stage-t"]
         GoalAdmissionBridge(gated, gated_runs).admit("lamp-ok", source_repo=source, base_revision=base, envelope=envelope)
         make_goal(gated, "lamp-less", priority=1)
-        gated_runs.create_run(goal={"goal_id": "lamp-less"}, source_repo=source, base_revision=base, run_id="run-lamp-less")
+        make_native_run(
+            gated_runs, source, base, "lamp-less", "turning-point",
+            [{"id": "turning-point-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+            ["git", "rev-parse", "HEAD"], ["src/"], 4,
+            goal={"goal_id": "lamp-less"}, run_id="run-lamp-less",
+        )
         gated.activate_with_run("lamp-less", "run-lamp-less")
         gated_worker = GoalLoopWorker(
             goal_store=gated,

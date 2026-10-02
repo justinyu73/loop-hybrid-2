@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = HERE.parent.parent
 sys.path[:0] = [str(HERE.parent / "design_grill"), str(HERE.parent / "provider_egress"), str(ROOT / "lh_runtime")]
 import design_grill as dg  # noqa: E402
 import provider_egress as pe  # noqa: E402
@@ -224,7 +224,7 @@ def prepare(
         "receipt.txt": subject["receipt_digest"],
     }
     for name, text in documents.items():
-        (root / name).write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+        (root / name).write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8", newline="")
     adapter = _design_grill_adapter(
         spec,
         [{"ref": name, "start_line": 1, "end_line": len(text.splitlines()) or 1} for name, text in documents.items()],

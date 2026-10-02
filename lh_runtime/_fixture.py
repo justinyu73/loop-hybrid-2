@@ -6,15 +6,93 @@ expectations, so no canary's verdict can depend on another canary's behavior.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 from campaign_compiler import CAMPAIGN_SCHEMA
+from execution_fence import ExecutionFencePort, build_attempt_binding, digest_json
 from goal_store import GoalStore
 
 
 def _git(*args: str) -> None:
     subprocess.run(["git", *args], check=True, capture_output=True, text=True)
+
+
+class FixtureExecutionFencePort(ExecutionFencePort):
+    """Explicit canary-only launch seam for pre-existing adapter unit tests."""
+
+    def prepare(self, binding: Mapping[str, Any]) -> dict[str, Any]:
+        body = {
+            "schema": "lh-fixture-execution-fence/v1",
+            "binding": dict(binding),
+        }
+        return {**body, "launch_descriptor_digest": digest_json(body)}
+
+    def launch(
+        self,
+        descriptor: Mapping[str, Any],
+        argv: Sequence[str],
+        *,
+        input_text: str | None = None,
+        timeout_seconds: float,
+        env_projection: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        binding = descriptor.get("binding")
+        cwd = (
+            Path(binding["clone_root"])
+            if isinstance(binding, dict)
+            and isinstance(binding.get("clone_root"), str)
+            else None
+        )
+        environment = dict(os.environ)
+        environment.update(env_projection or {})
+        return subprocess.run(
+            list(argv),
+            cwd=cwd,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=environment,
+        )
+
+    def receipt_projection(
+        self,
+        descriptor: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "schema": "lh-fixture-execution-fence/v1",
+            "status": "fixture_only",
+            "launch_descriptor_digest": descriptor[
+                "launch_descriptor_digest"
+            ],
+        }
+
+
+def capsule_with_fence(
+    port: ExecutionFencePort,
+    workspace: Path,
+    capsule: Mapping[str, Any],
+    *,
+    adapter_id: str = "fixture-adapter",
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Attach an explicitly prepared descriptor; adapters never self-prepare."""
+    binding = build_attempt_binding(
+        goal=capsule["goal"] if isinstance(capsule.get("goal"), dict) else {},
+        run_id=str(capsule.get("run_id") or "fixture-run"),
+        attempt=int(capsule["attempt"]) if isinstance(capsule.get("attempt"), int) else 1,
+        attempt_fence=int(capsule["fence"]) if isinstance(capsule.get("fence"), int) else 1,
+        base_revision=str(capsule.get("base_revision") or "fixture-base"),
+        clone_root=workspace,
+        verifier_argv=["fixture-direct-adapter"],
+        adapter_id=adapter_id,
+        adapter_version="v1",
+        timeout_seconds=timeout_seconds,
+    )
+    return {**capsule, "execution_fence": port.prepare(binding)}
 
 
 def make_source_repo(root: Path, *, name: str = "source", user: str = "fixture") -> tuple[Path, str]:
@@ -24,7 +102,7 @@ def make_source_repo(root: Path, *, name: str = "source", user: str = "fixture")
     _git("init", "-q", str(source))
     _git("-C", str(source), "config", "user.email", f"{user}@example.invalid")
     _git("-C", str(source), "config", "user.name", f"{user} canary")
-    (source / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+    (source / "baseline.txt").write_text("baseline\n", encoding="utf-8", newline="")
     _git("-C", str(source), "add", "baseline.txt")
     _git("-C", str(source), "commit", "-qm", "baseline")
     base = subprocess.run(

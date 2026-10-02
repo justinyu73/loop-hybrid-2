@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -10,8 +11,11 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from goal_loop_driver import run_driver
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
 
 
@@ -41,17 +45,29 @@ def _receipt(store: RunStore, run_id: str, usage: dict[str, Any]) -> None:
         "verification": {"argv": ["true"], "exit_code": 0},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    # This fixture is intentionally a receipt-only usage projection.  The
+    # mandatory delivery gate must not let this hand-written receipt promote
+    # the Run to GREEN; human_required is the fail-closed terminal state while
+    # usage_records still reads the durable receipt.
+    store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
 
 
 def _seed(root: Path, usage: dict[str, Any]) -> None:
     store = RunStore(root / "runs")
     run_id = "run-canary"
-    store.create_run(
-        run_id=run_id,
+    base = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    make_native_run(
+        store,
+        ROOT,
+        base,
+        "goal-canary",
+        "budget",
+        [{"id": "budget-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+        ["git", "rev-parse", "HEAD"],
+        ["loop-hybrid/"],
+        4,
         goal={"goal_id": "goal-canary"},
-        source_repo=HERE,
-        base_revision="base",
+        run_id=run_id,
     )
     _receipt(store, run_id, usage)
 

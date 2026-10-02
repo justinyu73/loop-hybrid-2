@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from command_ingress import _digest, command_status, submit_command
 from controller import LoopController
 from goal_store import GoalStore
 from goal_loop_worker import GoalLoopWorker, process_control_event_by_key
 from knowledge_store import KnowledgeStore
 from mcp_server import dispatch
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
 
 
@@ -116,7 +120,15 @@ def main() -> int:
         )
         goal_store.transition_event("evt-chain", "completed", result={"derived_event_key": derived["event_key"]})
         goal_store.create_candidate("intent-derived:evt-chain", goal_id="goal-chain", campaign_id="camp-1", stage_id="s1", goal={"lamp": "gate-pack"})
-        run_id = run_store.create_run(goal={"goal_id": "goal-chain", "admission_envelope": {"allowed_paths": []}}, source_repo=root, base_revision="base", run_id="run-chain")
+        repository_root = HERE.parent
+        base_revision = subprocess.run(["git", "-C", str(repository_root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        run_id = make_native_run(
+            run_store, repository_root, base_revision, "goal-chain", "command-ingress",
+            [{"id": "command-status-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+            ["git", "rev-parse", "HEAD"], ["loop-hybrid/"], 4,
+            goal={"goal_id": "goal-chain", "admission_envelope": {"allowed_paths": ["loop-hybrid/"]}},
+            run_id="run-chain",
+        )["run_id"]
         goal_store.activate_with_run("goal-chain", run_id, event_key="intent-derived:evt-chain")
         ordinal = run_store.begin_attempt(run_id, "workspace://run-chain/1")
         receipt_ref = run_store.write_artifact(run_id, ordinal, "receipt.json", json.dumps({
@@ -127,7 +139,7 @@ def main() -> int:
             "diff": {"ref": "artifacts/run-chain/1/diff.patch", "digest": "sha256:" + "b" * 64},
             "verification": {"argv": ["true"], "exit_code": 0, "stdout": {"ref": "artifacts/run-chain/1/verifier.stdout", "digest": "sha256:" + "c" * 64}, "stderr": {"ref": "artifacts/run-chain/1/verifier.stderr", "digest": "sha256:" + "d" * 64}},
         }, sort_keys=True))
-        run_store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"])
+        run_store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=receipt_ref["ref"], receipt_digest=receipt_ref["digest"])
         status_chain = command_status(goal_store, "evt-chain", run_store)
         execution = status_chain["execution"]
         cases += [
@@ -149,6 +161,33 @@ def main() -> int:
         goal_store.transition_event("intent-derived:evt-revive", "completed", result={"admission": {"goal_id": "goal-chain", "run_id": "run-chain"}})
         status_revive = command_status(goal_store, "evt-revive", run_store)
         cases.append(case("status-keeps-revived-command-correlation", status_revive["goal_id"] == "goal-chain" and status_revive["execution"]["run_id"] == "run-chain", str(status_revive)))
+
+        # A rejected/replayed candidate may still carry the compiler's goal_id
+        # in its payload.  That proposal is not a persisted binding; status
+        # must not project the older goal's Run/Attempt/receipt through it.
+        submit_command(goal_store, source="example-commander", event_type="manual_intent", event_id="evt-stale-candidate", payload=payload)
+        derived_stale = goal_store.record_event(
+            event_id="derived-evt-stale-candidate", idempotency_key="intent-derived:evt-stale-candidate",
+            source="manual_intent", event_type="goal_candidate",
+            payload={"candidate": {"goal_id": "goal-chain", "campaign_id": "camp-1", "stage_id": "s1", "goal": {"lamp": "gate-pack"}}, "source_event_key": "evt-stale-candidate"},
+        )
+        goal_store.transition_event("evt-stale-candidate", "completed", result={"derived_event_key": derived_stale["event_key"]})
+        goal_store.transition_event(
+            "intent-derived:evt-stale-candidate", "human_required",
+            result={"status": "human_required", "reason": "goal exists from a different source event and is not re-admissible"},
+        )
+        status_stale = command_status(goal_store, "evt-stale-candidate", run_store)
+        stale_execution = status_stale["execution"]
+        cases.append(
+            case(
+                "status-does-not-bind-unadmitted-candidate",
+                status_stale["goal_id"] is None
+                and stale_execution["status"] == "not_started"
+                and stale_execution["run_id"] is None
+                and stale_execution["receipt"] is None,
+                str(status_stale),
+            )
+        )
 
         # SH control-bus events are durable signals, not Goal admission.
         control_goal_count_before = sum(
@@ -187,6 +226,46 @@ def main() -> int:
             "safe_point_observed": False,
             "handoff_packet": packet,
         }
+        observation_budget = {
+            "max_command_output_lines": 200,
+            "max_inline_characters": 12000,
+            "max_targeted_read_lines": 240,
+            "overflow": "write to a task-owned evidence file and cite its path",
+            "forbidden": ["provider message bodies", "secrets", "credentials"],
+        }
+        budget_policy_rollover = submit_command(
+            goal_store,
+            source="external_hub",
+            event_type="rollover_requested",
+            event_id="rollover-budget-policy",
+            payload={
+                **rollover_payload,
+                "correlation_id": "rollover-budget-policy",
+                "handoff_packet": {
+                    **packet,
+                    "correlation_id": "rollover-budget-policy",
+                    "observation_budget": observation_budget,
+                },
+            },
+        )
+        secret_outside_policy_rejected, secret_outside_policy_detail = _rejects(
+            lambda: submit_command(
+                goal_store,
+                source="external_hub",
+                event_type="rollover_requested",
+                event_id="rollover-budget-secret",
+                payload={
+                    **rollover_payload,
+                    "correlation_id": "rollover-budget-secret",
+                    "handoff_packet": {
+                        **packet,
+                        "correlation_id": "rollover-budget-secret",
+                        "observation_budget": observation_budget,
+                        "next_action": "read credential material from the host",
+                    },
+                },
+            )
+        )
         rollover = submit_command(
             goal_store, source="external_hub", event_type="rollover_requested",
             event_id="rollover-no-safe", payload=rollover_payload,
@@ -389,6 +468,16 @@ def main() -> int:
         cases += [
             case("context-pressure-control-is-received", pressure["status"] == "received" and pressure_replay["status"] == "reused", str(pressure_replay)),
             case("context-pressure-worker-acks-without-goal", pressure_result["status"] == "context_pressure_ack" and control_goal_count == control_goal_count_before, str(pressure_result)),
+            case(
+                "rollover-allows-canonical-observation-budget-policy",
+                budget_policy_rollover["status"] == "received",
+                str(budget_policy_rollover),
+            ),
+            case(
+                "rollover-still-rejects-secret-marker-outside-policy",
+                secret_outside_policy_rejected,
+                secret_outside_policy_detail,
+            ),
             case("rollover-without-safe-point-is-human-required", rollover["status"] == "received" and rollover_result["status"] == "human_required" and rollover_result["old_session_stopped"] is False, str(rollover_result)),
             case("rollover-safe-point-stays-host-handoff-pending", valid_rollover["status"] == "received" and accepted_result["status"] == "rollover_accepted" and accepted_result["successor_heartbeat"] == "not_observed", str(accepted_result)),
             case("control-status-reads-durable-rollover-receipt", accepted_status["event_state"] == "completed" and accepted_status["event"]["event_type"] == "rollover_requested" and accepted_status["event"]["payload_digest"].startswith("sha256:") and accepted_status["control_result"]["status"] == "rollover_accepted" and accepted_status["control_result"]["receipt"]["schema"] == "lh-rollover-control-receipt/v2" and accepted_status["control_result"]["receipt"]["status"] == "rollover_accepted", str(accepted_status)),

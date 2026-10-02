@@ -100,7 +100,7 @@ def build_status(run_store: RunStore, goal_store: GoalStore, *, pricing: dict[st
         evidence = {
             "schema": "loop-hybrid-receipt-evidence/v1",
             "receipt_count": latest.pop("receipt_count", 0),
-            "latest": {**latest, "derived_verdict": value_reducer.verdict_for_run(run_store, latest["run_id"])},
+            "latest": {**latest, "derived_verdict": value_reducer.value_evidence_for_run(run_store, latest["run_id"], goal_store=goal_store)},
         }
     headline = {
         "active_runs": runs_by_state.get("running", 0) + runs_by_state.get("queued", 0) + runs_by_state.get("retry_pending", 0),

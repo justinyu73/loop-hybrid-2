@@ -19,14 +19,25 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import cli_agent_executor as executors
-from _fixture import make_campaign, make_source_repo
+from cli_agent_executor import _orca_worktree_selector
+from _fixture import (
+    FixtureExecutionFencePort,
+    capsule_with_fence,
+    make_campaign,
+    make_source_repo,
+)
 from capability_resolver_canary import graph
 from executor_wiring_canary import _noop_sleep
 from campaign_compiler import CampaignCompiler
 from goal_loop_run import EXECUTORS, JUDGE_EXECUTORS, resolve_executor
 from goal_store import GoalStore
 from run_store import RunStore
+import goal_loop_run as fixture_glr
+from p7_native_runstore_fixture import explicit_runstore_factory
+from native_delivery_fixture import make_native_bundle
 
 
 def case(case_id: str, ok: bool, detail: str) -> dict[str, object]:
@@ -44,7 +55,16 @@ args = sys.argv[1:]
 with state.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(args, ensure_ascii=False) + "\n")
 
-if args[:2] == ["terminal", "create"]:
+if args[:2] == ["status", "--json"]:
+    print(json.dumps({"capability": {
+        "schema": "external-orca-cli-capability/v1",
+        "protocol": "1",
+        "version": "1.2.0",
+        "operations": ["capability_probe", "repo_list", "repo_add", "project_setup_delete", "terminal_create", "terminal_wait", "terminal_read", "terminal_stop", "terminal_close"],
+        "path_codecs": ["posix", "windows-drive", "windows-unc", "macos-posix"],
+        "platforms": ["linux", "windows", "macos"],
+    }}))
+elif args[:2] == ["terminal", "create"]:
     print(json.dumps({"terminal": {"handle": "term-cut5", "title": "LH fixture"}}))
 elif args[:2] == ["terminal", "wait"]:
     if os.environ.get("FAKE_ORCA_MODE") == "timeout":
@@ -75,7 +95,16 @@ log = pathlib.Path(os.environ["FAKE_ORCA_STATE"])
 with log.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(args, ensure_ascii=False) + "\n")
 
-if args[:2] == ["terminal", "create"]:
+if args[:2] == ["status", "--json"]:
+    print(json.dumps({"capability": {
+        "schema": "external-orca-cli-capability/v1",
+        "protocol": "1",
+        "version": "1.2.0",
+        "operations": ["capability_probe", "repo_list", "repo_add", "project_setup_delete", "terminal_create", "terminal_wait", "terminal_read", "terminal_stop", "terminal_close"],
+        "path_codecs": ["posix", "windows-drive", "windows-unc", "macos-posix"],
+        "platforms": ["linux", "windows", "macos"],
+    }}))
+elif args[:2] == ["terminal", "create"]:
     command = args[args.index("--command") + 1]
     completed = subprocess.run(["/bin/sh", "-lc", command], cwd=os.getcwd(), capture_output=True, text=True)
     pathlib.Path(os.environ["FAKE_ORCA_EXIT"]).write_text(str(completed.returncode), encoding="utf-8")
@@ -171,6 +200,7 @@ def main() -> int:
         workspace = root / "workspace"
         workspace.mkdir()
         seen: dict[str, object] = {}
+        fixture_fence = FixtureExecutionFencePort()
 
         def collector(_proc: object, context: dict[str, object]) -> dict[str, object]:
             seen["context"] = context
@@ -183,8 +213,9 @@ def main() -> int:
             usage_collector=collector,
             snapshot_fn=lambda: {"path": "fixture-session", "usage": None},
             timeout_seconds=2,
+            execution_fence_port=fixture_fence,
         )
-        result = agent(workspace, {"run_id": "run-cut5", "attempt": 1, "goal": {"feature_contract": "x"}, "base_revision": "base"})
+        result = agent(workspace, capsule_with_fence(fixture_fence, workspace, {"run_id": "run-cut5", "attempt": 1, "goal": {"feature_contract": "x"}, "base_revision": "base"}))
         commands = [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines()]
         create = next((args for args in commands if args[:2] == ["terminal", "create"]), [])
 
@@ -205,28 +236,33 @@ def main() -> int:
                 "output_tokens": 2, "cache_read_tokens": 3,
             },
             provider_binding=binding, timeout_seconds=2,
+            execution_fence_port=fixture_fence,
         )
-        bound = bound_agent(workspace, {"run_id": "run-cut5-binding", "attempt": 1, "goal": {}, "base_revision": "base"})
+        bound = bound_agent(workspace, capsule_with_fence(fixture_fence, workspace, {"run_id": "run-cut5-binding", "attempt": 1, "goal": {}, "base_revision": "base"}))
         commands = [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines()]
         bound_create = [args for args in commands if args[:2] == ["terminal", "create"]][-1]
         bound_command = bound_create[bound_create.index("--command") + 1]
-        claude_argv, claude_env, claude_projection = executors._bind_orca_provider_argv(
-            "claude", ["claude", "-p", "P"],
-            {"runner": "claude", "base_url": "https://mock.example/v1", "model": "fixture-claude"},
-        )
-        claude_command = executors._orca_command(claude_argv, env_overlay=claude_env)
+        try:
+            executors._bind_orca_provider_argv(
+                "claude", ["claude", "-p", "P"],
+                {"runner": "claude", "base_url": "https://mock.example/v1", "model": "fixture-claude"},
+            )
+            retired_binding_rejected = False
+        except ValueError:
+            retired_binding_rejected = True
         try:
             executors.make_orca_agent(
                 agent="kimi", orca_cli=str(cli), provider_argv_builder=lambda prompt: ["kimi", "-p", prompt],
                 provider_binding={"runner": "kimi", "base_url": "https://mock.example/v1", "model": "fixture-kimi"}, timeout_seconds=2,
-            )(workspace, {"run_id": "run-cut5-kimi", "attempt": 1, "goal": {}, "base_revision": "base"})
+                execution_fence_port=fixture_fence,
+            )(workspace, capsule_with_fence(fixture_fence, workspace, {"run_id": "run-cut5-kimi", "attempt": 1, "goal": {}, "base_revision": "base"}))
             kimi_rejected = False
         except ValueError:
             kimi_rejected = True
         try:
             executors._bind_orca_provider_argv(
                 "codex", ["codex", "exec", "P"],
-                {"runner": "claude", "base_url": "https://mock.example/v1", "model": "fixture"},
+                {"runner": "kimi", "base_url": "https://mock.example/v1", "model": "fixture"},
             )
             mismatch_rejected = False
         except ValueError:
@@ -235,9 +271,10 @@ def main() -> int:
         os.environ["FAKE_ORCA_MODE"] = "timeout"
         timeout_agent = executors.make_orca_agent(
             agent="codex", orca_cli=str(cli), provider_argv_builder=lambda prompt: ["/bin/echo", prompt], timeout_seconds=1,
+            execution_fence_port=fixture_fence,
         )
         try:
-            timeout_agent(workspace, {"run_id": "run-cut5-timeout", "attempt": 1, "goal": {}, "base_revision": "base"})
+            timeout_agent(workspace, capsule_with_fence(fixture_fence, workspace, {"run_id": "run-cut5-timeout", "attempt": 1, "goal": {}, "base_revision": "base"}))
             timeout_raises = False
         except TimeoutError:
             timeout_raises = True
@@ -252,8 +289,9 @@ def main() -> int:
         import_agent = executors.make_orca_agent(
             agent="codex", orca_cli=str(import_cli),
             provider_argv_builder=lambda prompt: ["/bin/echo", "registered output"], timeout_seconds=2,
+            execution_fence_port=fixture_fence,
         )
-        import_result = import_agent(import_root / "workspace", {"run_id": "run-cut5-import", "attempt": 1, "goal": {}, "base_revision": "base"})
+        import_result = import_agent(import_root / "workspace", capsule_with_fence(fixture_fence, import_root / "workspace", {"run_id": "run-cut5-import", "attempt": 1, "goal": {}, "base_revision": "base"}))
         import_commands = [json.loads(line) for line in import_log.read_text(encoding="utf-8").splitlines()]
 
         runtime_root = root / "runtime-fixture"
@@ -277,9 +315,30 @@ def main() -> int:
         source, base = make_source_repo(runtime_root)
         runtime_campaign = make_campaign("campaign-orca")
         envelope = CampaignCompiler(runtime_campaign).compile()["stages"]["stage-1"]
+        runtime_binding = make_native_bundle(
+            source,
+            base,
+            "campaign-orca:stage-1",
+            "stage-1",
+            [{
+                "id": "orca-source-check",
+                "commands": [{
+                    "id": "diff-check",
+                    "argv": ["git", "diff", "--cached", "--check"],
+                    "cwd": "${WORKTREE}",
+                    "expect_exit": 0,
+                    "timeout_seconds": 10,
+                }],
+                "required_receipts": ["executor"],
+            }],
+            [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('src/from-orca.txt').is_file() else 1)"],
+            ["src/"],
+            int(envelope["max_attempts"]),
+            goal={"feature_contract": "stage-1", "admission_envelope": envelope},
+        )
         GoalStore(runtime_root / "goals").record_event(
             event_id="orca-seed-1", idempotency_key="orca-seed-1", source="manual_intent", event_type="goal_candidate",
-            payload={"candidate": {"goal_id": "campaign-orca:stage-1", "campaign_id": "campaign-orca", "stage_id": "stage-1", "goal": {"feature_contract": "stage-1", "admission_envelope": envelope}}},
+            payload={"candidate": {"goal_id": "campaign-orca:stage-1", "campaign_id": "campaign-orca", "stage_id": "stage-1", "goal": runtime_binding["goal"]}},
         )
         old_path = os.environ.get("PATH", "")
         old_orca_cli = os.environ.get("LH_ORCA_CLI")
@@ -294,7 +353,7 @@ def main() -> int:
             runtime_graph = graph(evaluate=False)
             for resource, runner in zip(
                 runtime_graph["registry"]["resources"],
-                ("codex", "claude", "codex", "claude"),
+                ("codex", "codex", "codex", "codex"),
             ):
                 resource["runner"] = runner
                 resource["model_family"] = f"ambient:{runner}"
@@ -305,21 +364,23 @@ def main() -> int:
                 resource["trust_tier"] = "claimed"
             runtime_graph["nodes"][0]["permissions"]["network"] = "external"
             runtime_graph["nodes"][0]["data_boundary"] = "external"
-            runtime_result = run(
-                execute=True,
-                goal_store_root=runtime_root / "goals", run_store_root=runtime_root / "runs",
-                workspace_root=runtime_root / "workspaces", campaign=runtime_campaign,
-                source_repo=source, base_revision=base, max_cycles=30,
-                execution_graph=runtime_graph,
-                execution_host="external-orca",
-                bootstrap_authority={
-                    "decision_id": "LH-EXTERNAL-BOOTSTRAP-001",
-                    "authority_ref": "docs/bootstrap-authority.md#lh-external-bootstrap-001",
-                    "authority_digest": bootstrap_digest,
-                    "root": str(trusted_bootstrap_root),
-                },
-                sleep_fn=_noop_sleep,
-            )
+            with explicit_runstore_factory(fixture_glr):
+                runtime_result = run(
+                    execute=True,
+                    goal_store_root=runtime_root / "goals", run_store_root=runtime_root / "runs",
+                    workspace_root=runtime_root / "workspaces", campaign=runtime_campaign,
+                    source_repo=source, base_revision=base, max_cycles=30,
+                    execution_graph=runtime_graph,
+                    execution_host="external-orca",
+                    bootstrap_authority={
+                        "decision_id": "LH-EXTERNAL-BOOTSTRAP-001",
+                        "authority_ref": "docs/bootstrap-authority.md#lh-external-bootstrap-001",
+                        "authority_digest": bootstrap_digest,
+                        "root": str(trusted_bootstrap_root),
+                    },
+                    sleep_fn=_noop_sleep,
+                    execution_fence_port=fixture_fence,
+                )
             goal = GoalStore(runtime_root / "goals").get_goal("campaign-orca:stage-1")
             receipt_meta = RunStore(runtime_root / "runs").latest_receipt(goal["run_id"])
             receipt = json.loads((runtime_root / "runs" / receipt_meta["receipt_ref"]).read_text(encoding="utf-8")) if receipt_meta else {}
@@ -336,20 +397,25 @@ def main() -> int:
                     os.environ[name] = value
         runtime_commands = [json.loads(line) for line in runtime_log.read_text(encoding="utf-8").splitlines()]
 
-        registry_ok = set(EXECUTORS) == {"codex", "claude", "kimi", "orca"} and JUDGE_EXECUTORS == {"codex", "claude", "kimi"}
+        registry_ok = set(EXECUTORS) == {"codex", "orca"} and JUDGE_EXECUTORS == {"agy", "codex"}
         dry = resolve_executor("orca", execute=False)
         pinned_codex = executors.hosted_provider_argv("codex", "P", "gpt-code")
-        pinned_claude = executors.hosted_provider_argv("claude", "P", "sonnet")
+        try:
+            executors.hosted_provider_argv("kimi", "P", "kimi-code/k3")
+            pinned_kimi_retired = False
+        except ValueError as exc:
+            pinned_kimi_retired = "kimi_retired" in str(exc)
+        canonical_echo = str(Path("/bin/echo").resolve(strict=False))
         cases = [
             case("registry-adds-orca-but-keeps-judge-direct", registry_ok, f"executors={sorted(EXECUTORS)} judges={sorted(JUDGE_EXECUTORS)}"),
             case(
                 "host-runs-the-selected-model-without-becoming-the-model",
                 pinned_codex[:4] == ["codex", "exec", "-m", "gpt-code"]
-                and pinned_claude[:3] == ["claude", "--model", "sonnet"],
-                json.dumps({"codex": pinned_codex, "claude": pinned_claude}),
+                and pinned_kimi_retired,
+                json.dumps({"codex": pinned_codex, "kimi_retired": pinned_kimi_retired}),
             ),
-            case("create-targets-existing-disposable-workspace", any(f"path:{workspace}" in args for args in create), json.dumps(create)),
-            case("provider-command-is-shell-quoted-and-bounded", any("exec /bin/echo" in args and ".lh-orca-provider-output.jsonl" in args for args in create) and "fixture output\nfinished" == result["stdout_tail"], json.dumps(result)),
+            case("create-targets-existing-disposable-workspace", any(_orca_worktree_selector(workspace) in args for args in create), json.dumps(create)),
+            case("provider-command-is-shell-quoted-and-bounded", any(f"exec {canonical_echo}" in args and ".lh-orca-provider-output.jsonl" in args for args in create) and "fixture output\nfinished" == result["stdout_tail"], json.dumps(result)),
             case(
                 "codex-binding-is-applied-inside-one-orca-command",
                 "model_providers.lh_terminal=" in bound_command
@@ -367,11 +433,9 @@ def main() -> int:
                 json.dumps(bound["usage"]),
             ),
             case(
-                "claude-binding-is-scoped-to-terminal-shell-env",
-                "ANTHROPIC_BASE_URL=https://mock.example/v1" in claude_command
-                and "--model fixture-claude" in claude_command
-                and claude_projection == {"runner": "claude", "model": "fixture-claude", "mode": "claude_env"},
-                json.dumps({"command": claude_command, "projection": claude_projection}),
+                "retired-provider-binding-fails-closed",
+                retired_binding_rejected,
+                "Claude provider binding is rejected without an adapter",
             ),
             case("unsupported-or-mismatched-binding-fails-closed", kimi_rejected and mismatch_rejected, f"kimi={kimi_rejected} mismatch={mismatch_rejected}"),
             case("existing-usage-hook-is-preserved", result["usage"]["state"] == "measured" and seen["context"]["snapshot"] == {"path": "fixture-session", "usage": None}, json.dumps(result["usage"])),

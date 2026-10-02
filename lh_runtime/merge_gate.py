@@ -59,6 +59,17 @@ import diff_grader
 import external_action_port as eap
 import value_reducer
 
+
+class _ClosingConnection(sqlite3.Connection):
+    """Keep the transaction context contract while closing on context exit."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 MERGE_TOKEN_ENV = "LH_GITHUB_MERGE_TOKEN"
 KILL_SWITCH_ENV = "LH_AUTO_MERGE_DISABLE"
 RAMP_WINDOW_SECONDS = 90 * 86400
@@ -124,7 +135,7 @@ class TrustRampStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -182,6 +193,7 @@ class MergeGate:
         verdict_store: Any,
         ledger: eap.ActionLedger,
         ramp_store: TrustRampStore,
+        goal_store: Any = None,
         judge: diff_grader.GraderRunner | None = None,
         environ: Mapping[str, str] | None = None,
         api_root: str = "https://api.github.com",
@@ -208,6 +220,7 @@ class MergeGate:
         self.verdict_store = verdict_store
         self.ledger = ledger
         self.ramp_store = ramp_store
+        self.goal_store = goal_store
         self._judge = judge
         self.api_root = api_root.rstrip("/")
         self._transport = transport or _http_transport
@@ -329,7 +342,9 @@ class MergeGate:
         refused = {**refused, "pr_number": pr_number, "head_sha": head_sha}
         if verdict.get("conclusion") != "success":
             return {**refused, "reason": f"external conclusion is {verdict.get('conclusion')!r}, not success"}
-        value = value_reducer.verdict_for_run(self.run_store, run_id)
+        value = value_reducer.value_evidence_for_run(
+            self.run_store, run_id, goal_store=self.goal_store,
+        )
         if value.get("verdict") != "GREEN":
             return {**refused, "reason": "value verdict is not GREEN", "value_reasons": value.get("reasons", [])}
         grade = diff_grader.grade_diff(
@@ -430,6 +445,7 @@ class DeferredMergeGate:
         verdict_store: Any,
         ledger: eap.ActionLedger,
         ramp_store: TrustRampStore,
+        goal_store: Any = None,
         judge: diff_grader.GraderRunner | None = None,
         environ: Mapping[str, str] | None = None,
         api_root: str = "https://api.github.com",
@@ -443,6 +459,7 @@ class DeferredMergeGate:
             "verdict_store": verdict_store,
             "ledger": ledger,
             "ramp_store": ramp_store,
+            "goal_store": goal_store,
             "judge": judge,
             "environ": os.environ if environ is None else environ,
             "api_root": api_root,

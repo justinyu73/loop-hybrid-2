@@ -21,12 +21,16 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_source_repo
 from campaign_compiler import CAMPAIGN_SCHEMA, CampaignCompiler
 from controller import LoopController
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
+from native_delivery_fixture import make_native_bundle
 
 CAMPAIGN_ID = "campaign-w9f"
 STAGE_ID = "health"
@@ -63,7 +67,37 @@ STANDING = [{"stage_id": STAGE_ID, "interval": "daily", "intent": "run the daily
 
 
 def _worker(root: Path, tag: str, source: Path, base: str, campaign: dict, *, now_fn=None) -> GoalLoopWorker:
-    runs = RunStore(root / f"{tag}-runs")
+    compiled = CampaignCompiler(campaign).compile()["stages"]
+    stage = campaign["stages"][0]
+    binding = make_native_bundle(
+        source,
+        base,
+        f"{campaign['campaign_id']}:{stage['stage_id']}",
+        stage["stage_id"],
+        [{
+            "id": "standing-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('baseline.txt').is_file() else 1)"],
+        ["src/"],
+        int(stage["max_attempts"]),
+        goal={"feature_contract": stage["goal"], "admission_envelope": compiled[stage["stage_id"]]},
+    )
+    stage["goal"] = {
+        **stage["goal"],
+        "delivery_required": True,
+        "delivery_contract": binding["contract"],
+        "delivery_plan": binding["plan"],
+        "delivery_packet": binding["packet"],
+    }
+    runs = RunStore(root / f"{tag}-runs", command_runner=fixture_command_runner)
     compiler = CampaignCompiler(campaign)
     return GoalLoopWorker(
         goal_store=GoalStore(root / f"{tag}-goals"),
@@ -125,10 +159,10 @@ def main() -> int:
         envelope = blocked.compilers[CAMPAIGN_ID].compile()["stages"][STAGE_ID]
         blocked.goal_store.record_event(event_id="w9f-block-seed", idempotency_key="w9f-block-seed", source="manual_intent", event_type="goal_candidate", payload={
             "candidate": {"goal_id": GOAL_ID, "campaign_id": CAMPAIGN_ID, "stage_id": STAGE_ID,
-                          "goal": {"feature_contract": STAGE_ID, "admission_envelope": envelope}}
+                          "goal": {**envelope["goal"], "admission_envelope": envelope}}
         })
         blocked.goal_store.create_candidate("w9f-block-seed", goal_id=GOAL_ID, campaign_id=CAMPAIGN_ID, stage_id=STAGE_ID,
-                                            goal={"feature_contract": STAGE_ID, "admission_envelope": envelope})
+                                            goal={**envelope["goal"], "admission_envelope": envelope})
         blocked.goal_store.transition_event("w9f-block-seed", "completed")
         blocked.goal_store.transition_goal(GOAL_ID, "human_required", expected_state="candidate")
         tick_blocked = blocked.tick(holder="w9f-blocked", model=model)

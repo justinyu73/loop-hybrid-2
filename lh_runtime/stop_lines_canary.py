@@ -22,12 +22,16 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_source_repo
 from campaign_compiler import CAMPAIGN_SCHEMA, CampaignCompiler
 from controller import LoopController
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
+from native_delivery_fixture import make_native_bundle
 
 MARKER_LAMP = ["sh", "-c", "test -f src/out.txt && grep -q '^fixed$' src/out.txt"]
 DEFAULT_LAMP = ["sh", "-c", "! git diff --cached --quiet"]
@@ -56,7 +60,38 @@ def _campaign(campaign_id: str, stage_ids: list[str], *, lamp: list[str], thresh
 
 
 def _worker(root: Path, tag: str, source: Path, base: str, campaign: dict, *, grill_runner=None) -> GoalLoopWorker:
-    runs = RunStore(root / f"{tag}-runs")
+    compiled = CampaignCompiler(campaign).compile()["stages"]
+    for stage in campaign["stages"]:
+        stage_id = stage["stage_id"]
+        binding = make_native_bundle(
+            source,
+            base,
+            f"{campaign['campaign_id']}:{stage_id}",
+            stage_id,
+            [{
+                "id": "stop-line-source-check",
+                "commands": [{
+                    "id": "diff-check",
+                    "argv": ["git", "diff", "--cached", "--check"],
+                    "cwd": "${WORKTREE}",
+                    "expect_exit": 0,
+                    "timeout_seconds": 10,
+                }],
+                "required_receipts": ["executor"],
+            }],
+            [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('src/out.txt').is_file() else 1)"],
+            ["src/"],
+            int(stage["max_attempts"]),
+            goal={"feature_contract": stage["goal"], "admission_envelope": compiled[stage_id]},
+        )
+        stage["goal"] = {
+            **stage["goal"],
+            "delivery_required": True,
+            "delivery_contract": binding["contract"],
+            "delivery_plan": binding["plan"],
+            "delivery_packet": binding["packet"],
+        }
+    runs = RunStore(root / f"{tag}-runs", command_runner=fixture_command_runner)
     compiler = CampaignCompiler(campaign)
     return GoalLoopWorker(
         goal_store=GoalStore(root / f"{tag}-goals"),
@@ -70,20 +105,66 @@ def _worker(root: Path, tag: str, source: Path, base: str, campaign: dict, *, gr
 
 def _seed(worker: GoalLoopWorker, campaign_id: str, stage_id: str, event_key: str) -> None:
     envelope = worker.compilers[campaign_id].compile()["stages"][stage_id]
+    context = worker.execution_context[campaign_id]
+    goal_id = f"{campaign_id}:{stage_id}"
+    binding = make_native_bundle(
+        context["source_repo"],
+        context["base_revision"],
+        goal_id,
+        stage_id,
+        [{
+            "id": "stop-line-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('src/out.txt').is_file() else 1)"],
+        ["src/"],
+        int(envelope["max_attempts"]),
+        goal={"feature_contract": stage_id, "admission_envelope": envelope},
+    )
     worker.goal_store.record_event(event_id=event_key, idempotency_key=event_key, source="manual_intent", event_type="goal_candidate", payload={
-        "candidate": {"goal_id": f"{campaign_id}:{stage_id}", "campaign_id": campaign_id, "stage_id": stage_id,
-                      "goal": {"feature_contract": stage_id, "admission_envelope": envelope}}
+        "candidate": {"goal_id": goal_id, "campaign_id": campaign_id, "stage_id": stage_id,
+                      "goal": binding["goal"]}
     })
 
 
 def _seed_candidate_only(worker: GoalLoopWorker, campaign_id: str, stage_id: str, event_key: str) -> None:
     envelope = worker.compilers[campaign_id].compile()["stages"][stage_id]
+    context = worker.execution_context[campaign_id]
+    goal_id = f"{campaign_id}:{stage_id}"
+    binding = make_native_bundle(
+        context["source_repo"],
+        context["base_revision"],
+        goal_id,
+        stage_id,
+        [{
+            "id": "stop-line-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('src/out.txt').is_file() else 1)"],
+        ["src/"],
+        int(envelope["max_attempts"]),
+        goal={"feature_contract": stage_id, "admission_envelope": envelope},
+    )
     worker.goal_store.record_event(event_id=event_key, idempotency_key=event_key, source="manual_intent", event_type="goal_candidate", payload={
-        "candidate": {"goal_id": f"{campaign_id}:{stage_id}", "campaign_id": campaign_id, "stage_id": stage_id,
-                      "goal": {"feature_contract": stage_id, "admission_envelope": envelope}}
+        "candidate": {"goal_id": goal_id, "campaign_id": campaign_id, "stage_id": stage_id,
+                      "goal": binding["goal"]}
     })
     worker.goal_store.create_candidate(event_key, goal_id=f"{campaign_id}:{stage_id}", campaign_id=campaign_id,
-                                       stage_id=stage_id, goal={"feature_contract": stage_id, "admission_envelope": envelope})
+                                       stage_id=stage_id, goal=binding["goal"])
     # Retire the seed event so later ticks do not re-admit this goal: the
     # scenario needs it to sit in candidate state until the line fires.
     worker.goal_store.transition_event(event_key, "completed")

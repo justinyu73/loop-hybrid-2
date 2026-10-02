@@ -147,7 +147,7 @@ def write_snapshot(snapshot: dict[str, Any], out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(snapshot, ensure_ascii=False, indent=2)
     temporary = out_path.with_name(out_path.name + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())

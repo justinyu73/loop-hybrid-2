@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tests"))
 import capability_resolver as cr
 import cli_agent_executor as executors
 from _fixture import make_campaign, make_source_repo
@@ -30,6 +31,10 @@ from goal_loop_run import (
 from goal_store import GoalStore
 from project_binding import CONTRACT_SCHEMA, resolve_project
 from run_store import RunStore
+import goal_loop_run as fixture_glr
+from p7_native_runstore_fixture import explicit_runstore_factory
+from p7_fence_fixture import fixture_command_runner
+from native_delivery_fixture import make_native_run
 
 
 AUTHORITY_DIGEST = "sha256:" + "a" * 64
@@ -143,7 +148,7 @@ def graph(*, first_quality: float = 9, second_quality: float = 8, evaluate: bool
                     ["repo_edit", "test_reasoning"], quality=second_quality,
                 ),
                 _resource(
-                    "evaluate-c", "claude", "provider-c",
+                    "evaluate-c", "codex", "provider-c",
                     ["bounded_judgment"], quality=7, model="ambient:fake-b",
                     permission="read_only", network="external",
                     data_boundary="external", tools=[],
@@ -209,10 +214,35 @@ class FactorySpy:
         return model
 
 
-def _seed(goal_root: Path, campaign: dict[str, Any]) -> None:
+def _seed(goal_root: Path, campaign: dict[str, Any], source: Path, base: str) -> None:
     from campaign_compiler import CampaignCompiler
 
     envelope = CampaignCompiler(campaign).compile()["stages"]["stage-1"]
+    goal_id = f"{campaign['campaign_id']}:stage-1"
+    bundle_store = RunStore(goal_root.parent / f"{goal_root.name}-delivery-bundle")
+    bundle = make_native_run(
+        bundle_store,
+        source,
+        base,
+        goal_id,
+        "capability",
+        [{
+            "id": "capability-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        ["git", "rev-parse", "HEAD"],
+        ["src/"],
+        4,
+        goal={"feature_contract": "stage-1", "admission_envelope": envelope},
+    )
+    persisted_goal = bundle_store.get_run(bundle["run_id"])["goal"]
     GoalStore(goal_root).record_event(
         event_id="capability-seed-1",
         idempotency_key="capability-seed-1",
@@ -220,13 +250,10 @@ def _seed(goal_root: Path, campaign: dict[str, Any]) -> None:
         event_type="goal_candidate",
         payload={
             "candidate": {
-                "goal_id": f"{campaign['campaign_id']}:stage-1",
+                "goal_id": goal_id,
                 "campaign_id": campaign["campaign_id"],
                 "stage_id": "stage-1",
-                "goal": {
-                    "feature_contract": "stage-1",
-                    "admission_envelope": envelope,
-                },
+                "goal": persisted_goal,
             },
         },
     )
@@ -246,12 +273,28 @@ def _persist_bindings(
     bindings: list[dict[str, Any]],
 ) -> str:
     store = RunStore(run_root)
-    run_id = store.create_run(
+    run_id = make_native_run(
+        store,
+        source,
+        base_revision,
+        "capability-evaluator",
+        "evaluation",
+        [{
+            "id": "capability-evaluator-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        ["git", "rev-parse", "HEAD"],
+        ["src/"],
+        max(4, len(bindings) + 1),
         goal={"feature_contract": "capability evaluator fixture"},
-        source_repo=source,
-        base_revision=base_revision,
-        max_attempts=max(4, len(bindings) + 1),
-    )
+    )["run_id"]
     for expected_ordinal, raw_binding in enumerate(bindings, start=1):
         ordinal = store.begin_attempt(run_id, f"workspace://fixture/{expected_ordinal}")
         if ordinal != expected_ordinal:
@@ -423,10 +466,8 @@ def main() -> int:
         "evaluate_transition",
         selected_nodes=selected_second,
     )
-    claude_argv = executors.evaluation_argv(
-        "claude",
-        "PROMPT",
-        "ambient:fake-b",
+    retired_evaluation_rejected, retired_evaluation_detail = _rejects(
+        lambda: executors.evaluation_argv("claude", "PROMPT", "ambient:fake-b")
     )
     codex_argv = executors.evaluation_argv(
         "codex",
@@ -439,17 +480,14 @@ def main() -> int:
         and evaluation_second is not None
         and evaluation_first["binding"]["binding_id"] == "evaluate-c"
         and evaluation_second["binding"]["binding_id"] == "evaluate-d"
-        and "--permission-mode" in claude_argv
-        and "plan" in claude_argv
-        and "--tools" in claude_argv
-        and "" in claude_argv
+        and retired_evaluation_rejected
         and "--sandbox" in codex_argv
         and "read-only" in codex_argv
         and "--dangerously-bypass-approvals-and-sandbox" not in codex_argv,
         (
             f"first={evaluation_first and evaluation_first['binding']} "
             f"second={evaluation_second and evaluation_second['binding']} "
-            f"claude={claude_argv} codex={codex_argv}"
+            f"retired={retired_evaluation_detail} codex={codex_argv}"
         ),
     ))
 
@@ -480,20 +518,21 @@ def main() -> int:
         ))
 
         execute_spy = FactorySpy()
-        _seed(root / "goals", campaign)
-        result = run(
-            execution_graph=graph(evaluate=False),
-            execute=True,
-            goal_store_root=root / "goals",
-            run_store_root=root / "runs",
-            workspace_root=root / "ws",
-            campaign=campaign,
-            source_repo=source,
-            base_revision=base,
-            max_cycles=30,
-            sleep_fn=lambda _seconds: None,
-            factory_overrides={"fake-a": execute_spy, "fake-b": execute_spy},
-        )
+        _seed(root / "goals", campaign, source, base)
+        with explicit_runstore_factory(fixture_glr):
+            result = run(
+                execution_graph=graph(evaluate=False),
+                execute=True,
+                goal_store_root=root / "goals",
+                run_store_root=root / "runs",
+                workspace_root=root / "ws",
+                campaign=campaign,
+                source_repo=source,
+                base_revision=base,
+                max_cycles=30,
+                sleep_fn=lambda _seconds: None,
+                factory_overrides={"fake-a": execute_spy, "fake-b": execute_spy},
+            )
         receipt = _latest_receipt(root / "runs")
         binding = receipt.get("binding", {})
         cases.append(case(
@@ -538,8 +577,8 @@ def main() -> int:
         )
         fake_bin = root / "fake-bin"
         fake_bin.mkdir()
-        fake_claude = fake_bin / "claude"
-        fake_claude.write_text(
+        fake_codex = fake_bin / "codex"
+        fake_codex.write_text(
             "#!/bin/sh\n"
             "printf '%s\\n' "
             "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
@@ -547,7 +586,7 @@ def main() -> int:
             "{\"decision\":\"runner-fixable\",\"diagnosis\":\"fixture diagnosis\"}}'\n",
             encoding="utf-8",
         )
-        fake_claude.chmod(0o755)
+        fake_codex.chmod(0o755)
         original_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{fake_bin}:{original_path}"
         evaluator = _make_capability_evaluator(
@@ -678,12 +717,28 @@ def main() -> int:
         ordinal_two = ordinal_store.begin_attempt(
             ordinal_run_id, "workspace://fixture/2"
         )
+        ordinal_two_receipt = {
+            "schema": "loop-hybrid-attempt-receipt/v1",
+            "run_id": ordinal_run_id,
+            "attempt": ordinal_two,
+            # The artifact itself is valid for Attempt 2, but its immutable
+            # capability binding still names Attempt 1.  The evaluator must
+            # reject that wrong-ordinal reference rather than treating the
+            # latest receipt as a fresh selection.
+            "binding": {**ordinal_binding, "attempt_id": f"{ordinal_run_id}:1"},
+        }
+        ordinal_two_ref = ordinal_store.write_artifact(
+            ordinal_run_id,
+            ordinal_two,
+            "receipt.json",
+            json.dumps(ordinal_two_receipt, sort_keys=True),
+        )
         if not ordinal_store.finish_attempt(
             ordinal_run_id,
             ordinal_two,
             state="retry_pending",
-            receipt_ref=ordinal_ref["ref"],
-            receipt_digest=ordinal_ref["digest"],
+            receipt_ref=ordinal_two_ref["ref"],
+            receipt_digest=ordinal_two_ref["digest"],
         ):
             raise AssertionError("ordinal fixture Attempt 2 finish was fenced")
         ordinal_session = CapabilityRoutingSession(
@@ -749,16 +804,30 @@ def main() -> int:
             f"error={unavailable_detail}; receipt={json.dumps(resolution_receipt, sort_keys=True)}",
         ))
 
-        pre_store = RunStore(root / "pre-runs")
+        pre_store = RunStore(root / "pre-runs", command_runner=fixture_command_runner)
         controller = LoopController(pre_store, root / "pre-ws")
-        pre_run = pre_store.create_run(
-            goal={
-                "feature_contract": "already done",
-                "admission_envelope": {"allowed_paths": ["src/"]},
-            },
-            source_repo=source,
-            base_revision=base,
-        )
+        pre_run = make_native_run(
+            pre_store,
+            source,
+            base,
+            "capability-precheck",
+            "precheck",
+            [{
+                "id": "capability-precheck-check",
+                "commands": [{
+                    "id": "diff-check",
+                    "argv": ["git", "diff", "--check"],
+                    "cwd": "${WORKTREE}",
+                    "expect_exit": 0,
+                    "timeout_seconds": 10,
+                }],
+                "required_receipts": ["executor"],
+            }],
+            ["git", "rev-parse", "HEAD"],
+            ["src/"],
+            4,
+            goal={"feature_contract": "already done"},
+        )["run_id"]
         pre = controller.tick(
             pre_run,
             holder="capability-canary",
@@ -797,7 +866,7 @@ def main() -> int:
                 "fake-b": unavailable_spy,
             },
         )
-        _seed(unavailable_goal_root, unavailable_campaign)
+        _seed(unavailable_goal_root, unavailable_campaign, source, base)
         unavailable_worker = build_worker(
             goal_store_root=unavailable_goal_root,
             run_store_root=unavailable_run_root,
@@ -872,10 +941,10 @@ def main() -> int:
         cli_graph["registry"]["resources"][0]["trust_tier"] = "process_bound"
         cli_graph["registry"]["resources"][0]["network_access"] = "external"
         cli_graph["registry"]["resources"][0]["data_boundary"] = "external"
-        cli_graph["registry"]["resources"][1]["runner"] = "claude"
+        cli_graph["registry"]["resources"][1]["runner"] = "codex"
         cli_graph["registry"]["resources"][1]["model"] = "deployment-b"
         cli_graph["registry"]["resources"][1]["model_family"] = "deployment-b"
-        cli_graph["registry"]["resources"][1]["endpoint_ref"] = "ambient:claude"
+        cli_graph["registry"]["resources"][1]["endpoint_ref"] = "ambient:codex"
         cli_graph["registry"]["resources"][1]["trust_tier"] = "process_bound"
         cli_graph["registry"]["resources"][1]["network_access"] = "external"
         cli_graph["registry"]["resources"][1]["data_boundary"] = "external"

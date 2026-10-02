@@ -11,9 +11,6 @@ spinning: kill switch, budget, idle streak, or a max-cycles cap.
 
 from __future__ import annotations
 
-import errno
-import fcntl
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +20,14 @@ import budget_reducer
 import dispatch_gate
 import external_verdict as ev
 from goal_loop_worker import GoalLoopWorker, ModelRunner, TurningPointRunner
+from lifecycle import (
+    ForegroundLifecycle,
+    LifecycleLease,
+    LifecycleOwnershipLost,
+    LifecyclePort,
+    LifecycleUnavailable,
+)
+from platform_ports import FileLockSchedulerPort, SchedulerPort
 from status_snapshot import build_heartbeat, build_snapshot, default_heartbeat_path, write_heartbeat, write_snapshot
 
 
@@ -48,11 +53,34 @@ def run_driver(
     sleep_fn: Callable[[float], None] | None = None,
     clock_fn: Callable[[], float] | None = None,
     turning_point: TurningPointRunner | None = None,
+    scheduler_port: SchedulerPort | None = None,
+    lifecycle_port: LifecyclePort | None = None,
+    shutdown_flag: str | Path | None = None,
 ) -> dict[str, Any]:
     """Acquire the process singleton, then run one bounded driver session."""
-    lock = _acquire_driver_lock(worker.run_store.root)
-    lock_path = worker.run_store.root / "driver.lock"
-    if lock is None:
+    lifecycle = lifecycle_port or ForegroundLifecycle(shutdown_flag=shutdown_flag)
+    owner_path = lifecycle.owner_path(worker.run_store.root)
+    try:
+        lease = lifecycle.acquire(
+            worker.run_store.root,
+            holder,
+            scheduler_port=scheduler_port or FileLockSchedulerPort(),
+        )
+    except LifecycleUnavailable as exc:
+        return {
+            "stop_reason": "lifecycle_unavailable",
+            "cycles": 0,
+            "runs_dispatched": 0,
+            "idle_streak": 0,
+            "outcomes": [],
+            "parked_goals": [],
+            "heartbeat_path": str(default_heartbeat_path(worker.run_store.root)),
+            "budget": {},
+            "dispatch_gate": None,
+            "owner_lease_path": str(owner_path),
+            "lifecycle_error": str(exc),
+        }
+    if lease is None:
         return {
             "stop_reason": "not_holder",
             "cycles": 0,
@@ -63,10 +91,11 @@ def run_driver(
             "heartbeat_path": str(default_heartbeat_path(worker.run_store.root)),
             "budget": {},
             "dispatch_gate": None,
-            "lock_path": str(lock_path),
+            "owner_lease_path": str(owner_path),
         }
+    summary: dict[str, Any] | None = None
     try:
-        return _run_driver_loop(
+        summary = _run_driver_loop(
             worker,
             holder=holder,
             model=model,
@@ -87,30 +116,19 @@ def run_driver(
             sleep_fn=sleep_fn,
             clock_fn=clock_fn,
             turning_point=turning_point,
+            lifecycle=lease,
         )
-    finally:
-        _release_driver_lock(lock)
-
-
-def _acquire_driver_lock(root: Path) -> tuple[int, Path] | None:
-    lock_path = root / "driver.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        os.close(fd)
-        if exc.errno in {errno.EACCES, errno.EAGAIN}:
-            return None
+    except BaseException:
+        lease.close("process_exception")
         raise
-    return fd, lock_path
-
-
-def _release_driver_lock(lock: tuple[int, Path]) -> None:
-    fd, _lock_path = lock
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+    final_record = lease.close(summary["stop_reason"])
+    summary["lifecycle"] = {
+        "owner_lease_path": str(owner_path),
+        "recovery": lease.recovery,
+        "state": final_record.get("state") if final_record else "ownership_lost",
+        "stop_reason": summary["stop_reason"],
+    }
+    return summary
 
 
 def _run_driver_loop(
@@ -135,6 +153,7 @@ def _run_driver_loop(
     sleep_fn: Callable[[float], None] | None = None,
     clock_fn: Callable[[], float] | None = None,
     turning_point: TurningPointRunner | None = None,
+    lifecycle: LifecycleLease | None = None,
 ) -> dict[str, Any]:
     """Drive the worker until a gate stops it. Returns a bounded session summary.
 
@@ -173,6 +192,10 @@ def _run_driver_loop(
     stop_reason = "max_cycles"
     budget: dict[str, Any] = {}
     while True:
+        if lifecycle is not None and lifecycle.shutdown_requested():
+            stop_reason = "shutdown_requested"
+            break
+        _lifecycle_heartbeat(lifecycle, phase="loop", cycles=cycles)
         if pause is not None and pause.exists():
             stop_reason = "paused"
             break
@@ -191,6 +214,7 @@ def _run_driver_loop(
         if gate_state["action"] == dispatch_gate.IDLE:
             idle_streak += 1
             _write_heartbeat(worker, heartbeat_out, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
+            _lifecycle_heartbeat(lifecycle, phase="idle", cycles=cycles)
             if snapshot_out is not None:
                 _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
             if idle_streak >= idle_limit:
@@ -209,6 +233,7 @@ def _run_driver_loop(
             break
 
         _write_heartbeat(worker, heartbeat_out, holder=holder, phase="tick", cycles=cycles, monotonic_ts=clock())
+        _lifecycle_heartbeat(lifecycle, phase="tick", cycles=cycles)
         result = worker.tick(holder=holder, model=model, verdict_store=verdict_store, conclusion_source=conclusion_source, turning_point=turning_point)
         cycles += 1
 
@@ -225,14 +250,20 @@ def _run_driver_loop(
             stop_reason = str(auth["reason_code"])
             break
 
+        if lifecycle is not None and lifecycle.shutdown_requested():
+            stop_reason = "shutdown_requested"
+            break
+
         if result["status"] == "progress":
             idle_streak = 0
             if snapshot_out is not None:
                 _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
             _write_heartbeat(worker, heartbeat_out, holder=holder, phase="progress", cycles=cycles, monotonic_ts=clock())
+            _lifecycle_heartbeat(lifecycle, phase="progress", cycles=cycles)
             continue
         idle_streak += 1
         _write_heartbeat(worker, heartbeat_out, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
+        _lifecycle_heartbeat(lifecycle, phase="idle", cycles=cycles)
         if idle_streak >= idle_limit:
             stop_reason = "parked" if _parked_goal_ids(worker) else "idle"
             break
@@ -252,6 +283,13 @@ def _run_driver_loop(
         "budget": budget,
         "dispatch_gate": gate_state,
     }
+
+
+def _lifecycle_heartbeat(lifecycle: LifecycleLease | None, *, phase: str, cycles: int) -> None:
+    if lifecycle is None:
+        return
+    if not lifecycle.heartbeat(phase=phase, cycles=cycles):
+        raise LifecycleOwnershipLost("foreground owner lease no longer matches this process")
 
 
 def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_seconds: float = 0.0, gate_state: dict[str, Any] | None = None) -> None:

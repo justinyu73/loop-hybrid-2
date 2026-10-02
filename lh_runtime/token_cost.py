@@ -33,18 +33,10 @@ DEFAULT_PRICING: dict[str, dict[str, float]] = {
     # id since M4; executor-name keys above are the fallback when no id is
     # found). gpt-5.6-luna per OpenAI's official pricing page 2026-07-18.
     "gpt-5.6-luna": {"input": 1.0, "output": 6.0, "cache_read": 0.10},
-    # Real model ids seen in claude/kimi session logs.
+    # Real model ids seen in claude session logs.
     # claude-opus-4-8 per anthropic.com/pricing; Sonnet 5 intro through 2026-08-31;
-    # kimi-code/k3 reported launch rates ($3/$15, cached $0.30);
-    # kimi-code/kimi-for-coding = K2.7 Code rates.
     "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cache_read": 0.50},
     "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20},
-    "kimi-code/k3": {"input": 3.0, "output": 15.0, "cache_read": 0.30},
-    "kimi-code/kimi-for-coding": {"input": 0.95, "output": 4.0, "cache_read": 0.19},
-    # kimi = Kimi K2.7 Code (Moonshot official rate card 2026-07: input $0.95,
-    # output $4.00, cache-hit input $0.19). Kimi Code CLI runs on membership,
-    # so these are API-equivalent estimates like the other rows.
-    "kimi": {"input": 0.95, "output": 4.0, "cache_read": 0.19},
 }
 
 

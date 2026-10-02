@@ -21,6 +21,21 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from . import goal_assignment
+except ImportError:  # direct script execution keeps lh_runtime on sys.path
+    import goal_assignment
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Keep the transaction context contract while closing on context exit."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
 
 GOAL_STATES = {
     "candidate",
@@ -138,6 +153,25 @@ class GoalStore:
                     expires_at REAL NOT NULL,
                     FOREIGN KEY(event_key) REFERENCES goal_events(event_key)
                 );
+                CREATE TABLE IF NOT EXISTS normalized_verifier_results (
+                    binding_digest TEXT PRIMARY KEY,
+                    goal_id TEXT NOT NULL,
+                    revision_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    check_id TEXT NOT NULL,
+                    check_definition_digest TEXT NOT NULL,
+                    authority_check_result_digest TEXT NOT NULL,
+                    source_digest TEXT NOT NULL,
+                    receipt_digest TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    measured_duration REAL NOT NULL,
+                    normalization_version TEXT NOT NULL,
+                    ready_event_key TEXT,
+                    conflict_json TEXT,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_nvr_run ON normalized_verifier_results(run_id, attempt);
                 CREATE INDEX IF NOT EXISTS idx_goal_events_state ON goal_events(state);
                 CREATE INDEX IF NOT EXISTS idx_goals_state ON goals(state);
                 CREATE INDEX IF NOT EXISTS idx_goal_claims_event ON goal_claims(event_key);
@@ -159,7 +193,7 @@ class GoalStore:
                 conn.execute("ALTER TABLE goal_events ADD COLUMN result_json TEXT")
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5, isolation_level=None)
+        conn = sqlite3.connect(self.db_path, timeout=5, isolation_level=None, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
@@ -254,6 +288,155 @@ class GoalStore:
             raise KeyError(f"unknown event_key: {event_key}")
         return value
 
+    def events_from(self, source: str) -> list[dict[str, Any]]:
+        """Read durable source events, including terminal stop-line events."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM goal_events WHERE source = ? ORDER BY created_at, event_key",
+                (_required_text("source", source),),
+            ).fetchall()
+        return [self._event_row(row) for row in rows]
+
+    def record_normalized_verifier_result(
+        self,
+        *,
+        binding: dict[str, Any],
+        outcome: str,
+        source_digest: str,
+        authority_check_result_digest: str,
+        measured_duration: float,
+        normalization_version: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """The LH-owned normalized async verifier record, and its ready event.
+
+        One BEGIN IMMEDIATE covers the whole decision: read the existing row,
+        insert the normalized row, and insert the `value_reduction_ready`
+        pointer into goal_events -- so no crash window can leave a normalized
+        record whose ready event never lands, and no concurrent writer can
+        race the conflict comparison. The ready row is born in a terminal
+        state: the pending scan must never feed it to the matcher as a
+        command. Conflict is terminal for the binding: once two outcomes
+        disagreed, no later call -- even one repeating the first outcome --
+        may emit ready (a retry that could wash a conflict green would make
+        the conflict record decorative). Ready is emitted for `verified`
+        only; a failed outcome is durable evidence for the retry path, not a
+        value-reduction input.
+        """
+        if outcome not in {"verified", "failed"}:
+            raise ValueError("normalized outcome must be verified or failed")
+        required = (
+            "goal_id", "revision_id", "run_id", "attempt",
+            "check_id", "check_definition_digest", "receipt_digest",
+        )
+        missing = [key for key in required if binding.get(key) in (None, "")]
+        if missing:
+            raise ValueError(f"normalized binding is missing: {', '.join(missing)}")
+        binding_digest = _digest({key: binding[key] for key in required})
+        at = now if now is not None else time.time()
+        evidence = {
+            "outcome": outcome,
+            "source_digest": source_digest,
+            "authority_check_result_digest": authority_check_result_digest,
+        }
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                result = self._normalize_in_txn(
+                    conn, binding=binding, binding_digest=binding_digest,
+                    outcome=outcome, evidence=evidence,
+                    source_digest=source_digest,
+                    authority_check_result_digest=authority_check_result_digest,
+                    measured_duration=measured_duration,
+                    normalization_version=normalization_version, at=at,
+                )
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+            return result
+
+    def _normalize_in_txn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        binding: dict[str, Any],
+        binding_digest: str,
+        outcome: str,
+        evidence: dict[str, Any],
+        source_digest: str,
+        authority_check_result_digest: str,
+        measured_duration: float,
+        normalization_version: str,
+        at: float,
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM normalized_verifier_results WHERE binding_digest = ?",
+            (binding_digest,),
+        ).fetchone()
+        if row is not None:
+            if row["conflict_json"] is not None:
+                return {"status": "conflict_replay", "binding_digest": binding_digest,
+                        "conflict": json.loads(row["conflict_json"])}
+            recorded = {
+                "outcome": row["outcome"],
+                "source_digest": row["source_digest"],
+                "authority_check_result_digest": row["authority_check_result_digest"],
+            }
+            if recorded == evidence:
+                return {"status": "already_normalized", "binding_digest": binding_digest,
+                        "outcome": row["outcome"], "ready_event_key": row["ready_event_key"]}
+            conflict = {"first": recorded, "second": evidence, "observed_at": at}
+            conn.execute(
+                "UPDATE normalized_verifier_results SET conflict_json = ? WHERE binding_digest = ?",
+                (json.dumps(conflict, sort_keys=True), binding_digest),
+            )
+            return {"status": "conflict", "binding_digest": binding_digest, "conflict": conflict}
+        ready_event_key = f"vrr:{binding_digest}" if outcome == "verified" else None
+        conn.execute(
+            "INSERT INTO normalized_verifier_results(binding_digest, goal_id, revision_id, run_id, attempt, "
+            "check_id, check_definition_digest, authority_check_result_digest, source_digest, receipt_digest, "
+            "outcome, measured_duration, normalization_version, ready_event_key, conflict_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+            (binding_digest, binding["goal_id"], binding["revision_id"], binding["run_id"],
+             int(binding["attempt"]), binding["check_id"], binding["check_definition_digest"],
+             authority_check_result_digest, source_digest, binding["receipt_digest"],
+             outcome, float(measured_duration), normalization_version, ready_event_key, at),
+        )
+        if ready_event_key is not None:
+            payload = {
+                "binding_digest": binding_digest,
+                "run_id": binding["run_id"],
+                "attempt": int(binding["attempt"]),
+                "normalized_result": "normalized_verifier_results",
+            }
+            payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            conn.execute(
+                "INSERT INTO goal_events(event_key, event_id, source, event_type, payload_json, "
+                "payload_digest, state, goal_id, revision_id, result_json, created_at, updated_at) "
+                "VALUES (?, ?, 'verifier_normalizer', 'value_reduction_ready', ?, ?, "
+                "'value_reduction_ready', ?, ?, NULL, ?, ?)",
+                (ready_event_key, ready_event_key, payload_json, _digest(payload),
+                 binding["goal_id"], binding["revision_id"], at, at),
+            )
+        return {"status": "ready" if ready_event_key else "normalized",
+                "binding_digest": binding_digest, "outcome": outcome,
+                "ready_event_key": ready_event_key}
+
+    def normalized_result_for(self, run_id: str, attempt: int) -> dict[str, Any] | None:
+        """The normalized record an async value reader judges, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM normalized_verifier_results WHERE run_id = ? AND attempt = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (run_id, int(attempt)),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["conflict"] = json.loads(value.pop("conflict_json")) if value.get("conflict_json") else None
+        return value
+
     def claim_event(self, event_key: str, holder: str, seconds: int = 60) -> bool:
         """Claim one pending Goal event; an expired lease can be recovered."""
         event_key = _required_text("event_key", event_key)
@@ -284,7 +467,8 @@ class GoalStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM goal_event_leases WHERE event_key = ? AND holder = ?", (event_key, holder))
 
-    def transition_event(self, event_key: str, new_state: str, *, result: dict[str, Any] | None = None) -> dict[str, Any]:
+    def transition_event(self, event_key: str, new_state: str, *, result: dict[str, Any] | None = None,
+                         expected_result_digest: str | None = None) -> dict[str, Any]:
         """Persist a worker outcome without creating another Goal or Run."""
         event_key = _required_text("event_key", event_key)
         if new_state != "event_received" and new_state not in GOAL_STATES:
@@ -292,9 +476,13 @@ class GoalStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                event = conn.execute("SELECT event_key FROM goal_events WHERE event_key = ?", (event_key,)).fetchone()
+                event = conn.execute("SELECT result_json FROM goal_events WHERE event_key = ?", (event_key,)).fetchone()
                 if event is None:
                     raise KeyError(f"unknown event_key: {event_key}")
+                if (expected_result_digest is not None
+                    and _digest(json.loads(event["result_json"]) if event["result_json"] else None)
+                    != expected_result_digest):
+                    raise ValueError("goal_event_result_changed")
                 conn.execute(
                     "UPDATE goal_events SET state = ?, result_json = ?, updated_at = ? WHERE event_key = ?",
                     (new_state, json.dumps(result, ensure_ascii=False, sort_keys=True) if result is not None else None, time.time(), event_key),
@@ -368,6 +556,11 @@ class GoalStore:
         stage_id = _required_text("stage_id", stage_id)
         if not isinstance(goal, dict):
             raise ValueError("goal must be an object")
+        # A project/criterion assignment is optional for legacy Goal kinds, but
+        # once supplied it is validated before the immutable revision is
+        # written. Later consumers therefore never have to interpret a partial
+        # binding that execution already used.
+        goal_assignment.assignment_from_goal(goal)
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
             raise ValueError("revision must be a positive integer")
         if parent_goal_id is not None:
@@ -621,15 +814,32 @@ class GoalStore:
             raise KeyError(f"unknown goal_id: {goal_id}")
         return value
 
-    def bump_revision(self, goal_id: str) -> dict[str, Any]:
+    def resolve_project_assignment(self, project_id: str) -> dict[str, Any]:
+        """Return the one active immutable assignment for ``project_id``."""
+        return goal_assignment.resolve_project(self, project_id)
+
+    def bump_revision(
+        self,
+        goal_id: str,
+        *,
+        goal_payload: dict[str, Any] | None = None,
+        expected_revision_id: str | None = None,
+    ) -> dict[str, Any]:
         """Create revision N+1 for an existing goal (revision-bump re-run).
 
         When a goal's run is exhausted (stopped) and a new command re-issues
         the work, a new revision yields a new deterministic run_id while the
         old run stays as history.  Capped at MAX_GOAL_REVISIONS; beyond it the
-        caller routes to human_required instead of looping forever.
+        caller routes to human_required instead of looping forever.  A caller
+        may supply the complete next payload after validating a recurring
+        delivery binding.  ``expected_revision_id`` keeps that validation and
+        this write as one current-revision compare-and-swap.
         """
         goal_id = _required_text("goal_id", goal_id)
+        if goal_payload is not None and not isinstance(goal_payload, dict):
+            raise ValueError("goal_payload must be an object")
+        if expected_revision_id is not None:
+            expected_revision_id = _required_text("expected_revision_id", expected_revision_id)
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -642,19 +852,29 @@ class GoalStore:
                 ).fetchone()
                 if current is None:
                     raise ValueError("goal has no current revision to bump")
+                if expected_revision_id is not None and current["revision_id"] != expected_revision_id:
+                    raise ValueError("goal_revision_changed")
                 next_seq = int(current["revision"]) + 1
                 if next_seq > MAX_GOAL_REVISIONS:
                     raise ValueError(f"goal revision cap reached ({MAX_GOAL_REVISIONS})")
-                goal_payload = json.loads(current["goal_json"])
-                revision_id = _id("rev-", {"goal_id": goal_id, "revision": next_seq, "goal": goal_payload})
+                next_payload = json.loads(current["goal_json"]) if goal_payload is None else json.loads(
+                    json.dumps(goal_payload, ensure_ascii=False, sort_keys=True)
+                )
+                next_json = json.dumps(next_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                next_digest = _digest(next_payload)
+                revision_id = _id("rev-", {"goal_id": goal_id, "revision": next_seq, "goal": next_payload})
                 conn.execute(
                     "INSERT INTO goal_revisions(revision_id, goal_id, revision, goal_json, goal_digest, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (revision_id, goal_id, next_seq, current["goal_json"], current["goal_digest"], now),
+                    (revision_id, goal_id, next_seq, next_json, next_digest, now),
                 )
-                conn.execute(
-                    "UPDATE goals SET current_revision_id = ?, updated_at = ? WHERE goal_id = ?",
-                    (revision_id, now, goal_id),
-                )
+                update_sql = "UPDATE goals SET current_revision_id = ?, updated_at = ? WHERE goal_id = ?"
+                update_args: tuple[Any, ...] = (revision_id, now, goal_id)
+                if expected_revision_id is not None:
+                    update_sql += " AND current_revision_id = ?"
+                    update_args += (expected_revision_id,)
+                updated = conn.execute(update_sql, update_args)
+                if updated.rowcount != 1:
+                    raise ValueError("goal_revision_changed")
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
