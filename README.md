@@ -93,7 +93,7 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：87 個 gate 中 72 個通過；其餘 15 個依賴 POSIX 行為（執行位元假 CLI、bubblewrap fence（含本機 provider 沙箱）、POSIX signal／程序語義、15.6 ms monotonic 時鐘）。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：87 個 gate 中 73～74 個通過。13 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（4）、bubblewrap fence 含本機 provider 沙箱（4）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時偶爾超時。 |
 | macOS | 未測試。 |
 
 不需要 Orca App、VS Code 或 WSL。Orca 只是可選的 execution-host adapter；預設 executor 是在一次性 clone 中執行的本機 coding CLI。
