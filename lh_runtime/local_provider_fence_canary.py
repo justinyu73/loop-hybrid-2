@@ -252,7 +252,8 @@ def linux_cases() -> list[dict[str, Any]]:
         proc = fence.launch_provider(descriptor, argv, env_overlay={"LH_CANARY_OVERLAY": "overlay-ok"},
                                      input_text="stdin-ok", timeout_seconds=60)
         report = _report(proc)
-        allowed_env = {"PATH", "HOME", "TERM", "TMPDIR", "CODEX_HOME", "LH_CANARY_OVERLAY", "LC_CTYPE"}
+        # PWD is set by bubblewrap --chdir; everything else is fence-owned or the overlay.
+        allowed_env = {"PATH", "HOME", "TERM", "TMPDIR", "CODEX_HOME", "LH_CANARY_OVERLAY", "LC_CTYPE", "PWD"}
         l2 = (
             proc.returncode == 0
             and report.get("argv") == argv[1:]
