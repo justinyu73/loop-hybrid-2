@@ -93,10 +93,33 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：86 個 gate 中 72 個通過；其餘 14 個依賴 POSIX 行為（執行位元假 CLI、bubblewrap fence、POSIX signal／程序語義、15.6 ms monotonic 時鐘）。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：87 個 gate 中 72 個通過；其餘 15 個依賴 POSIX 行為（執行位元假 CLI、bubblewrap fence（含本機 provider 沙箱）、POSIX signal／程序語義、15.6 ms monotonic 時鐘）。 |
 | macOS | 未測試。 |
 
 不需要 Orca App、VS Code 或 WSL。Orca 只是可選的 execution-host adapter；預設 executor 是在一次性 clone 中執行的本機 coding CLI。
+
+## 不經 Orca 的沙箱 provider 執行（Linux）
+
+`local` executor 由 LH 直接啟動 provider CLI（目前支援 Codex），執行環境是已簽入每次 attempt launch descriptor 的 bubblewrap 沙箱：
+
+- 系統與 provider 目錄唯讀；只有一次性 clone 可寫；`/tmp` 是全新 tmpfs；provider home 以唯讀方式掛入。
+- 新的 user／pid／ipc／uts namespace，禁止巢狀 user namespace。
+- provider seccomp 表：mount、namespace、tracing、kernel module、BPF、keyring 相關 syscall 一律回 `EPERM`。環境變數全部清除，`PATH` 由 fence 決定。
+- provider 與 bubblewrap 二進位在 prepare 時以 digest 釘住、啟動前重驗；每個 descriptor 只能啟動一次；逾時會終止整個沙箱程序群組。
+
+網路沿用主機網路（provider 必須連到自己的 API）。LH 只依 policy 檢查 provider 的 argv，receipt 會如實標示 `host_network_policy_preflight`，不會宣稱有網路隔離。
+
+設定方式：
+
+```sh
+python3 -B lh_runtime/instance_config.py init --config ~/.config/loop-hybrid/instance.json
+export LH_EXECUTION_FENCE_BACKEND=linux-bubblewrap-seccomp   # 需 bubblewrap 0.9.0 + libseccomp
+export LH_EGRESS_POLICY=<state root>/egress-policy.json       # init 產生
+export LH_LOCAL_PROVIDER_AGENT=codex                          # 或改傳 provider_binding
+python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --executor local --execute
+```
+
+Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`；只有偵測到 Orca 二進位時才會釘住 Orca。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
 
 ## 安裝
 

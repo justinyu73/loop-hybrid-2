@@ -57,6 +57,7 @@ run_gate lh-attempt-fencing python3 -B lh_runtime/attempt_fencing_canary.py || e
 run_gate lh-preventive-execution-fence python3 -B lh_runtime/execution_fence_canary.py || exit $?
 run_gate lh-cross-platform-execution-fence-p4 python3 -B lh_runtime/execution_fence_platform_canary.py || exit $?
 run_gate lh-fence-activation-smoke python3 -B lh_runtime/fence_activation_smoke.py || exit $?
+run_gate lh-local-provider-fence python3 -B lh_runtime/local_provider_fence_canary.py || exit $?
 run_gate lh-lifecycle-context-path-n05 python3 -B lh_runtime/lifecycle_context_path_canary.py || exit $?
 run_gate lh-provider-input-binding python3 -B lh_runtime/provider_input_binding_canary.py || exit $?
 run_gate lh-attempt-timeout python3 -B lh_runtime/attempt_timeout_canary.py || exit $?

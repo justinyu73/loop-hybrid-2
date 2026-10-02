@@ -68,6 +68,25 @@ EGRESS_POLICY_SCHEMA = "host-execution-host-egress-policy/v1"
 EGRESS_POLICY_ENFORCED_BY = "lh-client-preflight"
 _EGRESS_VALUE_RE = r"[A-Za-z0-9._:/-]{1,64}"
 
+# Local execution host: LH itself starts the provider under the signed
+# provider-sandbox profile, so no control plane (and no Orca) is involved.
+# The descriptor admits exactly one provider launch.
+LOCAL_PROVIDER_ADAPTER_PREFIX = "local-provider-"
+LOCAL_PROVIDER_LAUNCH_BUDGET = 1
+# Default provider syscall table for a generated profile: mount, namespace,
+# tracing, kernel-module, BPF and keyring routes are denied, while the sockets
+# and subprocesses a provider CLI needs stay available.
+PROVIDER_SANDBOX_DEFAULT_DENIED_SYSCALLS = (
+    "mount", "umount2", "pivot_root", "chroot",
+    "fsopen", "fsconfig", "fsmount", "move_mount", "open_tree",
+    "open_by_handle_at", "name_to_handle_at",
+    "ptrace", "process_vm_readv", "process_vm_writev",
+    "setns", "unshare",
+    "kexec_load", "kexec_file_load", "init_module", "finit_module", "delete_module",
+    "bpf", "perf_event_open",
+    "keyctl", "add_key", "request_key",
+)
+
 
 def _egress_policy_path() -> Path:
     override = os.environ.get("LH_EGRESS_POLICY", "").strip()
@@ -96,6 +115,52 @@ def load_egress_policy() -> tuple[dict[str, Any], str]:
     ):
         raise ExecutionFenceUnavailable("egress_policy_invalid")
     return policy, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def load_local_provider_policy() -> tuple[dict[str, Any], str]:
+    """The policy for a local provider launch; any defect refuses the launch.
+
+    Same artefact and schema as ``load_egress_policy`` but without the Orca
+    control-plane section: a local launch has no control plane to pin.  The
+    provider-sandbox profile, on the other hand, is mandatory here."""
+    path = _egress_policy_path()
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ExecutionFenceUnavailable("egress_policy_unreadable") from exc
+    try:
+        policy = json.loads(raw)
+    except ValueError as exc:
+        raise ExecutionFenceUnavailable("egress_policy_invalid") from exc
+    if (
+        not isinstance(policy, dict)
+        or policy.get("schema") != EGRESS_POLICY_SCHEMA
+        or policy.get("enforced_by") != EGRESS_POLICY_ENFORCED_BY
+        or not isinstance(policy.get("providers"), dict)
+    ):
+        raise ExecutionFenceUnavailable("egress_policy_invalid")
+    if not isinstance(policy.get("provider_sandbox_profile"), dict):
+        raise ExecutionFenceUnavailable("egress_policy_sandbox_profile_missing")
+    return policy, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def validate_local_provider(
+    policy: Mapping[str, Any],
+    agent: str,
+    *,
+    provider_path: str,
+    provider_digest: str | None,
+) -> dict[str, Any]:
+    """The provider entry a local launch may use: listed and pinned by digest."""
+    provider_policy = (policy.get("providers") or {}).get(agent)
+    if not isinstance(provider_policy, dict):
+        raise ExecutionFenceUnavailable("egress_policy_provider_not_listed")
+    if (
+        provider_policy.get("path") != provider_path
+        or provider_policy.get("sha256") != provider_digest
+    ):
+        raise ExecutionFenceUnavailable("egress_policy_provider_mismatch")
+    return provider_policy
 
 
 def validate_egress_provider(
@@ -272,6 +337,22 @@ class ExecutionFencePort(ABC):
         binaries and a signed budget (decision packet, sandbox)."""
         argv = [str(request.get("orca_cli") or "orca"), *compose_control_argv(request)]
         return self.launch(descriptor, argv, timeout_seconds=timeout_seconds)
+
+    def launch_provider(
+        self,
+        descriptor: Mapping[str, Any],
+        provider_argv: Sequence[str],
+        *,
+        env_overlay: Mapping[str, str] | None = None,
+        input_text: str | None = None,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        """Start the one provider a local-provider descriptor admits.
+
+        Only a kernel backend that applies the signed provider-sandbox profile
+        itself implements this; every other port refuses."""
+        del descriptor, provider_argv, env_overlay, input_text, timeout_seconds
+        raise ExecutionFenceUnavailable("local_provider_unsupported")
 
 
 class DisabledExecutionFencePort(ExecutionFencePort):

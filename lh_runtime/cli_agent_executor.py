@@ -98,6 +98,7 @@ ProviderBinding = dict[str, str]
 ORCA_OUTPUT_LIMIT = 800
 ORCA_CONTROL_TIMEOUT_SECONDS = 30.0
 ORCA_BINDING_PROVIDER_ID = "lh_terminal"
+LOCAL_BINDING_PROVIDER_ID = "lh_local"
 WSL_HOST_KIND_ENV = "ORCA_ORCHESTRATION_COMPATIBILITY_HOST_KIND"
 
 
@@ -255,27 +256,47 @@ def _bind_orca_provider_argv(agent: str, provider_argv: list[str], binding: Any)
     option.  The wrapper therefore scopes an env overlay to its child shell,
     while Codex uses its documented per-invocation config flags. Kimi is retired.
     """
+    return _bind_provider_argv(
+        agent,
+        provider_argv,
+        binding,
+        provider_id=ORCA_BINDING_PROVIDER_ID,
+        provider_name="LH per-terminal",
+        host="Orca",
+    )
+
+
+def _bind_provider_argv(
+    agent: str,
+    provider_argv: list[str],
+    binding: Any,
+    *,
+    provider_id: str,
+    provider_name: str,
+    host: str,
+) -> tuple[list[str], dict[str, str], dict[str, str] | None]:
+    """Bind one provider tuple through the provider's own per-invocation flags."""
     _refuse_kimi(agent, provider_argv[0] if provider_argv else None)
     if binding is None:
         return provider_argv, {}, None
     normalized = _validate_provider_binding(binding, agent=agent)
     if agent == "codex":
         if len(provider_argv) < 2 or provider_argv[1] != "exec":
-            raise ValueError("Codex Orca provider argv must begin with 'codex exec'")
+            raise ValueError(f"Codex {host} provider argv must begin with 'codex exec'")
         base_url = json.dumps(normalized["base_url"])
         provider_config = (
-            f'model_providers.{ORCA_BINDING_PROVIDER_ID}={{name="LH per-terminal",'
+            f'model_providers.{provider_id}={{name="{provider_name}",'
             f"base_url={base_url},wire_api=\"responses\"}}"
         )
         bound_argv = [
             *provider_argv[:2],
             "-c", provider_config,
-            "-c", f'model_provider="{ORCA_BINDING_PROVIDER_ID}"',
+            "-c", f'model_provider="{provider_id}"',
             "-m", normalized["model"],
             *provider_argv[2:],
         ]
         return bound_argv, {}, {"runner": agent, "model": normalized["model"], "mode": "codex_argv"}
-    raise ValueError(f"Orca provider binding needs an explicit adapter for agent {agent!r}")
+    raise ValueError(f"{host} provider binding needs an explicit adapter for agent {agent!r}")
 
 
 def _orca_command(provider_argv: list[str], *, output_path: Path | None = None, env_overlay: dict[str, str] | None = None) -> str:
@@ -622,6 +643,100 @@ def make_orca_agent(
     return execution_fences.mark_mutation_adapter(
         model,
         adapter_id=f"orca-{agent}",
+    )
+
+
+def make_local_provider_agent(
+    agent: str, *, timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
+    usage_parser: UsageParser | None = None,
+    provider_argv_builder: ArgvBuilder | None = None,
+    provider_binding: ProviderBinding | None = None, model: str | None = None,
+    execution_fence_port: execution_fences.ExecutionFencePort | None = None,
+) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
+    """Run one provider directly in the local provider sandbox -- no Orca.
+
+    The fence backend starts the pinned provider under the descriptor-signed
+    provider-sandbox profile (bubblewrap bind set, provider seccomp table,
+    host network).  The provider-binding tuple travels through the same
+    per-invocation provider flags the Orca adapter uses."""
+    _refuse_kimi(agent)
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    if provider_binding is not None and model is not None:
+        raise ValueError("model and provider_binding are mutually exclusive")
+    if provider_argv_builder is None:
+        if agent != "codex":
+            raise ValueError(f"unknown local provider agent: {agent!r}")
+        provider_argv_builder = lambda prompt: hosted_provider_argv(agent, prompt, model)  # noqa: E731
+    if agent == "codex" and usage_parser is None:
+        # --ephemeral --json stdout is the per-invocation usage boundary.
+        usage_parser = codex_usage.extract_usage_from_jsonl
+    fence_port = (
+        execution_fence_port
+        if execution_fence_port is not None
+        else execution_fences.DisabledExecutionFencePort()
+    )
+
+    def model_runner(workspace: Path, capsule: dict[str, Any]) -> dict[str, Any]:
+        del workspace  # the clone is the descriptor's; the fence enforces it
+        descriptor = _adapter_descriptor(capsule)
+        prompt_text = build_prompt(capsule)
+        provider_argv = list(provider_argv_builder(prompt_text))
+        _refuse_kimi(provider_argv[0] if provider_argv else None)
+        provider_argv, provider_env, binding_projection = _bind_provider_argv(
+            agent,
+            provider_argv,
+            provider_binding,
+            provider_id=LOCAL_BINDING_PROVIDER_ID,
+            provider_name="LH local",
+            host="local",
+        )
+        provider_argv[0] = resolve_cli(provider_argv[0])
+        input_binding_records = _input_binding_gate(
+            capsule, prompt_text, provider_argv, provider_env, descriptor)
+        proc = fence_port.launch_provider(
+            descriptor,
+            provider_argv,
+            env_overlay=provider_env,
+            timeout_seconds=timeout_seconds,
+        )
+        stdout = proc.stdout or ""
+        usage: dict[str, Any] | None = None
+        try:
+            if usage_parser is not None:
+                usage = usage_parser(stdout)
+        except Exception:  # A parse failure must not fabricate usage; stay unknown.
+            usage = None
+        if binding_projection is not None and isinstance(usage, dict) and usage.get("state") == token_cost.USAGE_MEASURED:
+            # Same rule as the Orca adapter: a bound endpoint may price
+            # differently, so token counts do not imply the default cost table.
+            usage = token_cost.unknown_usage(
+                model=str(usage.get("model") or binding_projection.get("model") or agent),
+                reason="local provider binding has no verified usage/cost attribution",
+            )
+        if not isinstance(usage, dict) or usage.get("state") not in {token_cost.USAGE_MEASURED, token_cost.USAGE_UNKNOWN}:
+            usage = token_cost.unknown_usage(model=agent, reason="local provider usage unavailable")
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"{agent} in the local provider sandbox exited {proc.returncode}: "
+                f"{((proc.stderr or '') or stdout)[-400:]}"
+            )
+        execution: dict[str, Any] = {"backend": "local", "agent": agent, "exit_code": proc.returncode}
+        if binding_projection is not None:
+            execution["provider_binding"] = binding_projection
+        result = {
+            "summary": f"{agent} executor completed in the local provider sandbox",
+            "stdout_tail": stdout[-800:],
+            "usage": usage,
+            "execution": execution,
+        }
+        if input_binding_records is not None:
+            result.update(input_binding_records)
+        return result
+
+    return execution_fences.mark_mutation_adapter(
+        model_runner,
+        adapter_id=f"{execution_fences.LOCAL_PROVIDER_ADAPTER_PREFIX}{agent}",
     )
 
 
@@ -1076,6 +1191,15 @@ def make_named_cli_agent(
             timeout_seconds=timeout_seconds,
             execution_fence_port=execution_fence_port,
         )
+    if name == "local":
+        agent = _local_agent_name(provider_binding)
+        return make_local_provider_agent(
+            agent=agent,
+            provider_binding=provider_binding,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            execution_fence_port=execution_fence_port,
+        )
     if provider_binding is not None:
         raise ValueError("provider_binding is supported only by the Orca execution host adapter")
     builders: dict[str, ArgvBuilder] = {
@@ -1111,3 +1235,24 @@ def _configured_orca(**kwargs: Any) -> Callable[[Path, dict[str, Any]], dict[str
 
 
 ORCA = _configured_orca
+
+
+def _local_agent_name(provider_binding: Any) -> str:
+    """The provider a local run starts: the binding's runner, else explicit config."""
+    agent = (
+        provider_binding["runner"]
+        if isinstance(provider_binding, dict) and isinstance(provider_binding.get("runner"), str)
+        else os.environ.get("LH_LOCAL_PROVIDER_AGENT", "").strip()
+    )
+    if not agent:
+        raise ValueError(
+            "local provider is not configured; set LH_LOCAL_PROVIDER_AGENT or pass provider_binding"
+        )
+    return agent
+
+
+def _configured_local(**kwargs: Any) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
+    return make_local_provider_agent(agent=_local_agent_name(kwargs.get("provider_binding")), **kwargs)
+
+
+LOCAL = _configured_local
