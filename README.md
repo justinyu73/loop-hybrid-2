@@ -112,6 +112,7 @@ flowchart TB
 設定方式：
 
 ```sh
+export LH_PROVIDER_NAMES=codex                                # 先宣告 provider：init 只釘住已宣告的 provider
 python3 -B lh_runtime/instance_config.py init --config ~/.config/loop-hybrid/instance.json
 export LH_EXECUTION_FENCE_BACKEND=linux-bubblewrap-seccomp   # 需 bubblewrap 0.9.0 + libseccomp
 export LH_EGRESS_POLICY=<state root>/egress-policy.json       # init 產生
@@ -119,7 +120,7 @@ export LH_LOCAL_PROVIDER_AGENT=codex                          # 或改傳 provid
 python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --executor local --execute
 ```
 
-Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`；只有偵測到 Orca 二進位時才會釘住 Orca。Codex 的 provider home 只需要 `auth.json`；`config.toml` 存在時才會以唯讀方式掛入。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
+provider 採明示宣告：沒有用 `LH_PROVIDER_NAMES`（或 `LH_CODEX_CLI`）宣告的 provider 不會寫入 policy，fence 會在 prepare 拒絕（run 停在 `human_required`，不會呼叫 provider）。Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`；只有偵測到 Orca 二進位時才會釘住 Orca。Codex 的 provider home 只需要 `auth.json`；`config.toml` 存在時才會以唯讀方式掛入。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
 
 實測工具 `lh_runtime/local_provider_live_smoke.py` 會用暫存目錄跑一個 Goal（請 provider 建立 `src/hello.txt`），完整走過 instance init → manual intent → `goal_loop_run(executor="local")` → provider 沙箱 → 驗證器 → receipt：
 
@@ -130,7 +131,7 @@ python3 -B lh_runtime/local_provider_live_smoke.py --dry-run
 LH_LOCAL_PROVIDER_LIVE=1 python3 -B lh_runtime/local_provider_live_smoke.py --execute
 ```
 
-通過條件：run 為 `verified`；diff 只有 `src/hello.txt`；來源 repo 不變；receipt 帶有 local provider 三項 proof；usage 為 measured；`CODEX_HOME` 與 `$HOME` 頂層沒有變動；沒有殘留程序。工具會使用 `tests/` 的非 kernel fixture 執行 delivery 檢查（見下方「目前限制」），報告中的 `known_gaps_open` 會如實列出。
+工具會自行宣告 codex，演練與真實執行走同一條宣告路徑。通過條件：policy 已釘住 codex；run 為 `verified`；diff 只有 `src/hello.txt`；來源 repo 不變；receipt 帶有 local provider 三項 proof；usage 為 measured；`CODEX_HOME` 與 `$HOME` 頂層沒有變動；沒有殘留程序。工具會使用 `tests/` 的非 kernel fixture 執行 delivery 檢查（見下方「目前限制」），報告中的 `known_gaps_open` 會如實列出。
 
 ## 安裝
 
