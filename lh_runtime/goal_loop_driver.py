@@ -173,7 +173,11 @@ def _run_driver_loop(
     resumes dispatch with no manual reset.
     """
     sleep = sleep_fn if sleep_fn is not None else time.sleep
-    clock = clock_fn if clock_fn is not None else time.monotonic
+    # perf_counter is monotonic too, but high resolution on every platform;
+    # time.monotonic ticks every ~15.6 ms on Windows, so back-to-back
+    # heartbeats could repeat a timestamp.  Values are only compared within
+    # this process.
+    clock = clock_fn if clock_fn is not None else time.perf_counter
     pause = Path(pause_flag) if pause_flag is not None else None
     snapshot_out = Path(status_snapshot_out) if status_snapshot_out is not None else None
     heartbeat_out = default_heartbeat_path(worker.run_store.root)
