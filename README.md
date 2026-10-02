@@ -119,7 +119,18 @@ export LH_LOCAL_PROVIDER_AGENT=codex                          # 或改傳 provid
 python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --executor local --execute
 ```
 
-Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`；只有偵測到 Orca 二進位時才會釘住 Orca。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
+Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`；只有偵測到 Orca 二進位時才會釘住 Orca。Codex 的 provider home 只需要 `auth.json`；`config.toml` 存在時才會以唯讀方式掛入。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
+
+實測工具 `lh_runtime/local_provider_live_smoke.py` 會用暫存目錄跑一個 Goal（請 provider 建立 `src/hello.txt`），完整走過 instance init → manual intent → `goal_loop_run(executor="local")` → provider 沙箱 → 驗證器 → receipt：
+
+```sh
+# 不需任何帳號、不呼叫模型；Linux + bubblewrap 上以替身 provider 演練整條鏈路（gate 也會跑）
+python3 -B lh_runtime/local_provider_live_smoke.py --dry-run
+# 真實 Codex 一次：需已登入的 codex、bubblewrap 0.9.0、libseccomp；stage 只允許 1 次 attempt
+LH_LOCAL_PROVIDER_LIVE=1 python3 -B lh_runtime/local_provider_live_smoke.py --execute
+```
+
+通過條件：run 為 `verified`；diff 只有 `src/hello.txt`；來源 repo 不變；receipt 帶有 local provider 三項 proof；usage 為 measured；`CODEX_HOME` 與 `$HOME` 頂層沒有變動；沒有殘留程序。工具會使用 `tests/` 的非 kernel fixture 執行 delivery 檢查（見下方「目前限制」），報告中的 `known_gaps_open` 會如實列出。
 
 ## 安裝
 
@@ -164,6 +175,8 @@ python3 -B lh_runtime/goal_loop_run.py \
 - 每個 attempt 產生 receipt（含 usage）；`status_snapshot_out` 指向的檔案會得到即時狀態投影。
 - `runtime/loop-pause`（或 contract 的 `pause_flag`）存在即於下一個 tick 安全停止。
 
+> **目前限制**：引擎要求每個 run 都有 delivery 綁定（stage 的 delivery contract／plan／packet），delivery 檢查也必須經由 delivery command runner 執行。只有 campaign 的 contract（例如範例 contract）送出的 run 會停在 `planning_required`（`delivery_binding_missing`），不會呼叫模型。目前唯一的正式 command runner 來自 contract 的 `planner_recovery`（native-run 綁定），還需要 execution binding、provider registry 與 dispatch envelope；本 README 尚未提供這些範本。`lh_runtime/local_provider_live_smoke.py` 與 `lh_runtime/b12_live_smoke_canary.py` 示範了以 `tests/` fixture 補上 delivery 綁定與 command runner 後跑通的完整鏈路。
+
 ### 4. 驗收紀律
 
 「完成」只由 committed canary / lamp 證明；模型輸出永不構成驗收。
@@ -204,7 +217,7 @@ python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json 
 ```
 
 鏈路：intent → admission → disposable clone 執行 → 燈 + value gate → receipt →
-（多 stage 時）自動派生下一 stage。`--status-snapshot-out` 給即時狀態投影；
+（多 stage 時）自動派生下一 stage。前提是每個 run 都有 delivery 綁定與 command runner，見「使用」第 3 節的「目前限制」。`--status-snapshot-out` 給即時狀態投影；
 cron/systemd timer 定期呼叫同一指令即成常駐（每次都是有界 session，重啟可續）。
 
 ### D. 讀結果

@@ -64,6 +64,8 @@ CODEX_TRANSIENT_HOME = "/tmp/codex-home"
 LOCAL_PROVIDER_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 LOCAL_PROVIDER_RESERVED_ENV = frozenset({"PATH", "HOME", "TMPDIR", "CODEX_HOME"})
 CODEX_PROVIDER_HOME_FILES = ("auth.json", "config.toml")
+# A default Codex login has auth.json only; config.toml is bound when present.
+CODEX_PROVIDER_OPTIONAL_HOME_FILES = frozenset({"config.toml"})
 
 # The child receives an already-open, Attempt-bound stdio channel.  Creation
 # of alternate network, socket, IPC, signal, namespace, or process-control
@@ -204,6 +206,8 @@ def normalize_sandbox_profile(
         for name in CODEX_PROVIDER_HOME_FILES:
             source = source_home / name
             if not source.is_file():
+                if name in CODEX_PROVIDER_OPTIONAL_HOME_FILES:
+                    continue
                 raise ExecutionFenceUnavailable(
                     f"egress_policy_codex_provider_file_missing:{name}"
                 )
