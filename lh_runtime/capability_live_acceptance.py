@@ -383,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap_authority = _bootstrap_authority(Path(args.host_root).resolve())
         os.environ["LH_TRUSTED_BOOTSTRAP_ROOT"] = bootstrap_authority["root"]
         orca_cli_path = _resolve_live_orca_cli()
-        # prepare() pins the Orca CLI from LH_ORCA_CLI (B-line launch classes);
+        # prepare() pins the Orca CLI from LH_ORCA_CLI (sandbox launch classes);
         # export the resolved path so the pin and the port agree.
         os.environ["LH_ORCA_CLI"] = orca_cli_path
         fence_port = execution_fences.configured_execution_fence()

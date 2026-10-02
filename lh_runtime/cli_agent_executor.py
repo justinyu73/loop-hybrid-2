@@ -473,7 +473,7 @@ def make_orca_agent(
             "worktree_selector": _orca_worktree_selector(workspace),
             "title": f"LH {agent} attempt {capsule.get('run_id')}#{capsule.get('attempt')}",
             # The fence composes the terminal command itself; an adapter never
-            # passes a free-form --command string (B-line packet constraint 2).
+            # passes a free-form --command string (sandbox packet constraint 2).
             "provider_argv": provider_argv,
             "output_path": str(provider_output_path),
             "env_overlay": provider_env,

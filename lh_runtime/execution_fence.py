@@ -26,8 +26,8 @@ BINDING_SCHEMA_V2 = "lh-execution-fence-binding/v2"
 PROOF_SCHEMA = "lh-execution-fence-proof/v1"
 ERROR_CODE = "execution_fence_unavailable"
 
-# Launch classes (B-line egress mediation, decision packet
-# docs/active/lh-auto-runner-gap-review-plan.md#lh-b-line-egress-mediation-decision-packet):
+# Launch classes (sandbox egress mediation, decision packet
+# docs/active/lh-auto-runner-gap-review-plan.md#lh-egress-mediation-decision-packet):
 # `control` launches are LH's own RPCs to the Orca control plane -- they run
 # OUTSIDE the kernel sandbox (orca.exe cannot start under --unshare-all) but
 # only through the structured request schema below, against binaries pinned
@@ -59,7 +59,7 @@ REQUIRED_PROOF_TRACKS = (
 )
 PROVIDER_SANDBOX_ENFORCED_BY = "lh-client-composed"
 
-# host-bline-egress-endpoint: the host-side egress policy is an HOST-owned,
+# lh-egress-endpoint: the host-side egress policy is an HOST-owned,
 # registry-bound artefact; the fence reads it at prepare() and refuses a
 # control plane the policy does not declare. This is client-side preflight
 # and provenance -- the policy names its own `enforced_by` so a receipt can
@@ -269,7 +269,7 @@ class ExecutionFencePort(ABC):
         Default: compose the closed argv and delegate to ``launch`` -- fixture
         and disabled ports keep their existing behavior. Kernel backends
         override this to run OUTSIDE the sandbox under descriptor-pinned
-        binaries and a signed budget (decision packet, B-line)."""
+        binaries and a signed budget (decision packet, sandbox)."""
         argv = [str(request.get("orca_cli") or "orca"), *compose_control_argv(request)]
         return self.launch(descriptor, argv, timeout_seconds=timeout_seconds)
 

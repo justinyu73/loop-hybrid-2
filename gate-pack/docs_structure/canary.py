@@ -15,7 +15,7 @@ Checks:
   instructions (P3: any "read these N files in order" directive is deleted).
 - CLI convention mirrors: when the same skill name has a tracked SKILL.md under
   both .claude/skills/ and .codex/skills/, their contents must be identical
-  (P7 exception: mirrors are allowed only if generated or compared).
+  (Exception: mirrors are allowed only if generated or compared).
 
 Usage:
   python3 gate-pack/docs_structure/canary.py              # check; exit 1 if RED

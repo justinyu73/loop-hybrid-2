@@ -304,7 +304,7 @@ def main() -> int:
             and proofs["provider_control_egress"].get("result") == "admissible"
             # A mutation launch runs under this kernel fence itself; the
             # provider_sandbox track honestly reports there is nothing hosted
-            # for a composed sandbox to apply to (host-bline-provider-sandbox).
+            # for a composed sandbox to apply to (lh-provider-sandbox).
             and proofs["provider_sandbox"].get("result") == "not_applicable",
             {track: row.get("result") for track, row in proofs.items()},
         ))

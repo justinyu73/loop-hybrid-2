@@ -191,7 +191,7 @@ def _fixture(root: Path) -> tuple[Path, Path, str, dict[str, Any]]:
             "definition_digest": _digest(check),
         }],
     }
-    packet_path = host / "docs" / "codex-handoff" / "packet.json"
+    packet_path = host / "docs" / "handoff" / "packet.json"
     _write_json(packet_path, packet)
     return target, packet_path, base_revision, assignment
 
@@ -227,7 +227,7 @@ def main() -> int:
 
             tampered = json.loads(packet_path.read_text(encoding="utf-8"))
             tampered["assignment_digest"] = "sha256:" + "0" * 64
-            tampered_path = root / "host" / "docs" / "codex-handoff" / "tampered.json"
+            tampered_path = root / "host" / "docs" / "handoff" / "tampered.json"
             _write_json(tampered_path, tampered)
             try:
                 assignment_packet.load_assignment_packet(

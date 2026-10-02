@@ -292,7 +292,7 @@ def bootstrap_authority_for_source(original, root):
     historical = read_at(original["root"], relative)
     _require("sha256:" + hashlib.sha256(historical).hexdigest()
         == original["authority_digest"], "bootstrap_original_authority_drift")
-    path = "docs/codex-handoff/p8-repo-source/BOOTSTRAP-AUTHORITY-TRANSITION.json"
+    path = "docs/bootstrap/BOOTSTRAP-AUTHORITY-TRANSITION.json"
     transition_raw = read_at(root, path)
     _require(hashlib.sha256(transition_raw).hexdigest()
         == "491f7e95ee2d5459847b872f0f4ebb6fc017c7e4bac4c37d3b053b54bd57be99",
@@ -301,7 +301,7 @@ def bootstrap_authority_for_source(original, root):
     identity = {k: original[k] for k in fields - {"root"}}
     replacement = {**identity, "authority_digest": observed}
     _require(transition.get("schema") == "host-bootstrap-authority-source-transition/v1"
-        and transition.get("decision_id") == "HOST-P8-BOOTSTRAP-AUTHORITY-TRANSITION-20260923-1"
+        and transition.get("decision_id") == "LH-BOOTSTRAP-AUTHORITY-TRANSITION-001"
         and transition.get("supersedes") == identity
         and transition.get("replacement") == replacement
         and transition.get("allowed_binding_changes") == ["root", "authority_digest"]

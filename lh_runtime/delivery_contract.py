@@ -3,7 +3,7 @@
 This module is deliberately independent from external host.  It validates the immutable
 contract emitted by a planner, seals the plan verdict, binds a packet, and
 grades the durable evidence produced by the LH runtime.  The compatibility
-module under ``tools/`` supplies the historical P7 canonical path; this file
+module under ``tools/`` supplies the historical canonical path; this file
 never imports that path or a Goal-specific constant.
 """
 
@@ -26,7 +26,7 @@ DELIVERY_SCHEMA = "host-delivery-unit-delivery-verdict/v1"
 ADMISSION_SCHEMA = "host-delivery-unit-admission/v1"
 LEGACY_SIDECAR_SCHEMA = "host-delivery-unit-legacy-sidecar/v1"
 PLANNING_REQUEST_SCHEMA = "lh-delivery-planning-request/v1"
-REPAIRED_CANDIDATE_SCHEMA = "host-p7-checks-repair-candidate-evidence/v1"
+REPAIRED_CANDIDATE_SCHEMA = "lh-checks-repair-candidate-evidence/v1"
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}")
@@ -556,7 +556,7 @@ def recovery_executor_receipt(
             require(value == admission.get(field), "admission_" + field)
         identity[field] = value
     body = {
-        "schema": "host-p7-candidate-recovery-executor-receipt/v1",
+        "schema": "lh-candidate-recovery-executor-receipt/v1",
         "status": "unknown_preserved", "executor_status": "unknown", **identity,
         "contract_digest": admission["delivery_contract_digest"],
         "unit_id": packet_admission["unit_id"],
@@ -582,7 +582,7 @@ def repaired_candidate_evidence(
     def require(ok: bool, reason: str) -> None:
         if not ok:
             raise DeliveryUnitError("delivery_repaired_candidate_" + reason)
-    require(isinstance(binding, Mapping) and binding.get("schema") == "host-p7-checks-repair-binding/v1"
+    require(isinstance(binding, Mapping) and binding.get("schema") == "lh-checks-repair-binding/v1"
             and binding.get("repair_digest") == digest_json(_without(binding, "repair_digest")), "binding_seal")
     sources = ((original_candidate, "candidate"), (original_checks, "checks"), (repaired_checks, "checks_repair"))
     for value, phase in sources:
@@ -600,7 +600,7 @@ def repaired_candidate_evidence(
             == original_checks.get("candidate_digest")
             and binding.get("candidate_after_digest") == repaired_checks.get("candidate_digest"), "source_link")
     lineage = repaired_checks.get("checks_repair")
-    require(isinstance(lineage, Mapping) and lineage.get("schema") == "host-p7-checks-repair-evidence/v1", "lineage_missing")
+    require(isinstance(lineage, Mapping) and lineage.get("schema") == "lh-checks-repair-evidence/v1", "lineage_missing")
     for field in ("repair_id", "repair_digest", "original_candidate_receipt_digest", "original_checks_receipt_digest",
                   "candidate_before_digest", "candidate_after_digest", "checks_command_digest", "predecessor_receipt_digest"):
         require(lineage.get(field) == binding.get(field), "lineage_" + field)
@@ -826,7 +826,7 @@ def verify_delivery(
         def _verify_recovery_executor(value: Any) -> bool:
             if not isinstance(recovery_evidence, Mapping) or not isinstance(value, Mapping):
                 return False
-            if value.get("schema") != "host-p7-candidate-recovery-executor-receipt/v1":
+            if value.get("schema") != "lh-candidate-recovery-executor-receipt/v1":
                 return False
             if value.get("status") != "unknown_preserved" or value.get("executor_status") != "unknown":
                 return False

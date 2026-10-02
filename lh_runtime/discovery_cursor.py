@@ -1,4 +1,4 @@
-"""P9-5 D4/D9: deterministic, bounded, resumable event cursor at the task-area tick.
+"""D4/D9: deterministic, bounded, resumable event cursor at the task-area tick.
 
 The cursor reads only the event types an approved binding declares as signals, in
 Store ``rowid`` order with a SQL ``LIMIT``. It never scans history, never reads its

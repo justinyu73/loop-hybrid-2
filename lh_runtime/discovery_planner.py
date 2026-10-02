@@ -1,4 +1,4 @@
-"""P9-5 D1/D3/D6/D7: goal-level Planner consumer for discovery candidates.
+"""D1/D3/D6/D7: goal-level Planner consumer for discovery candidates.
 
 The D4/D9 cursor records bounded candidates. This consumer turns each one into a single durable
 request, a controlled Planner call, an independent verification and a durable decision, without a

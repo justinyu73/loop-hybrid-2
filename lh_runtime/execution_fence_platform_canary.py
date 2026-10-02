@@ -252,7 +252,7 @@ def main() -> int:
         },
         "verification": {
             "command": "python3 -B lh_runtime/execution_fence_platform_canary.py",
-            "authority": "docs/codex-handoff/lh-host-productization-plan.md#p4-cross-platform-execution-fence",
+            "authority": "docs/platform-portability.md#cross-platform-execution-fence",
         },
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

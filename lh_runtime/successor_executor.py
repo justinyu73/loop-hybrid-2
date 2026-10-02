@@ -57,7 +57,7 @@ class SuccessorExecutorError(ValueError):
 
 
 class SuccessorExecutorPort(Protocol):
-    """Provider-neutral port consumed after P7 queue admission."""
+    """Provider-neutral port consumed after successor queue admission."""
 
     def dispatch(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         """Accept one idempotent packet and return digest-bound task evidence."""
@@ -573,7 +573,7 @@ class DurableTaskExecutorAdapter:
 
 
 class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
-    """Execute one P7 packet through the installed Codex subscription CLI.
+    """Execute one successor packet through the installed Codex subscription CLI.
 
     This is an explicit host adapter, not a resident watcher and not an API
     client.  The fleet scheduler selects it only for the explicit

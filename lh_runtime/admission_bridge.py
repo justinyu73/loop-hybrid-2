@@ -299,7 +299,7 @@ class GoalAdmissionBridge:
             run_goal["goal_revision"] = int(revision["revision"])
         # Carry the immutable generic delivery binding from the persisted Goal
         # revision into the Run.  No default contract is invented from a
-        # campaign name or P7-shaped metadata; absent binding is handled by
+        # campaign name or phase-shaped metadata; absent binding is handled by
         # RunStore as a durable planning request.
         revision_goal = goal.get("current_revision", {}).get("goal") if isinstance(goal.get("current_revision"), dict) else None
         persisted_envelope = revision_goal.get("admission_envelope") if isinstance(revision_goal, dict) else None

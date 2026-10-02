@@ -138,7 +138,7 @@ def _prepare_root() -> Path:
 def _binding(clone: Path) -> dict[str, Any]:
     return fences.build_attempt_binding(
         goal={
-            "goal_id": "HOST-TOPOLOGY-OPTIMIZATION-018",
+            "goal_id": "LH-EXAMPLE-GOAL-002",
             "node_id": "N03",
         },
         run_id="run-n03-fixture",
@@ -752,8 +752,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    # ---- B-line launch classes (decision packet
-    # docs/active/lh-auto-runner-gap-review-plan.md#lh-b-line-egress-mediation-decision-packet)
+    # ---- sandbox launch classes (decision packet
+    # docs/active/lh-auto-runner-gap-review-plan.md#lh-egress-mediation-decision-packet)
     bin_dir = root / "control-bin"
     bin_dir.mkdir()
     fake_orca = bin_dir / "fixture-orca"
@@ -835,8 +835,8 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["LH_EGRESS_POLICY"] = str(policy_path)
     try:
         host_binding = fences.build_attempt_binding(
-            goal={"goal_id": "HOST-TOPOLOGY-OPTIMIZATION-018", "node_id": "B-line"},
-            run_id="run-bline-fixture",
+            goal={"goal_id": "LH-EXAMPLE-GOAL-002", "node_id": "sandbox"},
+            run_id="run-sandbox-fixture",
             attempt=1,
             attempt_fence=1,
             base_revision="2b5498e4d9c80abab62658f4c73415f3a48f97a4",
@@ -846,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
             adapter_version="v1",
             timeout_seconds=60,
             now=FIXED_TIME,
-            nonce="bline-controller-nonce-fixture",
+            nonce="sandbox-controller-nonce-fixture",
         )
         host_fence = fences.LinuxBubblewrapExecutionFence.discover(
             clock=lambda: FIXED_TIME,
@@ -948,7 +948,7 @@ def main(argv: list[str] | None = None) -> int:
                 str(fake_provider), "exec", "--json", "-m", "model-x", "do the thing",
             ],
             "worktree_selector": f"path:{clone}",
-            "title": "bline-fixture",
+            "title": "sandbox-fixture",
         }
         argv_fence = fences.LinuxBubblewrapExecutionFence.discover(
             clock=lambda: FIXED_TIME
@@ -1175,7 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-        # ---- host-bline-provider-sandbox (packet §7 v2, exam cases a-e)
+        # ---- lh-provider-sandbox (packet §7 v2, exam cases a-e)
         plane_sandbox = (host_descriptor.get("control_plane") or {}).get(
             "provider_sandbox"
         ) or {}

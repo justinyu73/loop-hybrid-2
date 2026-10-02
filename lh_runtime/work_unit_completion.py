@@ -21,8 +21,8 @@ import sys
 from .work_unit_store import WorkUnitStore, digest_json
 from .runner_adapter import PhaseJobPending
 
-CANDIDATE_RECOVERY_ADMISSION_SCHEMA = "host-p7-candidate-recovery-admission/v1"
-CHECKS_REPAIR_BINDING_SCHEMA = "host-p7-checks-repair-binding/v1"
+CANDIDATE_RECOVERY_ADMISSION_SCHEMA = "lh-candidate-recovery-admission/v1"
+CHECKS_REPAIR_BINDING_SCHEMA = "lh-checks-repair-binding/v1"
 
 try:
     from . import delivery_contract as delivery_unit_contract
@@ -165,14 +165,14 @@ def candidate_inventory(worktree: str, *, env: Mapping[str, str] | None = None) 
             "mode": path.stat().st_mode if path.exists() else None,
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None,
         })
-    return {"schema": "host-p7-candidate-source-inventory/v1", "root": str(root), "head": head,
+    return {"schema": "lh-candidate-source-inventory/v1", "root": str(root), "head": head,
             "files": files, "candidate_digest": candidate_digest(str(root), env=readonly)}
 
 
 def candidate_inventory_digest(inventory: Mapping[str, Any]) -> str:
     if isinstance(inventory, (str, Path)):
         inventory = candidate_inventory(str(inventory))
-    if not isinstance(inventory, Mapping) or inventory.get("schema") != "host-p7-candidate-source-inventory/v1":
+    if not isinstance(inventory, Mapping) or inventory.get("schema") != "lh-candidate-source-inventory/v1":
         raise ValueError("candidate_recovery_source_inventory_invalid")
     return digest_json(dict(inventory))
 
@@ -252,7 +252,7 @@ def candidate_diff_digest(worktree: str, base_sha: str, *, env: Mapping[str, str
 
 
 def validate_checks_repair_binding_shape(binding: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the immutable, self-sealed shape of a P7 checks repair binding.
+    """Validate the immutable, self-sealed shape of a checks repair binding.
 
     Identity and source/runtime readback are checked by the controller and the
     task-area entrypoint.  This helper only checks the portable admission
@@ -412,7 +412,7 @@ class WorkUnitCompletionController:
         binding = self.binding_receipt
         if binding is None:
             return
-        if binding.get("schema") != "host-p7-completion-binding/v1" or binding.get("status") != "bound":
+        if binding.get("schema") != "lh-completion-binding/v1" or binding.get("status") != "bound":
             raise ValueError("completion_binding_receipt_invalid")
         supplied = binding.get("receipt_digest")
         body = {key: value for key, value in binding.items() if key != "receipt_digest"}
@@ -1231,7 +1231,7 @@ class WorkUnitCompletionController:
                                                                 env=readonly_env)}
                 if recovery:
                     context["candidate_recovery"] = {
-                        "schema": "host-p7-candidate-recovery-evidence/v1",
+                        "schema": "lh-candidate-recovery-evidence/v1",
                         "admission_id": self.candidate_recovery_admission["admission_id"],
                         "admission_digest": self.candidate_recovery_admission["input_digest"],
                         "source_workspace": source_workspace,
@@ -1254,7 +1254,7 @@ class WorkUnitCompletionController:
                 if checks_repair_preflight is not None:
                     repair = checks_repair_preflight["binding"]
                     context["checks_repair"] = {
-                        "schema": "host-p7-checks-repair-evidence/v1",
+                        "schema": "lh-checks-repair-evidence/v1",
                         "repair_id": repair["repair_id"],
                         "repair_digest": repair["repair_digest"],
                         "original_candidate_receipt_digest": repair["original_candidate_receipt_digest"],

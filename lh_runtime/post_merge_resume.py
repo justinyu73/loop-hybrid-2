@@ -40,10 +40,10 @@ BINDING_REPAIR_SCHEMA = "host-post-merge-pending-watch-binding-repair/v1"
 SUPERSEDE_RECEIPT_SCHEMA = "host-post-merge-pending-watch-supersede/v1"
 SCHEDULER_SCHEMA = "host-post-merge-controller-scheduler/v1"
 EVENT_PORT = "scm_merge_event"
-DEFAULT_GOAL_ID = "HOST-PARALLEL-HARNESS-PRODUCTIZATION-001"
+DEFAULT_GOAL_ID = "LH-EXAMPLE-GOAL-001"
 DEFAULT_GOAL_REVISION = 5
 DEFAULT_NODE_ID = "R3"
-DEFAULT_SUCCESSOR_NODE_ID = "P7"
+DEFAULT_SUCCESSOR_NODE_ID = "successor"
 REQUIRED_BINDING = (
     "repository_id",
     "goal_id",
@@ -1282,7 +1282,7 @@ class BoundedPostMergeResumePoller:
                     state,
                     "completed",
                     pending=False,
-                    reason="p7_dispatched_once",
+                    reason="successor_dispatched_once",
                     controller_result=stored_result,
                     merge_readback=result.get("merge_readback"),
                     ci_readback=result.get("ci_readback"),
@@ -1364,7 +1364,7 @@ class BoundedPostMergeResumePoller:
                             state,
                             "completed",
                             pending=False,
-                            reason="p7_dispatched_once",
+                            reason="successor_dispatched_once",
                             transition_receipt=transition.get("transition_receipt"),
                             successor_dispatch_receipt=dispatch.get("receipt"),
                         )
@@ -1967,7 +1967,7 @@ class PostMergeResumeControllerScheduler:
             "goal_created": 0,
             "runs_created": 0,
             "attempts_created": 0,
-            "p7_dispatches": 1 if status == "completed" else 0,
+            "successor_dispatches": 1 if status == "completed" else 0,
             "transitions": 0,
             "successor_dispatches": 0,
         }
@@ -2153,7 +2153,7 @@ class PostMergeResumeControllerScheduler:
         pending = poll_result.get("pending_resume") is True or poll_status == "waiting"
         if not pending and poll_status in {"completed", "resumed", "duplicate"}:
             outcome, final_status = "completed", "completed"
-            final_reason = str(poll_result.get("reason") or "p7_dispatched_once")
+            final_reason = str(poll_result.get("reason") or "successor_dispatched_once")
         elif poll_status == "rejected":
             outcome, final_status = "rejected", "rejected"
             final_reason = str(poll_result.get("reason") or "poll_rejected")

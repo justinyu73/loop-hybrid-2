@@ -40,9 +40,9 @@ SCHEMA = "lh-parallel-work-unit-store/v1"
 DISPATCH_CONSUMPTION_SCHEMA = "lh-successor-dispatch-consumption/v1"
 DISPATCH_RECEIPT_SCHEMA = "lh-successor-dispatch-receipt/v1"
 EXECUTOR_FAILURE_RECEIPT_SCHEMA = "lh-successor-executor-failure/v1"
-CANDIDATE_RECOVERY_ADMISSION_SCHEMA = "host-p7-candidate-recovery-admission/v1"
-CANDIDATE_RECOVERY_DECISION_ID = "HOST-P7-TIMEOUT-CANDIDATE-RESUME-20260908"
-PRESERVED_RESULT_DECISION_ID = "HOST-P7-PRESERVED-RESULT-RECOVERY-20260911"
+CANDIDATE_RECOVERY_ADMISSION_SCHEMA = "lh-candidate-recovery-admission/v1"
+CANDIDATE_RECOVERY_DECISION_ID = "LH-CANDIDATE-RECOVERY-001"
+PRESERVED_RESULT_DECISION_ID = "LH-PRESERVED-RESULT-RECOVERY-001"
 MAX_EXECUTOR_LAUNCHES = 3
 RECOVERY_RECORD_SCHEMA = "lh-recovery-record/v1"
 RECOVERY_BUDGET_FIELDS = (
@@ -1800,7 +1800,7 @@ class WorkUnitStore:
                     or admission.get("input_digest") != recovery_admission_digest
                     or recovery_row["binding"] != recovery_admission_digest
                     or digest_json({k: v for k, v in admission.items() if k != "input_digest"}) != recovery_admission_digest
-                    or admission.get("schema") != "host-p7-delivery-recovery/v1"
+                    or admission.get("schema") != "lh-delivery-recovery/v1"
                     or admission.get("resume_phase", "integration_checks") != phase
                     or admission.get("repair_id") != repair_id
                     or admission.get("predecessor_receipt_digest") != predecessor_receipt_digest
@@ -1936,7 +1936,7 @@ class WorkUnitStore:
             raise WorkUnitStoreError("read_only_delivery_recovery")
         run_id, attempt, fence = (admission[k] for k in ("run_id", "attempt", "fence"))
         supplied = admission.get("input_digest")
-        if (admission.get("schema") != "host-p7-delivery-recovery/v1"
+        if (admission.get("schema") != "lh-delivery-recovery/v1"
             or supplied != digest_json({k: v for k, v in admission.items() if k != "input_digest"})):
             raise WorkUnitStoreError("delivery_recovery_seal")
         resume_phase = admission.get("resume_phase", "integration_checks")
@@ -6166,9 +6166,9 @@ class WorkUnitStore:
         if preserved and authority.get("kind") != "preserved_result_recovery":
             raise WorkUnitStoreError("preserved_result_authority_kind_invalid")
         value["approved_manifest_context"] = authority
-        if authority.get("schema") not in {None, "host-p7-candidate-recovery-authority/v1"}:
+        if authority.get("schema") not in {None, "lh-candidate-recovery-authority/v1"}:
             raise WorkUnitStoreError("candidate_recovery_approved_manifest_context_invalid")
-        authority["schema"] = "host-p7-candidate-recovery-authority/v1"
+        authority["schema"] = "lh-candidate-recovery-authority/v1"
         approved_digest = authority.get("approved_manifest_digest")
         if (not isinstance(approved_digest, str) or not approved_digest.startswith("sha256:")
             or len(approved_digest) != 71):

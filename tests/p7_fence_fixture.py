@@ -30,7 +30,7 @@ class ExplicitFixtureFence(ExecutionFencePort):
         return dict(environment)
 
     def prepare(self, binding: Mapping[str, Any]) -> dict[str, Any]:
-        return {"schema": "p7-explicit-fixture-launch/v1",
+        return {"schema": "explicit-fixture-launch/v1",
                 "evidence_kind": "non-kernel-fixture",
                 "binding": copy.deepcopy(dict(binding))}
 
@@ -85,7 +85,7 @@ def fixture_command_runner(request: Mapping[str, Any], *, phase: str,
                 process.communicate()
                 raise
             completed = subprocess.CompletedProcess(list(argv), process.returncode, stdout, stderr)
-    return completed, {}, {"schema": "p7-explicit-fixture-command/v1",
+    return completed, {}, {"schema": "explicit-fixture-command/v1",
                            "evidence_kind": "non-kernel-fixture", "phase": phase}
 
 

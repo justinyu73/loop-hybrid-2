@@ -135,7 +135,7 @@ def _packet_path(path: str | Path) -> Path:
         trusted = Path(trusted_value).expanduser().resolve(strict=True)
         if not trusted.is_dir() or not packet.is_relative_to(trusted):
             raise ValueError("assignment packet is outside the trusted external host root")
-        if not packet.is_relative_to(trusted / "docs" / "codex-handoff"):
+        if not packet.is_relative_to(trusted / "docs" / "handoff"):
             raise ValueError("assignment packet is outside the handoff area")
     return packet
 

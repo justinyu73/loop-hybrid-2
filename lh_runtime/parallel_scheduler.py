@@ -123,7 +123,7 @@ class SuccessorDispatchConsumer:
                 if isinstance(candidate_node, Mapping):
                     resolved_node_id = candidate_node.get("id")
         # A pure LH consumer may learn the node only from the sealed envelope;
-        # it must never guess an external host/P7 node at construction time.
+        # it must never guess a successor node at construction time.
         self.node_id = None if resolved_node_id is None else _required_text("node_id", resolved_node_id)
         self.holder = _required_text("holder", holder)
         if float(lease_seconds) < 0:

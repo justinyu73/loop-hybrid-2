@@ -46,7 +46,7 @@ REQUIRED_PROOF_TRACKS = (
     "provider_control_egress",
     "provider_sandbox",
 )
-# host-bline-provider-sandbox: the hosted provider's own containment is composed
+# lh-provider-sandbox: the hosted provider's own containment is composed
 # by this client, not enforced by the execution host -- the proof track says
 # exactly that and no more (packet §7: proof semantics do not upgrade).
 PROVIDER_SANDBOX_ENFORCED_BY = "lh-client-composed"
@@ -146,7 +146,7 @@ def normalize_sandbox_profile(
 ) -> dict[str, Any]:
     """The effective provider-sandbox profile for one agent, as a signed value.
 
-    host-bline-provider-sandbox §7: the profile (bubblewrap pin, bind set,
+    lh-provider-sandbox §7: the profile (bubblewrap pin, bind set,
     network mode, provider seccomp table, env, cwd) comes from the policy
     artefact and is signed into the descriptor at ``prepare()``. Everything
     here is deterministic so ``digest_json`` of the result is stable."""
@@ -388,7 +388,7 @@ def compose_terminal_command(
 
     The fence composes this itself so an adapter never passes a free-form
     ``--command`` string (decision packet constraint 2). With ``sandbox``
-    (host-bline-provider-sandbox), the provider argv is wrapped in the
+    (lh-provider-sandbox), the provider argv is wrapped in the
     descriptor-signed bubblewrap profile; the seccomp program rides an fd
     redirect because a detached terminal string cannot inherit one."""
     argv = [str(item) for item in provider_argv]
@@ -1003,7 +1003,7 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             allowed_results = {"admissible"}
             if track == "provider_control_egress" and hosted:
                 # A host-delegated descriptor must say so -- and only such a
-                # descriptor may (B-line packet constraint 3).
+                # descriptor may (sandbox packet constraint 3).
                 allowed_results = {"delegated_to_execution_host"}
             if track == "provider_sandbox":
                 # Hosted descriptors carry the composed profile; mutation
@@ -1370,7 +1370,7 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
                 clone_root + os.sep
             ):
                 raise ExecutionFenceUnavailable("control_output_path_invalid")
-            # host-bline-provider-sandbox: the profile signed at prepare() is
+            # lh-provider-sandbox: the profile signed at prepare() is
             # the only runtime basis -- the policy artefact is deliberately
             # not re-read here (codex amend 4d).
             sandbox = plane.get("provider_sandbox")

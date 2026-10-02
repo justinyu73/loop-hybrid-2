@@ -124,7 +124,7 @@ def run_cases(root: Path) -> list[dict[str, Any]]:
     store = WorkUnitStore(root / "legacy-store")
     store.create_parent_goal(
         "parent-p3b0",
-        goal_id="HOST-PARALLEL-HARNESS-PRODUCTIZATION-001",
+        goal_id="LH-EXAMPLE-GOAL-001",
         goal_revision=4,
         base_sha="a" * 40,
     )

@@ -74,7 +74,7 @@ def digest_json(value: Any) -> str:
 
 
 def _trusted_role_input(request, *, role, phase, store, authority_digest):
-    """Project a fixed P7 role view from the already bound packet and Store.
+    """Project a fixed successor role view from the already bound packet and Store.
 
     The full controller request still owns process/fence validation. Only this
     closed, bounded projection is sent to the provider and input-attested;
