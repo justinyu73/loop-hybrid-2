@@ -13,8 +13,10 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import shlex
+import signal
 import stat
 import subprocess
 import tempfile
@@ -29,6 +31,8 @@ if __package__:
         ExecutionFencePort, ExecutionFenceUnavailable, PROOF_SCHEMA,
         _validate_provider_argv_against_policy, digest_json, load_egress_policy,
         validate_egress_provider, DisabledExecutionFencePort, validate_phase_roots, validate_null_device_check,
+        LOCAL_PROVIDER_ADAPTER_PREFIX, LOCAL_PROVIDER_LAUNCH_BUDGET, load_local_provider_policy,
+        validate_local_provider,
     )
 else:
     from execution_fence import (
@@ -37,6 +41,8 @@ else:
         ExecutionFencePort, ExecutionFenceUnavailable, PROOF_SCHEMA,
         _validate_provider_argv_against_policy, digest_json, load_egress_policy,
         validate_egress_provider, DisabledExecutionFencePort, validate_phase_roots, validate_null_device_check,
+        LOCAL_PROVIDER_ADAPTER_PREFIX, LOCAL_PROVIDER_LAUNCH_BUDGET, load_local_provider_policy,
+        validate_local_provider,
     )
 
 BACKEND_ID = LINUX_BACKEND_ID
@@ -53,6 +59,10 @@ PROVIDER_SANDBOX_ENFORCED_BY = "lh-client-composed"
 PROVIDER_SECCOMP_PROGRAM_BASENAME = ".lh-provider-seccomp.bpf"
 PROVIDER_SECCOMP_TMP_PREFIX = "lh-host-provider-seccomp-"
 CODEX_TRANSIENT_HOME = "/tmp/codex-home"
+# A local provider's env overlay may add provider-specific variables, but it
+# never replaces a fence-owned value or steers the dynamic loader.
+LOCAL_PROVIDER_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+LOCAL_PROVIDER_RESERVED_ENV = frozenset({"PATH", "HOME", "TMPDIR", "CODEX_HOME"})
 CODEX_PROVIDER_HOME_FILES = ("auth.json", "config.toml")
 
 # The child receives an already-open, Attempt-bound stdio channel.  Creation
@@ -612,6 +622,7 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
         self._control_counts: dict[str, int] = {}
         self.control_audit: dict[str, list[dict[str, Any]]] = {}
         self._provider_seccomp_paths: dict[str, list[str]] = {}
+        self.provider_audit: dict[str, list[dict[str, Any]]] = {}
         # A failed control RPC can occur before the adapter has a terminal
         # handle with which to request cleanup.  The process-exit hook keeps
         # those task-owned temporary files out of the target clone and avoids
@@ -846,6 +857,62 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
                     "profile_digest": digest_json(sandbox_profile),
                 },
             }
+        local_provider: dict[str, Any] | None = None
+        if adapter_id.startswith(LOCAL_PROVIDER_ADAPTER_PREFIX):
+            # Local execution host: LH starts the provider itself under the
+            # signed provider-sandbox profile.  There is no control plane, so
+            # neither an Orca binary nor LH_ORCA_CLI is consulted.
+            agent = adapter_id[len(LOCAL_PROVIDER_ADAPTER_PREFIX):]
+            provider_path = shutil.which(agent)
+            if provider_path is not None:
+                provider_path = str(Path(provider_path).resolve(strict=False))
+            provider_digest = _sha256_file(provider_path) if provider_path else None
+            if provider_path is None or provider_digest is None:
+                raise ExecutionFenceUnavailable("local_provider_unresolved")
+            policy, policy_digest = load_local_provider_policy()
+            provider_policy = validate_local_provider(
+                policy,
+                agent,
+                provider_path=str(provider_path),
+                provider_digest=provider_digest,
+            )
+            sandbox_profile = normalize_sandbox_profile(
+                policy["provider_sandbox_profile"], agent
+            )
+            runtime_binding = _provider_runtime_binding(
+                str(provider_path), sandbox_profile
+            )
+            pinned_bwrap = sandbox_profile["bubblewrap"]
+            if _sha256_file(pinned_bwrap["path"]) != pinned_bwrap["sha256"]:
+                raise ExecutionFenceUnavailable("provider_sandbox_bwrap_mismatch")
+            local_binding = {
+                "agent": agent,
+                "path": str(provider_path),
+                "sha256": provider_digest,
+            }
+            if runtime_binding is not None:
+                local_binding["runtime"] = runtime_binding
+            launch_classes = {
+                "control": 0,
+                "mutation": 0,
+                "provider": LOCAL_PROVIDER_LAUNCH_BUDGET,
+            }
+            local_provider = {
+                "provider": local_binding,
+                "egress_policy": {
+                    "digest": policy_digest,
+                    "issuer": str(policy.get("issuer")),
+                    "enforced_by": EGRESS_POLICY_ENFORCED_BY,
+                    "flags": sorted(str(x) for x in provider_policy.get("flags") or []),
+                    "value_flags": sorted(str(x) for x in provider_policy.get("value_flags") or []),
+                    "prompt_flags": sorted(str(x) for x in provider_policy.get("prompt_flags") or []),
+                    "trailing_prompt": bool(provider_policy.get("trailing_prompt")),
+                },
+                "provider_sandbox": {
+                    "profile": sandbox_profile,
+                    "profile_digest": digest_json(sandbox_profile),
+                },
+            }
         syscall_policy = {
             "default": "allow",
             "denied_action": f"errno:{errno.EPERM}",
@@ -937,6 +1004,30 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
                 "provider_sandbox"
             ]["profile_digest"]
             sandbox_proof["enforced_by"] = PROVIDER_SANDBOX_ENFORCED_BY
+        if local_provider is not None:
+            # The provider runs under this backend, but under the provider
+            # profile, not the mutation profile: say which policy contains its
+            # files, and say plainly that its network is the host's and only
+            # its argv was preflighted -- never "admissible" egress.
+            sandbox_digest = local_provider["provider_sandbox"]["profile_digest"]
+            filesystem = proofs["filesystem_effect_containment"]
+            filesystem["result"] = "applied_by_provider_sandbox"
+            filesystem["policy_digest"] = sandbox_digest
+            egress = proofs["provider_control_egress"]
+            egress["result"] = "host_network_policy_preflight"
+            egress["policy_digest"] = local_provider["egress_policy"]["digest"]
+            egress.pop("namespace_policy_digest", None)
+            egress["local_provider_digest"] = digest_json(local_provider)
+            sandbox_proof = proofs["provider_sandbox"]
+            sandbox_proof["result"] = "applied"
+            sandbox_proof["profile_digest"] = sandbox_digest
+            sandbox_proof["enforced_by"] = PROVIDER_SANDBOX_ENFORCED_BY
+        if launch_classes["mutation"] > 0:
+            mutation_dispatch = "enabled_for_descriptor"
+        elif local_provider is not None:
+            mutation_dispatch = "local_provider"
+        else:
+            mutation_dispatch = "delegated_to_execution_host"
         body = {
             "schema": DESCRIPTOR_SCHEMA,
             "binding": normalized,
@@ -946,14 +1037,12 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             "proofs": proofs,
             "proofs_digest": digest_json(proofs),
             "launch_classes": launch_classes,
-            "mutation_dispatch": (
-                "enabled_for_descriptor"
-                if launch_classes["mutation"] > 0
-                else "delegated_to_execution_host"
-            ),
+            "mutation_dispatch": mutation_dispatch,
         }
         if control_plane is not None:
             body["control_plane"] = control_plane
+        if local_provider is not None:
+            body["local_provider"] = local_provider
         descriptor = {**body, "launch_descriptor_digest": digest_json(body)}
         digest = descriptor["launch_descriptor_digest"]
         self._prepared[digest] = json.loads(json.dumps(descriptor))
@@ -998,6 +1087,22 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             and int(classes.get("control", 0)) > 0
             and isinstance(control_plane, dict)
         )
+        local_plane = normalized.get("local_provider")
+        local = (
+            int(classes.get("provider", 0)) > 0
+            and int(classes.get("mutation", 1)) == 0
+            and int(classes.get("control", 0)) == 0
+            and isinstance(local_plane, dict)
+            and control_plane is None
+        )
+        if not local and ("local_provider" in normalized or int(classes.get("provider", 0)) > 0):
+            # A provider launch class or plane never rides on another shape.
+            raise ExecutionFenceUnavailable("local_provider_descriptor_invalid")
+        local_results = {
+            "filesystem_effect_containment": {"applied_by_provider_sandbox"},
+            "provider_control_egress": {"host_network_policy_preflight"},
+            "provider_sandbox": {"applied"},
+        }
         for track in REQUIRED_PROOF_TRACKS:
             proof = proofs.get(track)
             allowed_results = {"admissible"}
@@ -1010,6 +1115,10 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
                 # descriptors have no hosted provider to sandbox. Either way
                 # only its own honest value is admissible.
                 allowed_results = {"applied"} if hosted else {"not_applicable"}
+            if local:
+                # A local provider descriptor has its own honest triple and
+                # may claim nothing else -- in particular never "admissible".
+                allowed_results = local_results[track]
             if (
                 not isinstance(proof, dict)
                 or proof.get("schema") != PROOF_SCHEMA
@@ -1020,8 +1129,9 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
                 or proof.get("backend_digest") != normalized.get("backend_digest")
             ):
                 raise ExecutionFenceUnavailable("proof_track_invalid")
-        if hosted:
-            sandbox = (control_plane or {}).get("provider_sandbox")
+        if hosted or local:
+            plane = control_plane if hosted else local_plane
+            sandbox = (plane or {}).get("provider_sandbox")
             sandbox_proof = proofs.get("provider_sandbox") or {}
             if (
                 not isinstance(sandbox, dict)
@@ -1460,12 +1570,125 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             if op == "terminal_close":
                 self._cleanup_provider_seccomp(digest)
 
+    def launch_provider(
+        self,
+        descriptor: Mapping[str, Any],
+        provider_argv: Sequence[str],
+        *,
+        env_overlay: Mapping[str, str] | None = None,
+        input_text: str | None = None,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        """Start the one provider a local-provider descriptor admits.
+
+        The provider runs under the profile signed at ``prepare()``: the
+        bubblewrap bind set and namespaces, the provider seccomp table, and a
+        cleared environment with a fence-owned PATH.  Its network stays the
+        host's -- it needs its API -- which the descriptor already states as
+        ``host_network_policy_preflight``.  No Orca process or control RPC is
+        involved; LH owns the process group and its termination."""
+        self._validate_backend()
+        normalized = self._validate_descriptor(descriptor, require_prepared=True)
+        classes = normalized.get("launch_classes") or {}
+        plane = normalized.get("local_provider")
+        if int(classes.get("provider", 0)) < 1 or not isinstance(plane, dict):
+            raise ExecutionFenceUnavailable("launch_class_not_authorized")
+        if timeout_seconds <= 0:
+            raise ExecutionFenceUnavailable("launch_timeout_invalid")
+        argv = [str(item) for item in provider_argv or []]
+        if not argv:
+            raise ExecutionFenceUnavailable("local_provider_argv_empty")
+        provider = plane.get("provider") or {}
+        if argv[0] != provider.get("path") or _sha256_file(argv[0]) != provider.get("sha256"):
+            raise ExecutionFenceUnavailable("local_provider_binary_unpinned")
+        egress_policy = plane.get("egress_policy")
+        if not isinstance(egress_policy, dict):
+            raise ExecutionFenceUnavailable("egress_policy_unbound")
+        _validate_provider_argv_against_policy(argv, egress_policy)
+        overlay = {str(name): str(value) for name, value in (env_overlay or {}).items()}
+        for name in overlay:
+            if (
+                not LOCAL_PROVIDER_ENV_NAME_RE.fullmatch(name)
+                or name in LOCAL_PROVIDER_RESERVED_ENV
+                or name.startswith("LD_")
+            ):
+                raise ExecutionFenceUnavailable("local_provider_env_overlay_invalid")
+        sandbox = plane.get("provider_sandbox") or {}
+        profile = sandbox.get("profile")
+        if not isinstance(profile, dict) or digest_json(profile) != sandbox.get("profile_digest"):
+            raise ExecutionFenceUnavailable("provider_sandbox_profile_digest_invalid")
+        _validate_provider_runtime_binding(argv[0], profile, provider.get("runtime"))
+        pinned_bwrap = profile.get("bubblewrap") or {}
+        if _sha256_file(pinned_bwrap.get("path")) != pinned_bwrap.get("sha256"):
+            raise ExecutionFenceUnavailable("provider_sandbox_bwrap_drifted")
+        clone_root = str(normalized["binding"]["clone_root"])
+        command = _sandbox_bwrap_argv(
+            profile,
+            provider_bin_dir=str(Path(argv[0]).parent),
+            provider_runtime_bin_dirs=_provider_runtime_bin_dirs(argv[0], profile),
+            clone_root=clone_root,
+            env_overlay=overlay,
+        )
+        seccomp_fd = self._seccomp_program_fd(
+            [str(item) for item in (profile.get("seccomp") or {}).get("denied_syscalls") or []]
+        )
+        command.extend(["--seccomp", str(seccomp_fd), "--", *argv])
+        digest = normalized["launch_descriptor_digest"]
+        # Single use from here on, even if the start below fails.
+        self._consumed.add(digest)
+        self.launch_count += 1
+        started_at = self.clock()
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=clone_root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                pass_fds=(seccomp_fd,),
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise ExecutionFenceUnavailable("local_provider_launch_failed") from exc
+        finally:
+            os.close(seccomp_fd)
+        try:
+            stdout, stderr = process.communicate(input=input_text, timeout=timeout_seconds)
+        except BaseException:
+            self._terminate_provider_group(process)
+            raise
+        self.provider_audit.setdefault(digest, []).append({
+            "argv_digest": digest_json(argv),
+            "command_digest": digest_json(command),
+            "provider_sandbox_profile_digest": sandbox.get("profile_digest"),
+            "exit_code": process.returncode,
+            "started_at": started_at,
+            "at": self.clock(),
+        })
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+    @staticmethod
+    def _terminate_provider_group(process: subprocess.Popen[str]) -> None:
+        """Kill the sandbox's process group; bwrap's --die-with-parent and its
+        own PID namespace take the provider's descendants down with it."""
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+        try:
+            process.communicate(timeout=5)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ExecutionFenceUnavailable("started_child_termination_unknown") from exc
+
     def receipt_projection(self, descriptor: Mapping[str, Any]) -> dict[str, Any]:
         normalized = self._validate_descriptor(
             descriptor,
             require_prepared=True,
         )
-        return {
+        projection = {
             "schema": DESCRIPTOR_SCHEMA,
             "status": "admitted",
             "launch_descriptor_digest": normalized["launch_descriptor_digest"],
@@ -1516,3 +1739,20 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             ),
             "mutation_dispatch": normalized["mutation_dispatch"],
         }
+        plane = normalized.get("local_provider")
+        if isinstance(plane, dict):
+            # Same projection rule as the hosted plane: digests and enforcer,
+            # never the bind-set contents.
+            projection["local_provider"] = {
+                "egress_policy": plane.get("egress_policy"),
+                "provider_sha256": (plane.get("provider") or {}).get("sha256"),
+                "provider_runtime": (plane.get("provider") or {}).get("runtime"),
+                "provider_sandbox": {
+                    "profile_digest": (plane.get("provider_sandbox") or {}).get("profile_digest"),
+                    "enforced_by": PROVIDER_SANDBOX_ENFORCED_BY,
+                },
+            }
+            projection["provider_launches"] = list(
+                self.provider_audit.get(normalized["launch_descriptor_digest"], ())
+            )
+        return projection

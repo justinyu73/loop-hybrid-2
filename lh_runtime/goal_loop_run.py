@@ -57,6 +57,11 @@ EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
     "codex": executors.CODEX,
     "orca": executors.ORCA,
 }
+# Execution hosts that start the provider themselves (no CLI preset of their
+# own).  Kept apart so EXECUTORS stays the closed set of CLI presets.
+HOST_EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
+    "local": executors.LOCAL,
+}
 # Judge-only adapters are intentionally separate from the producer registry;
 # AGY never becomes a mutation executor or capability-resource runner here.
 JUDGE_EXECUTORS = {"agy", "codex"}
@@ -181,12 +186,12 @@ def resolve_executor(
     model only when ``execute`` is true; dry-run returns None so nothing runs."""
     if name == "kimi":
         raise ValueError("kimi_retired: executor selection refused")
-    factories = {**EXECUTORS, **(factory_overrides or {})}
+    factories = {**EXECUTORS, **HOST_EXECUTORS, **(factory_overrides or {})}
     if name not in factories:
         raise ValueError(f"unknown executor: {name!r}; choose one of {sorted(factories)}")
     if provider_binding is not None:
-        if name != "orca":
-            raise ValueError("provider_binding is currently supported only with executor='orca'")
+        if name not in {"orca", "local"}:
+            raise ValueError("provider_binding is currently supported only with executor='orca' or 'local'")
         runner = provider_binding.get("runner") if isinstance(provider_binding, dict) else None
         if not isinstance(runner, str) or not runner.strip():
             raise ValueError("provider_binding.runner is required; no provider default is allowed")
@@ -300,7 +305,7 @@ class CapabilityRoutingSession:
             runner = resource["runner"]
             if runner == "kimi":
                 raise ValueError("kimi_retired: capability resource refused")
-            if runner not in EXECUTORS and runner not in self.factories:
+            if runner not in EXECUTORS and runner not in HOST_EXECUTORS and runner not in self.factories:
                 raise ValueError(f"no runtime adapter registered for resource runner {runner!r}")
             if runner in self.factories and (
                 resource.get("model") is not None
@@ -1406,7 +1411,7 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the autonomous driver with a real coding-agent executor (opt-in)")
-    parser.add_argument("--executor", default=None, choices=sorted(EXECUTORS),
+    parser.add_argument("--executor", default=None, choices=sorted({**EXECUTORS, **HOST_EXECUTORS}),
                         help="coding executor; defaults to the contract's models.execute when --contract is used")
     parser.add_argument("--judge-executor", default=None, choices=sorted(JUDGE_EXECUTORS),
                         help="optional turning-point judge executor (M1 model routing); defaults to the contract's models.judge")
