@@ -91,7 +91,7 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 72 of 87 gates pass. The remaining 15 rely on POSIX-only behavior: executable-bit fake CLIs, the bubblewrap fences (including the local provider sandbox), POSIX signals and process semantics, and a 15.6 ms monotonic clock. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 72–74 of 87 gates pass. 13 always fail because they rely on POSIX-only behavior: executable-bit fake CLIs (4), the bubblewrap fences including the local provider sandbox (4), POSIX signals and process-holder semantics (2), and POSIX path or platform defaults (3). 2 more (driver heartbeat, run verdict) are timing-dependent on the 15.6 ms Windows clock and pass intermittently. |
 | macOS | Not tested. |
 
 No Orca app, VS Code, or WSL is required. Orca is one optional execution-host
