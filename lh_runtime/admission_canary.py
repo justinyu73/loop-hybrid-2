@@ -10,8 +10,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from admission_bridge import GoalAdmissionBridge
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_bundle
 from run_store import RunStore
 
 
@@ -39,9 +42,51 @@ def envelope(*, side_effects: list[str] | None = None, human_only: bool = False)
     }
 
 
-def add_candidate(store: GoalStore, goal_id: str, event_key: str, policy: dict) -> None:
+def add_candidate(store: GoalStore, goal_id: str, event_key: str, policy: dict, *, source: Path, base: str) -> None:
+    binding = make_native_bundle(
+        source,
+        base,
+        goal_id,
+        policy["stage_id"],
+        [{
+            "id": "admission-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('baseline.txt').exists() else 1)"],
+        ["src/"],
+        policy["max_attempts"],
+        goal={"feature_contract": "bounded stage", "admission_envelope": policy},
+    )
     store.record_event(event_id=event_key, idempotency_key=event_key, source="stage_completion", event_type="verified_stage", payload={"candidate": goal_id})
-    store.create_candidate(event_key, goal_id=goal_id, campaign_id=policy["campaign_id"], stage_id=policy["stage_id"], goal={"feature_contract": "bounded stage", "admission_envelope": policy})
+    store.create_candidate(event_key, goal_id=goal_id, campaign_id=policy["campaign_id"], stage_id=policy["stage_id"], goal=binding["goal"])
+
+
+def finish_stopped_attempt(store: RunStore, run_id: str, workspace_ref: str) -> int:
+    ordinal = store.begin_attempt(run_id, workspace_ref)
+    receipt = {
+        "schema": "loop-hybrid-attempt-receipt/v1",
+        "run_id": run_id,
+        "attempt": ordinal,
+        "verification": {"exit_code": 1},
+        "usage": {"state": "unknown", "reason": "admission revision-bump fixture"},
+    }
+    artifact = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
+    if not store.finish_attempt(
+        run_id,
+        ordinal,
+        state="stopped",
+        receipt_ref=artifact["ref"],
+        receipt_digest=artifact["digest"],
+    ):
+        raise AssertionError("stopped fixture attempt did not finish")
+    return ordinal
 
 
 def main() -> int:
@@ -60,7 +105,7 @@ def main() -> int:
         runs = RunStore(root / "runs")
         bridge = GoalAdmissionBridge(goals, runs)
         good_policy = envelope()
-        add_candidate(goals, "campaign-g4:stage-2", "g4-event-1", good_policy)
+        add_candidate(goals, "campaign-g4:stage-2", "g4-event-1", good_policy, source=source, base=base)
         first = bridge.admit("campaign-g4:stage-2", source_repo=source, base_revision=base, envelope=good_policy)
         replay = bridge.admit("campaign-g4:stage-2", source_repo=source, base_revision=base, envelope=good_policy)
         linked_goal = goals.get_goal("campaign-g4:stage-2")
@@ -70,13 +115,13 @@ def main() -> int:
         blocked_runs = RunStore(root / "blocked-runs")
         blocked_bridge = GoalAdmissionBridge(blocked_goals, blocked_runs)
         blocked_policy = envelope(side_effects=["workspace", "push"])
-        add_candidate(blocked_goals, "campaign-g4:blocked", "g4-event-blocked", blocked_policy)
+        add_candidate(blocked_goals, "campaign-g4:blocked", "g4-event-blocked", blocked_policy, source=source, base=base)
         blocked = blocked_bridge.admit("campaign-g4:blocked", source_repo=source, base_revision=base, envelope=blocked_policy)
         human_goals = GoalStore(root / "human-goals")
         human_runs = RunStore(root / "human-runs")
         human_bridge = GoalAdmissionBridge(human_goals, human_runs)
         human_policy = envelope(human_only=True)
-        add_candidate(human_goals, "campaign-g4:human", "g4-event-human", human_policy)
+        add_candidate(human_goals, "campaign-g4:human", "g4-event-human", human_policy, source=source, base=base)
         human = human_bridge.admit("campaign-g4:human", source_repo=source, base_revision=base, envelope=human_policy)
 
         # U4: a moving ref name is pinned to its SHA at admission; the original
@@ -85,7 +130,7 @@ def main() -> int:
         pinned_goals = GoalStore(root / "pinned-goals")
         pinned_runs = RunStore(root / "pinned-runs")
         pinned_bridge = GoalAdmissionBridge(pinned_goals, pinned_runs)
-        add_candidate(pinned_goals, "campaign-g4:pinned", "g4-event-pinned", good_policy)
+        add_candidate(pinned_goals, "campaign-g4:pinned", "g4-event-pinned", good_policy, source=source, base=base)
         pinned = pinned_bridge.admit("campaign-g4:pinned", source_repo=source, base_revision="feature-x", envelope=good_policy)
         pinned_run = pinned_runs.get_run(pinned["run_id"]) if pinned["run_id"] else None
         ghost = pinned_bridge.admit("campaign-g4:pinned", source_repo=source, base_revision="no-such-ref", envelope=good_policy)
@@ -113,11 +158,10 @@ def main() -> int:
         exhausted_goals = GoalStore(root / "exhausted-goals")
         exhausted_runs = RunStore(root / "exhausted-runs")
         exhausted_bridge = GoalAdmissionBridge(exhausted_goals, exhausted_runs)
-        add_candidate(exhausted_goals, "campaign-g4:exhausted", "g4-event-exhausted", good_policy)
+        add_candidate(exhausted_goals, "campaign-g4:exhausted", "g4-event-exhausted", good_policy, source=source, base=base)
         first_admit = exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
         first_run_id = first_admit["run_id"]
-        exhausted_runs.begin_attempt(first_run_id, "workspace://exhausted/1")
-        exhausted_runs.finish_attempt(first_run_id, 1, state="stopped", receipt_ref="artifacts/exhausted/1/receipt.json", receipt_digest="sha256:exhausted")
+        finish_stopped_attempt(exhausted_runs, first_run_id, "workspace://exhausted/1")
         exhausted_goals.transition_goal("campaign-g4:exhausted", "stopped", expected_state="active")
         exhausted_goals.transition_goal("campaign-g4:exhausted", "candidate", expected_state="stopped")
         bumped_admit = exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
@@ -135,14 +179,12 @@ def main() -> int:
         # Bump to the cap (4), then admission must stop instead of looping.
         for _ in range(2):
             run_now = exhausted_runs.get_run(exhausted_goals.get_goal("campaign-g4:exhausted")["run_id"])
-            exhausted_runs.begin_attempt(run_now["run_id"], f"workspace://exhausted/{run_now['run_id'][-4:]}")
-            exhausted_runs.finish_attempt(run_now["run_id"], 1, state="stopped", receipt_ref=f"artifacts/exhausted/{run_now['run_id'][-4:]}/r.json", receipt_digest="sha256:exhausted")
+            finish_stopped_attempt(exhausted_runs, run_now["run_id"], f"workspace://exhausted/{run_now['run_id'][-4:]}")
             exhausted_goals.transition_goal("campaign-g4:exhausted", "stopped", expected_state="active")
             exhausted_goals.transition_goal("campaign-g4:exhausted", "candidate", expected_state="stopped")
             exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
         last_run = exhausted_runs.get_run(exhausted_goals.get_goal("campaign-g4:exhausted")["run_id"])
-        exhausted_runs.begin_attempt(last_run["run_id"], "workspace://exhausted/last")
-        exhausted_runs.finish_attempt(last_run["run_id"], 1, state="stopped", receipt_ref="artifacts/exhausted/last/r.json", receipt_digest="sha256:exhausted")
+        finish_stopped_attempt(exhausted_runs, last_run["run_id"], "workspace://exhausted/last")
         exhausted_goals.transition_goal("campaign-g4:exhausted", "stopped", expected_state="active")
         exhausted_goals.transition_goal("campaign-g4:exhausted", "candidate", expected_state="stopped")
         capped = exhausted_bridge.admit("campaign-g4:exhausted", source_repo=source, base_revision=base, envelope=good_policy)
@@ -168,7 +210,7 @@ def _invalid_source_is_stopped(source: Path, base: str, root: Path) -> bool:
     goals = GoalStore(root / "invalid-goals")
     runs = RunStore(root / "invalid-runs")
     policy = envelope()
-    add_candidate(goals, "campaign-g4:invalid", "g4-event-invalid", policy)
+    add_candidate(goals, "campaign-g4:invalid", "g4-event-invalid", policy, source=source, base=base)
     result = GoalAdmissionBridge(goals, runs).admit("campaign-g4:invalid", source_repo=root / "missing", base_revision=base, envelope=policy)
     return result["status"] == "human_required" and goals.get_goal("campaign-g4:invalid")["state"] == "human_required" and runs.summary()["event_count"] == 0
 

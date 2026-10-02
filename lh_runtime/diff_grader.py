@@ -29,15 +29,12 @@ Grading is layered, cheapest and most deterministic first:
 from __future__ import annotations
 
 import json
-import os
 import re
-import subprocess
-from pathlib import Path
 from typing import Any, Callable
 
 import authority_surface
 import value_reducer
-from cli_agent_executor import resolve_cli
+from cli_agent_executor import run_bounded_judge
 
 GRADE_SCHEMA = "lh-diff-grade/v1"
 CLOSED_GRADES = ("routine", "sensitive")
@@ -161,6 +158,10 @@ def parse_grade(text: str) -> dict[str, Any]:
         value = json.loads(text)
         if isinstance(value, dict) and "grade" in value:
             return value
+        if isinstance(value, dict) and "status" in value:
+            if value.get("status") != "SUCCESS" or not isinstance(value.get("response"), str):
+                raise ValueError("judge JSON envelope is not successful")
+            return parse_grade(value["response"])
     except json.JSONDecodeError:
         pass
     for match in re.finditer(r"\{[^{}]*\}", text):
@@ -191,12 +192,6 @@ def make_cli_grader(
     def grader(snapshot: dict[str, Any]) -> Any:
         prompt = build_grader_prompt(snapshot)
         argv = argv_builder(prompt)
-        argv[0] = resolve_cli(argv[0])
-        env = dict(os.environ)
-        env["PATH"] = f"{Path(argv[0]).parent}:{env.get('PATH', '')}"
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds, env=env)
-        if proc.returncode != 0:
-            raise RuntimeError(f"diff grader {name} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-        return parse_grade(proc.stdout)
+        return parse_grade(run_bounded_judge(argv, name=f"diff grader {name}", timeout_seconds=timeout_seconds))
 
     return grader

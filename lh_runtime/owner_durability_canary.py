@@ -20,13 +20,16 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tests"))
 from _fixture import make_campaign, make_source_repo
 from campaign_compiler import CampaignCompiler
 from controller import LoopController
 from goal_loop_driver import run_driver
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 CAMPAIGN_ID = "campaign-w5"
 GOAL_ID = f"{CAMPAIGN_ID}:stage-1"
@@ -51,7 +54,7 @@ def _auth_model(_workspace: Path, _capsule: dict) -> dict:
 
 
 def _worker(root: Path, tag: str, source: Path, base: str) -> GoalLoopWorker:
-    runs = RunStore(root / f"{tag}-runs")
+    runs = RunStore(root / f"{tag}-runs", command_runner=fixture_command_runner)
     compiler = CampaignCompiler(make_campaign(CAMPAIGN_ID))
     return GoalLoopWorker(
         goal_store=GoalStore(root / f"{tag}-goals"),
@@ -62,29 +65,83 @@ def _worker(root: Path, tag: str, source: Path, base: str) -> GoalLoopWorker:
     )
 
 
-def _seed_goal(worker: GoalLoopWorker, tag: str) -> None:
+def _seed_goal(worker: GoalLoopWorker, tag: str, source: Path, base: str) -> None:
     envelope = worker.compilers[CAMPAIGN_ID].compile()["stages"]["stage-1"]
+    bundle_store = RunStore(worker.run_store.root.parent / f"{tag}-delivery-bundle")
+    bundle = make_native_run(
+        bundle_store,
+        source,
+        base,
+        GOAL_ID,
+        "owner-durability",
+        [{
+            "id": "w5-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        ["git", "rev-parse", "HEAD"],
+        ["src/"],
+        4,
+        goal={"feature_contract": "stage-1", "admission_envelope": envelope},
+        run_id=f"bundle-{tag}",
+    )
+    persisted_goal = bundle_store.get_run(bundle["run_id"])["goal"]
     worker.goal_store.record_event(event_id=f"w5-{tag}", idempotency_key=f"w5-{tag}", source="manual_intent", event_type="goal_candidate", payload={
         "candidate": {"goal_id": GOAL_ID, "campaign_id": CAMPAIGN_ID, "stage_id": "stage-1",
-                      "goal": {"feature_contract": "stage-1", "admission_envelope": envelope}}
+                      "goal": persisted_goal}
     })
 
 
 def _seed_cost(worker: GoalLoopWorker, source: Path, base: str, *, tag: str, input_tokens: int) -> None:
-    """Commit one verified attempt whose measured usage costs input_tokens/1e6 USD today."""
+    """Persist one measured, human-required receipt for cost accounting.
+
+    It is intentionally not a fabricated GREEN terminal: usage accounting can
+    read a durable receipt while the delivery gate keeps this fixture parked.
+    """
     store = worker.run_store
     run_id = f"run-w5-cost-{tag}"
-    store.create_run(goal={"goal_id": f"w5-cost-{tag}"}, source_repo=source, base_revision=base, run_id=run_id)
+    make_native_run(
+        store,
+        source,
+        base,
+        f"w5-cost-{tag}",
+        "cost",
+        [{
+            "id": "w5-cost-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        ["git", "rev-parse", "HEAD"],
+        ["src/"],
+        4,
+        goal={"goal_id": f"w5-cost-{tag}", "feature_contract": "cost accounting fixture"},
+        run_id=run_id,
+    )
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
+    diff_ref = store.write_artifact(run_id, ordinal, "diff.patch", "")
     receipt = {
         "schema": "loop-hybrid-attempt-receipt/v1",
         "run_id": run_id,
         "attempt": ordinal,
         "usage": {"state": "measured", "model": COST_MODEL, "input_tokens": input_tokens, "output_tokens": 0, "cache_read_tokens": 0},
-        "verification": {"argv": ["true"], "exit_code": 0},
+        "diff": diff_ref,
+        "verification": {"argv": ["git", "diff", "--check"], "exit_code": 1},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    if not store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=ref["ref"], receipt_digest=ref["digest"], fence=store.attempt_fence(run_id, ordinal)):
+        raise AssertionError("cost fixture receipt was not durably parked")
 
 
 def _drive(worker: GoalLoopWorker, tag: str, *, model=_model, quota: float | None = None,
@@ -118,7 +175,7 @@ def main() -> int:
         # Quota ladder: one worker per rung, each with a dispatchable goal.
         for tag, quota in (("q59", 59.0), ("q60", 60.0), ("q80", 80.0), ("q100", 100.0)):
             worker = _worker(root, tag, source, base)
-            _seed_goal(worker, tag)
+            _seed_goal(worker, tag, source, base)
             result, snap = _drive(worker, tag, quota=quota)
             outcomes[tag] = {"result": result, "snap_reason": _gate_reason(snap)}
 
@@ -126,13 +183,13 @@ def main() -> int:
         for tag, tokens in (("c190", 1_900_000), ("c200", 2_000_000), ("c500", 5_000_000)):
             worker = _worker(root, tag, source, base)
             _seed_cost(worker, source, base, tag=tag, input_tokens=tokens)
-            _seed_goal(worker, tag)
+            _seed_goal(worker, tag, source, base)
             result, snap = _drive(worker, tag)
             outcomes[tag] = {"result": result, "snap_reason": _gate_reason(snap)}
 
         # Credential failure: one probe attempt, then the session parks.
         auth_worker = _worker(root, "auth", source, base)
-        _seed_goal(auth_worker, "auth")
+        _seed_goal(auth_worker, "auth", source, base)
         auth_result, auth_snap = _drive(auth_worker, "auth", model=_auth_model)
         auth_runnable = auth_worker.run_store.runnable_runs()
         auth_run = auth_worker.run_store.get_run(auth_runnable[0]["run_id"]) if auth_runnable else None
@@ -142,14 +199,36 @@ def main() -> int:
 
         # Quota recovery: 100 stops the first session; 30 dispatches in the next.
         rec_worker = _worker(root, "rec", source, base)
-        _seed_goal(rec_worker, "rec")
+        _seed_goal(rec_worker, "rec", source, base)
         rec_stopped, _ = _drive(rec_worker, "rec", quota=100.0, snapshot=False)
         rec_resumed, _ = _drive(rec_worker, "rec2", quota=30.0, snapshot=False)
 
         # A run already in flight is never touched by a session stop.
         flight_worker = _worker(root, "flight", source, base)
         flight_id = "run-w5-in-flight"
-        flight_worker.run_store.create_run(goal={"goal_id": "w5-in-flight"}, source_repo=source, base_revision=base, run_id=flight_id)
+        make_native_run(
+            flight_worker.run_store,
+            source,
+            base,
+            "w5-in-flight",
+            "flight",
+            [{
+                "id": "w5-flight-check",
+                "commands": [{
+                    "id": "diff-check",
+                    "argv": ["git", "diff", "--check"],
+                    "cwd": "${WORKTREE}",
+                    "expect_exit": 0,
+                    "timeout_seconds": 10,
+                }],
+                "required_receipts": ["executor"],
+            }],
+            ["git", "rev-parse", "HEAD"],
+            ["src/"],
+            4,
+            goal={"goal_id": "w5-in-flight", "feature_contract": "in-flight fixture"},
+            run_id=flight_id,
+        )
         flight_worker.run_store.begin_attempt(flight_id, f"workspace://{flight_id}/1")
         flight_result, _ = _drive(flight_worker, "flight", quota=100.0, snapshot=False)
         flight_after = flight_worker.run_store.get_run(flight_id)

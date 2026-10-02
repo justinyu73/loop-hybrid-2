@@ -9,9 +9,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tests"))
 
 from _fixture import make_source_repo
 from failure_case_live_acceptance import EXPECTED_EVENTS, run_acceptance
+import failure_case_live_acceptance as live_module
+from p7_native_runstore_fixture import explicit_runstore_factory
 
 
 def main() -> int:
@@ -30,7 +33,8 @@ def main() -> int:
             "marker_path": "src/.fc-p0-marker",
             "allowed_path": "src/",
         }
-        first = run_acceptance(**args)
+        with explicit_runstore_factory(live_module):
+            first = run_acceptance(**args)
         first_bytes = args["evidence_out"].read_bytes()
         second = run_acceptance(**args)
         second_bytes = args["evidence_out"].read_bytes()

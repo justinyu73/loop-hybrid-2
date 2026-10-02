@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = HERE.parent.parent
 sys.path.insert(0, str(HERE.parent / "provider_egress"))
 import provider_egress as pe  # noqa: E402
 
@@ -165,7 +165,7 @@ def prepare(spec: dict[str, Any], root: Path, session_dir: Path, *, context_root
     session_dir.mkdir(parents=True)
     (session_dir / "capsule.json").write_bytes(raw)
     manifest = {"grill_id": spec["grill_id"], "repository_root": "caller-owned-context", "context_digest": context_digest, "capsule_digest": "sha256:" + hashlib.sha256(raw).hexdigest(), "subject": spec["subject"], "review_slots": spec["review_slots"]}
-    (session_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="")
     return {"verdict": "pass", "status": "design_grill_prepared", "provider_calls": 0, "session_dir": str(session_dir), "capsule_digest": manifest["capsule_digest"], "problems": []}
 
 

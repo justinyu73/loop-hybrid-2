@@ -1,6 +1,7 @@
 {
   "sealed_enum_digest": "sha256:990319f74acabe37e2032d875a72b3349be81fdf96fa329a00f6cc2ad532b43d",
   "sites": [
+    "gate-pack/ceremony_grader.py\t# HEAD has no HEAD^2, so the ratchet stays fail-closed.",
     "gate-pack/design_grill/README.md\t`human_design_decision_required`.",
     "gate-pack/design_grill/design_grill.py\tROUTES = {\"continue\", \"require_maintainer\", \"review_unavailable\"}",
     "gate-pack/design_grill/design_grill.py\treturn {\"verdict\": \"pass\", \"status\": \"human_design_decision_required\" if required_ids.issubset(review_ids) else \"design_grill_more_results_required\", \"provider_calls\": 0, \"recorded_review_ids\": sorted(review_ids), \"problems\": []}",
@@ -14,8 +15,7 @@
     "gate-pack/provider_egress/provider_egress.py\t\"\"\"Fail-closed contract for host-authorized provider egress; never launches a provider.\"\"\"",
     "gate-pack/quota/quota_monitor.py\treturn {\"verdict\": \"pass\", \"status\": \"quota_unknown_stopped\", \"allowed_to_dispatch\": False,",
     "gate-pack/quota/quota_monitor.py\tstatus, allowed = \"quota_hard_stopped\", False",
-    "lh_runtime/ci_conclusion_canary.py\tcase(\"missing-credentials-fail-closed\", missing_credentials_detail == \"CICredentialsMissing\", missing_credentials_detail),",
-    "lh_runtime/executor_wiring_canary.py\tProves selection, the dry-run gate, fail-closed on unknown executors, and that",
+    "lh_runtime/execution_fence.py\t\"\"\"The policy bytes and their digest, fail-closed on any defect.\"\"\"",
     "lh_runtime/goal_loop_run.py\t\"\"\"Fail closed on an unknown executor (even in dry-run). Return the real"
   ]
 }

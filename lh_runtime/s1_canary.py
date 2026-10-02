@@ -14,6 +14,7 @@ in the bridge.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -21,12 +22,15 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_campaign, make_source_repo
 from campaign_compiler import CampaignCompiler
 from controller import LoopController
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
 from improvement_intent import load_findings, submit_findings
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
 from authority_surface import authority_paths, is_authority_path
 from value_reducer import value_verdict, verdict_for_run
@@ -48,14 +52,20 @@ def _seed_run(store: RunStore, run_id: str, *, lamp_argv: list[str], diff_path: 
         "allowed_paths": ["tests/", "src/"],
         "acceptance_lamp": {"id": "lamp", "smoke": "fixture", "verification_argv": lamp_argv},
     }}
-    store.create_run(goal=goal, source_repo=HERE, base_revision="base", run_id=run_id)
+    base = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    make_native_run(
+        store, ROOT, base, f"goal-{run_id}", "s1-lamp",
+        [{"id": "s1-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+        ["git", "rev-parse", "HEAD"], ["tests/", "src/"], 4,
+        goal=goal, run_id=run_id,
+    )
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
     diff_ref = store.write_artifact(run_id, ordinal, "diff.patch", _diff(diff_path))
     stderr_ref = store.write_artifact(run_id, ordinal, "verifier.stderr", "")
     receipt = {"schema": "loop-hybrid-attempt-receipt/v1", "run_id": run_id, "attempt": ordinal,
                "diff": diff_ref, "verification": {"argv": lamp_argv, "exit_code": 0, "stderr": stderr_ref}}
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
 
 
 def _worker(root: Path, source: Path, base: str) -> GoalLoopWorker:

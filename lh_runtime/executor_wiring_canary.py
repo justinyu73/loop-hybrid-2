@@ -15,10 +15,15 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import cli_agent_executor as executors
 from _fixture import make_campaign, make_source_repo
 from goal_loop_run import EXECUTORS, resolve_executor, run
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_bundle
+from p7_native_runstore_fixture import explicit_runstore_factory
+import goal_loop_run as fixture_glr
 
 
 def case(case_id: str, ok: bool, detail: str) -> dict:
@@ -55,12 +60,39 @@ def _source_repo(root: Path) -> tuple[Path, str]:
     return make_source_repo(root)
 
 
-def _seed(goal_root: Path, camp: dict) -> None:
+def _seed(goal_root: Path, camp: dict, *, source: Path, base: str) -> None:
     from campaign_compiler import CampaignCompiler
     envelope = CampaignCompiler(camp).compile()["stages"]["stage-1"]
+    original_goal = {"feature_contract": "stage-1", "admission_envelope": envelope}
+    bundle = make_native_bundle(
+        source,
+        base,
+        "campaign-exec:stage-1",
+        "stage-1",
+        [{
+            "id": "executor-wiring-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "from pathlib import Path; raise SystemExit(0 if any(Path('src').glob('attempt-*.txt')) else 1)",
+        ],
+        ["src/"],
+        4,
+        goal=original_goal,
+    )
     GoalStore(goal_root).record_event(
         event_id="exec-seed-1", idempotency_key="exec-seed-1", source="manual_intent", event_type="goal_candidate",
-        payload={"candidate": {"goal_id": "campaign-exec:stage-1", "campaign_id": "campaign-exec", "stage_id": "stage-1", "goal": {"feature_contract": "stage-1", "admission_envelope": envelope}}},
+        payload={"candidate": {"goal_id": "campaign-exec:stage-1", "campaign_id": "campaign-exec", "stage_id": "stage-1", "goal": bundle["goal"]}},
     )
 
 
@@ -78,10 +110,10 @@ def main() -> int:
         source, base = _source_repo(root)
         camp = campaign()
 
-        presets_ok = set(EXECUTORS) == {"codex", "claude", "kimi", "orca"} \
+        kimi_rejected, kimi_detail = _rejects(lambda: executors.kimi_argv("P"))
+        presets_ok = set(EXECUTORS) == {"codex", "orca"} \
             and executors.codex_argv("P") == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "P"] \
-            and executors.claude_argv("P") == ["claude", "-p", "P", "--permission-mode", "bypassPermissions"] \
-            and executors.kimi_argv("P") == ["kimi", "-p", "P"]
+            and kimi_rejected and "kimi_retired" in kimi_detail
 
         spy = _Spy()
         dry = run(executor="codex", execute=False, goal_store_root=root / "d-goals", run_store_root=root / "d-runs",
@@ -89,14 +121,16 @@ def main() -> int:
                   factory_overrides={"codex": spy})
 
         unknown_rejected, unknown_detail = _rejects(lambda: resolve_executor("gpt-nope", execute=False))
+        retired_rejected, retired_detail = _rejects(lambda: executors.provider_argv("claude", "P"))
 
-        _seed(root / "x-goals", camp)
-        executed = run(executor="fake", execute=True, goal_store_root=root / "x-goals", run_store_root=root / "x-runs",
-                       workspace_root=root / "x-ws", campaign=camp, source_repo=source, base_revision=base,
-                       max_cycles=30, factory_overrides={"fake": fake_executor_factory}, sleep_fn=_noop_sleep)
+        _seed(root / "x-goals", camp, source=source, base=base)
+        with explicit_runstore_factory(fixture_glr):
+            executed = run(executor="fake", execute=True, goal_store_root=root / "x-goals", run_store_root=root / "x-runs",
+                           workspace_root=root / "x-ws", campaign=camp, source_repo=source, base_revision=base,
+                           max_cycles=30, factory_overrides={"fake": fake_executor_factory}, sleep_fn=_noop_sleep)
         executed_done = GoalStore(root / "x-goals").get_goal("campaign-exec:stage-1")["state"] == "completed"
 
-        _seed(root / "p-goals", camp)
+        _seed(root / "p-goals", camp, source=source, base=base)
         flag = root / "loop-pause-all"
         flag.write_text("stop\n", encoding="utf-8")
         gated = run(executor="fake", execute=True, goal_store_root=root / "p-goals", run_store_root=root / "p-runs",
@@ -105,6 +139,7 @@ def main() -> int:
 
         cases = [
             case("registry-presets-are-model-agnostic-bypass-argv", presets_ok, f"executors={sorted(EXECUTORS)}"),
+            case("retired-provider-has-no-core-argv", retired_rejected, retired_detail),
             case("dry-run-is-default-and-never-invokes-executor", dry["mode"] == "dry_run" and dry["invoked"] is False and spy.called is False, str(dry)),
             case("unknown-executor-fails-closed", unknown_rejected, unknown_detail),
             case("execute-threads-real-model-into-driver", executed["invoked"] is True and executed["driver"]["runs_dispatched"] == 1 and executed_done, str(executed)),
@@ -117,7 +152,7 @@ def main() -> int:
         "total": len(cases),
         "blocking_failures": failures,
         "known_gaps_open": [
-            "actually invoking codex/claude/kimi or Orca is a human live smoke; this gate injects a fake executor",
+            "actually invoking a provider or Orca is a human live smoke; this gate injects a fake executor",
             "GitHub PR adapter and promotion remain later/human-owned nodes",
         ],
     }, ensure_ascii=False, indent=2))

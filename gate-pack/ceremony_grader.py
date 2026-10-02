@@ -134,8 +134,18 @@ def ceremony_done_gate(root: Path, cfg: dict[str, Any], base_ref: str = "HEAD~1"
     units_rel = cfg["units"]
     try:
         head_units = load_units((root / units_rel).read_text(encoding="utf-8"))
-        base_raw = subprocess.run(["git", "-C", str(root), "show", f"{base_ref}:{units_rel}"],
-                                  text=True, capture_output=True, check=False).stdout
+        base_raw = ""
+        for ref in (base_ref, "HEAD^2"):
+            # `ref:path` resolves from the repo root; when the grader runs in
+            # a subdirectory of a merged tree (the host+LH C-merge shape) the
+            # units file lives under the prefix, so resolve it cwd-relative
+            # (`:./`). A merge commit's first parent may predate the file
+            # entirely; fall back to the parent that carries it. A non-merge
+            # HEAD has no HEAD^2, so the ratchet stays fail-closed.
+            base_raw = subprocess.run(["git", "-C", str(root), "show", f"{ref}:./{units_rel}"],
+                                      text=True, capture_output=True, check=False).stdout
+            if base_raw:
+                break
         base_units = load_units(base_raw)
     except OSError:
         return {"violations": [], "newly_done": [], "enforced": False, "note": "no base/head units to compare"}

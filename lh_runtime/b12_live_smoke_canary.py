@@ -13,6 +13,7 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tests"))
 
 import token_cost
 from campaign_compiler import CampaignCompiler
@@ -20,7 +21,11 @@ from command_ingress import submit_command
 from goal_loop_run import run as goal_loop_run
 from goal_store import GoalStore
 from project_status import build_status
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
+from contextlib import nullcontext
+import goal_loop_run as fixture_glr
+from p7_native_runstore_fixture import explicit_runstore_factory
 
 
 def _git(*args: str) -> None:
@@ -55,6 +60,51 @@ def _campaign() -> dict[str, Any]:
     }
 
 
+def _bind_campaign_delivery(root: Path, campaign: dict[str, Any], source: Path, base: str) -> None:
+    """Attach producer-owned sealed bindings to each campaign stage.
+
+    The helper only prepares Goal revision input; it does not start an
+    Attempt, write a receipt, or claim a terminal state.  Stage completion
+    therefore carries an explicit contract for the next producer as well.
+    """
+    bundles = RunStore(root / "campaign-delivery-bundles")
+    for stage in campaign["stages"]:
+        stage_id = stage["stage_id"]
+        filename = "hello.txt" if stage_id == "s1" else "world.txt"
+        word = "hello" if stage_id == "s1" else "world"
+        goal_id = f"{campaign['campaign_id']}:{stage_id}"
+        native = make_native_run(
+            bundles,
+            source,
+            base,
+            goal_id,
+            stage_id,
+            [{
+                "id": f"{stage_id}-delivery-check",
+                "commands": [{
+                    "id": "diff-check",
+                    "argv": ["git", "diff", "--check"],
+                    "cwd": "${WORKTREE}",
+                    "expect_exit": 0,
+                    "timeout_seconds": 10,
+                }],
+                "required_receipts": ["executor"],
+            }],
+            ["sh", "-c", f"grep -qx {word} src/{filename}"],
+            stage["allowed_paths"],
+            stage["max_attempts"],
+            goal={"feature_contract": stage["goal"]},
+            run_id=f"bundle-{stage_id}",
+        )
+        persisted = bundles.get_run(native["run_id"])["goal"]
+        stage["goal"] = {
+            "feature_contract": stage["goal"],
+            "delivery_contract": native["contract"],
+            "delivery_plan": native["plan"],
+            "delivery_packet": persisted["delivery_packet"],
+        }
+
+
 def _prepare(root: Path) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     source = root / "source"
@@ -67,6 +117,7 @@ def _prepare(root: Path) -> dict[str, Any]:
     _git("-C", str(source), "commit", "-qm", "baseline")
     base = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     campaign = _campaign()
+    _bind_campaign_delivery(root, campaign, source, base)
     campaign_path = root / "campaign.json"
     campaign_path.write_text(json.dumps(campaign, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     goals = GoalStore(root / "goals")
@@ -76,7 +127,7 @@ def _prepare(root: Path) -> dict[str, Any]:
         "goal_id": "b12-live-smoke:s1",
         "campaign_id": campaign["campaign_id"],
         "stage_id": "s1",
-        "goal": {"feature_contract": campaign["stages"][0]["goal"], "admission_envelope": envelope},
+        "goal": {**campaign["stages"][0]["goal"], "admission_envelope": envelope},
     }
     seeded = submit_command(
         goals,
@@ -130,22 +181,23 @@ def _session(root: Path, *, phase: str, executor: str, offline: bool, hold_after
     factory_overrides = {"fake": _fake_factory} if offline else None
     selected_executor = "fake" if offline else executor
     try:
-        result = goal_loop_run(
-            executor=selected_executor,
-            execute=True,
-            goal_store_root=root / "goals",
-            run_store_root=root / "runs",
-            workspace_root=root / "workspaces",
-            campaign=campaign,
-            source_repo=root / "source",
-            base_revision=(root / "base.txt").read_text(encoding="utf-8").strip(),
-            pause_flag=root / "loop-pause-all",
-            max_cycles=1 if phase == "first" else 16,
-            max_runtime_seconds=900,
-            executor_timeout_seconds=120,
-            factory_overrides=factory_overrides,
-            sleep_fn=(lambda _seconds: None) if offline else None,
-        )
+        with explicit_runstore_factory(fixture_glr) if offline else nullcontext():
+            result = goal_loop_run(
+                executor=selected_executor,
+                execute=True,
+                goal_store_root=root / "goals",
+                run_store_root=root / "runs",
+                workspace_root=root / "workspaces",
+                campaign=campaign,
+                source_repo=root / "source",
+                base_revision=(root / "base.txt").read_text(encoding="utf-8").strip(),
+                pause_flag=root / "loop-pause-all",
+                max_cycles=1 if phase == "first" else 16,
+                max_runtime_seconds=900,
+                executor_timeout_seconds=120,
+                factory_overrides=factory_overrides,
+                sleep_fn=(lambda _seconds: None) if offline else None,
+            )
     except Exception as exc:
         result = {"error": f"{type(exc).__name__}: {exc}"}
         (root / f"{phase}-result.json").write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
@@ -196,15 +248,25 @@ def _event_rows(store: GoalStore) -> list[dict[str, Any]]:
 
 def _receipt(store: RunStore, run_id: str, usage: dict[str, Any]) -> None:
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
+    diff_ref = store.write_artifact(run_id, ordinal, "diff.patch", "")
     receipt = {
         "schema": "loop-hybrid-attempt-receipt/v1",
         "run_id": run_id,
         "attempt": ordinal,
         "usage": usage,
-        "verification": {"argv": ["true"], "exit_code": 0},
+        "diff": diff_ref,
+        "verification": {"argv": ["git", "diff", "--check"], "exit_code": 1},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    if not store.finish_attempt(
+        run_id,
+        ordinal,
+        state="human_required",
+        receipt_ref=ref["ref"],
+        receipt_digest=ref["digest"],
+        fence=store.attempt_fence(run_id, ordinal),
+    ):
+        raise AssertionError("budget fixture receipt was not durably parked")
 
 
 def _budget_case(root: Path, source: Path, base: str, campaign: dict[str, Any], *, unknown: bool, executor: str, offline: bool) -> dict[str, Any]:
@@ -213,7 +275,29 @@ def _budget_case(root: Path, source: Path, base: str, campaign: dict[str, Any], 
     goals = GoalStore(run_root / "goals")
     store = RunStore(run_root / "runs")
     run_id = f"budget-{label}"
-    store.create_run(goal={"goal_id": run_id}, source_repo=source, base_revision=base, run_id=run_id)
+    make_native_run(
+        store,
+        source,
+        base,
+        run_id,
+        "budget",
+        [{
+            "id": "budget-delivery-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        ["git", "rev-parse", "HEAD"],
+        ["src/"],
+        4,
+        goal={"goal_id": run_id, "feature_contract": "budget accounting fixture"},
+        run_id=run_id,
+    )
     usage = token_cost.unknown_usage(model="b12") if unknown else token_cost.measured_usage(model="offline-b12", input_tokens=1, output_tokens=1)
     _receipt(store, run_id, usage)
     calls = {"count": 0}

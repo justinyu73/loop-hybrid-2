@@ -7,8 +7,10 @@ starts, it POLLS the (durable) awaiting runs against a conclusion source (real C
 a stub here) and resumes them. This survives operator-host outage the same way the
 spine survives kill-9 — the awaiting state lives in SQLite, not in a live process.
 
-Additive port: it does NOT modify the verified run_store/controller. Composes the
-external_action_port for at-most-once PR creation. Stub only — no GitHub credentials.
+此 port 組合 external_action_port 與持久化 VerdictStore，不自行持有
+GitHub 憑證。goal_loop_run.build_github_verdict 已可依 contract 注入
+GitHub conclusion source；測試使用的 fixture transport 只證明隔離接線，
+不代表真實 CI 或 provider 驗收。
 """
 from __future__ import annotations
 
@@ -24,6 +26,16 @@ import external_action_port as eap
 ConclusionSource = Callable[[str], dict[str, Any] | None]
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Keep the transaction context contract while closing on context exit."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class VerdictStore:
     """Durable record of runs awaiting / resolved on an external verdict."""
 
@@ -34,7 +46,7 @@ class VerdictStore:
             conn.execute("CREATE TABLE IF NOT EXISTS verdicts (run_id TEXT PRIMARY KEY, op_key TEXT NOT NULL, action_json TEXT NOT NULL, state TEXT NOT NULL, conclusion TEXT, dispatched_at REAL NOT NULL, resolved_at REAL)")
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -81,6 +93,19 @@ class VerdictStore:
         with self._connect() as conn:
             row = conn.execute("SELECT state, conclusion FROM verdicts WHERE run_id = ?", (run_id,)).fetchone()
         return None if row is None else {"state": row["state"], "conclusion": row["conclusion"]}
+
+    def full_record(self, run_id: str) -> dict[str, Any] | None:
+        """The whole durable row: the normalizer binds digests and duration to
+        it, so it must come from one read, not from stitched accessors."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM verdicts WHERE run_id = ?", (run_id,)).fetchone()
+        return None if row is None else dict(row)
+
+    def resolved_verified(self) -> list[dict[str, Any]]:
+        """Rows whose conclusion landed as success: the crash-recovery scan
+        re-offers these to the normalizer when the run never crossed."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM verdicts WHERE state = 'verified'")]
 
 
 def dispatch_external(store: VerdictStore, ledger: eap.ActionLedger, adapter: eap.ExternalAdapter,

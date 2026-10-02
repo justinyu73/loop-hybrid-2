@@ -16,12 +16,18 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_campaign, make_source_repo
+from campaign_compiler import CampaignCompiler
 from goal_loop_driver import run_driver
 from goal_loop_run import build_worker
 from goal_store import GoalStore
 from project_binding import CONTRACT_SCHEMA, resolve_project
 from run_store import RunStore
+import goal_loop_run as fixture_glr
+from p7_native_runstore_fixture import explicit_runstore_factory
+from native_delivery_fixture import make_native_bundle
 
 
 def case(case_id: str, ok: bool, detail: str) -> dict[str, object]:
@@ -35,15 +41,51 @@ def _model(workspace: Path, capsule: dict) -> dict:
     return {"summary": "b5 fixture model"}
 
 
+def _bind_campaign(campaign: dict, source: Path, base: str, campaign_id: str) -> dict:
+    compiled = CampaignCompiler(campaign).compile()["stages"]
+    for stage in campaign["stages"]:
+        stage_id = stage["stage_id"]
+        binding = make_native_bundle(
+            source,
+            base,
+            f"{campaign_id}:{stage_id}",
+            stage_id,
+            [{
+                "id": "second-project-source-check",
+                "commands": [{
+                    "id": "diff-check",
+                    "argv": ["git", "diff", "--cached", "--check"],
+                    "cwd": "${WORKTREE}",
+                    "expect_exit": 0,
+                    "timeout_seconds": 10,
+                }],
+                "required_receipts": ["executor"],
+            }],
+            [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if any(Path('src').glob('attempt-*.txt')) else 1)"],
+            ["src/"],
+            int(stage["max_attempts"]),
+            goal={"feature_contract": stage["goal"], "admission_envelope": compiled[stage_id]},
+        )
+        stage["goal"] = {
+            **stage["goal"],
+            "delivery_required": True,
+            "delivery_contract": binding["contract"],
+            "delivery_plan": binding["plan"],
+            "delivery_packet": binding["packet"],
+        }
+    return campaign
+
+
 def _make_project(root: Path, name: str, campaign_id: str) -> dict[str, object]:
     """One independent fixture project: contract dir + own source repo + contract."""
     proj = root / name
     proj.mkdir()
     source, base = make_source_repo(proj, user=f"b5-{name}")
+    campaign = _bind_campaign(make_campaign(campaign_id, stage_id="stage-only"), source, base, campaign_id)
     contract = {
         "schema": CONTRACT_SCHEMA,
         "project_id": f"b5-project-{name}",
-        "campaign": make_campaign(campaign_id, stage_id="stage-only"),
+        "campaign": campaign,
         "source_repo": str(source),
         "base_revision": base,
         "runtime": {
@@ -62,23 +104,28 @@ def _drive(project: dict[str, object]) -> dict[str, object]:
     """Resolve the contract, seed one candidate, and drive the loop via run_driver."""
     resolved = resolve_project(Path(project["contract_path"]))
     kw = resolved["run_kwargs"]
-    worker = build_worker(
-        goal_store_root=kw["goal_store_root"],
-        run_store_root=kw["run_store_root"],
-        workspace_root=kw["workspace_root"],
-        campaign=kw["campaign"],
-        source_repo=kw["source_repo"],
-        base_revision=kw["base_revision"],
-    )
+    with explicit_runstore_factory(fixture_glr):
+        worker = build_worker(
+            goal_store_root=kw["goal_store_root"],
+            run_store_root=kw["run_store_root"],
+            workspace_root=kw["workspace_root"],
+            campaign=kw["campaign"],
+            source_repo=kw["source_repo"],
+            base_revision=kw["base_revision"],
+        )
     campaign_id = project["campaign_id"]
     goal_id = f"{campaign_id}:stage-only"
     envelope = worker.compilers[campaign_id].compile()["stages"]["stage-only"]
+    stage_goal = worker.compilers[campaign_id].compile()["stages"]["stage-only"]["goal"]
+    # The campaign stage is the persisted producer authority.  Keep its
+    # explicit delivery binding on the candidate so this test exercises the
+    # normal GoalStore->AdmissionBridge path rather than bypassing it.
     worker.goal_store.record_event(
         event_id=f"b5-seed-{project['name']}",
         idempotency_key=f"b5-seed-{project['name']}",
         source="manual_intent",
         event_type="goal_candidate",
-        payload={"candidate": {"goal_id": goal_id, "campaign_id": campaign_id, "stage_id": "stage-only", "goal": {"feature_contract": "stage-only", "admission_envelope": envelope}}},
+        payload={"candidate": {"goal_id": goal_id, "campaign_id": campaign_id, "stage_id": "stage-only", "goal": stage_goal | {"admission_envelope": envelope}}},
     )
     summary = run_driver(
         worker,

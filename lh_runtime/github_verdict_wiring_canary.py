@@ -20,11 +20,19 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_campaign, make_source_repo
+import external_action_port as eap
+from controller import LoopController
 from external_verdict import VerdictStore
+from goal_store import GoalStore
 from github_conclusion_source import GitHubCredentialsMissing, GitHubResponseInvalid
+from native_delivery_fixture import make_native_run
 from project_binding import CONTRACT_SCHEMA, resolve_project
 from run_store import RunStore
+from p7_native_runstore_fixture import explicit_runstore_factory
+from p7_fence_fixture import fixture_command_runner
 import goal_loop_run as glr
 
 TOKEN = "w4-fixture-token"
@@ -50,6 +58,17 @@ class FakeTransport:
         return json.dumps(self.payload, sort_keys=True).encode("utf-8")
 
 
+class _SeedActionAdapter:
+    def __init__(self, head_sha: str | None):
+        self.head_sha = head_sha
+
+    def perform(self, op_key: str, _request: dict[str, Any]) -> dict[str, Any]:
+        external: dict[str, Any] = {"pr": "fixture-pr-1"}
+        if self.head_sha is not None:
+            external["head_sha"] = self.head_sha
+        return {"operation_key": op_key, "external_id": "w4-action", **external}
+
+
 def workflow_run(status: str, conclusion: str | None) -> dict[str, Any]:
     return {"name": GITHUB_VERDICT["workflow"], "head_sha": SHA, "status": status,
             "conclusion": conclusion, "created_at": "2026-07-20T01:00:00Z"}
@@ -68,34 +87,68 @@ def _not_holder_driver(_worker: Any, **_kwargs: Any) -> dict[str, Any]:
 def _seed(root: Path, source: Path, base: str, *, head_sha: str | None = SHA) -> None:
     """Park one run awaiting an external verdict, with the head_sha recorded
     in the parked action's external result (what a real PR adapter returns)."""
-    runs = RunStore(root / "runs")
-    runs.create_run(goal={"goal_id": "w4-parked"}, source_repo=source, base_revision=base, run_id=RUN_ID)
-    ordinal = runs.begin_attempt(RUN_ID, "workspace://w4/1")
-    runs.park_external_verdict(RUN_ID, ordinal, receipt_ref="missing-receipt", receipt_digest="sha256:w4")
+    runs = RunStore(root / "runs", command_runner=fixture_command_runner)
+    goals = GoalStore(root / "goals")
+    checks = [
+        {"id": "w4-source-check", "commands": [{"id": "source-file", "argv": ["test", "-s", "src/w4.txt"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]},
+        {"id": "w4-final-check", "final_only": True, "commands": [{"id": "final-file", "argv": ["test", "-s", "src/w4.txt"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]},
+    ]
+    bundle = make_native_run(
+        runs, source, base, "w4-parked", "github-verdict", checks,
+        ["test", "-s", "src/w4.txt"], ["src/"], 4, phase="async",
+        goal={"goal_id": "w4-parked", "campaign_id": "campaign-w4", "stage_id": "w4", "feature_contract": "github verdict fixture"},
+        run_id=RUN_ID,
+    )
+    goal = runs.get_run(RUN_ID)["goal"]
+    event = goals.record_event(event_id="w4-goal-event", idempotency_key="w4-goal-event", source="w4-canary", event_type="goal_candidate", payload={"goal_id": "w4-parked"})
+    goals.create_candidate(event["event_key"], goal_id="w4-parked", campaign_id="campaign-w4", stage_id="w4", goal=goal, revision=bundle["contract"]["goal"]["revision"])
+    goals.activate_with_run("w4-parked", RUN_ID, event_key=event["event_key"])
     verdicts = VerdictStore(root / "runs" / "verdict.sqlite3")
-    external = {"pr": "fixture-pr-1", "head_sha": head_sha} if head_sha is not None else {"pr": "fixture-pr-1"}
-    verdicts.park(RUN_ID, OP_KEY, {"request": {"case": "w4"}, "external": external}, at=1.0)
+    ledger = eap.ActionLedger(root / "runs" / "action-ledger.sqlite3")
+    controller = LoopController(runs, root / "workspaces")
+
+    def model(workspace: Path, _capsule: dict[str, Any]) -> dict[str, Any]:
+        target = workspace / "src" / "w4.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("w4 candidate\n", encoding="utf-8")
+        return {"summary": "native GitHub verdict fixture", "usage": {"state": "unknown"}}
+
+    parked = controller.tick_async(
+        RUN_ID,
+        holder="w4-seed",
+        model=model,
+        verdict_store=verdicts,
+        action_ledger=ledger,
+        adapter=_SeedActionAdapter(head_sha),
+        action_id="open-pr",
+    )
+    if parked.get("status") != "awaiting_external_verdict":
+        raise AssertionError({"parked": parked, "run": runs.get_run(RUN_ID)})
 
 
 def _resume(root: Path, source: Path, base: str, transport: FakeTransport,
             *, environ: dict[str, str] | None = None, driver_fn=_not_holder_driver) -> dict[str, Any]:
     env = {"LH_GITHUB_TOKEN": TOKEN} if environ is None else environ
-    return glr.run(
-        executor="fake",
-        execute=True,
-        goal_store_root=root / "goals",
-        run_store_root=root / "runs",
-        workspace_root=root / "workspaces",
-        campaign=make_campaign("campaign-w4"),
-        source_repo=source,
-        base_revision=base,
-        executor_timeout_seconds=0.25,
-        github_verdict=dict(GITHUB_VERDICT),
-        github_environ=env,
-        github_transport=transport,
-        factory_overrides={"fake": _fake_factory},
-        driver_fn=driver_fn,
-    )
+    with explicit_runstore_factory(glr):
+        return glr.run(
+            executor="fake",
+            execute=True,
+            goal_store_root=root / "goals",
+            run_store_root=root / "runs",
+            workspace_root=root / "workspaces",
+            campaign=make_campaign("campaign-w4"),
+            source_repo=source,
+            base_revision=base,
+            # Wiring includes real final Git I/O, not a deadline assertion.
+            # Match the bounded native fixture; cumulative expiry and process
+            # timeout refusal live in test_generic_delivery_runstore.py.
+            executor_timeout_seconds=30,
+            github_verdict=dict(GITHUB_VERDICT),
+            github_environ=env,
+            github_transport=transport,
+            factory_overrides={"fake": _fake_factory},
+            driver_fn=driver_fn,
+        )
 
 
 def _write_contract(root: Path, source: Path, base: str, *, external_verdict: Any = None) -> Path:
@@ -196,7 +249,8 @@ def main() -> int:
         failure = scenario["failure"]
         pending = scenario["pending"]
         no_sha = scenario["no-sha"]
-        expected_resumed = [{"run_id": RUN_ID, "op_key": OP_KEY, "conclusion": "success", "state": "verified"}]
+        success_rows = success["result"].get("startup_external_resumed", [])
+        success_resume = success_rows[0] if len(success_rows) == 1 else {}
         cases = [
             {"id": "declared-contract-passes-github-verdict-kwargs",
              "ok": declared.get("github_verdict") == GITHUB_VERDICT and invalid_rejected == 2,
@@ -207,7 +261,11 @@ def main() -> int:
              "detail": json.dumps({"has_github_verdict": "github_verdict" in undeclared, "dry_mode": dry["mode"]})},
             {"id": "ci-success-resumes-parked-run-to-verified",
              "ok": success["error"] is None
-             and success["result"].get("startup_external_resumed") == expected_resumed
+             and success_resume.get("run_id") == RUN_ID
+             and success_resume.get("conclusion") == "success"
+             and success_resume.get("state") == "verified"
+             and success_resume.get("normalized", {}).get("status") in {"ready", "already_normalized"}
+             and success_resume.get("delivery", {}).get("verdict") == "GREEN"
              and success["run_state"] == "verified"
              and success["verdict"] == {"state": "verified", "conclusion": "success"}
              and success["transport"].calls == 1

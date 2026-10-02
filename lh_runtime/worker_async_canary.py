@@ -19,13 +19,17 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import external_action_port as eap
 from campaign_compiler import CAMPAIGN_SCHEMA, CampaignCompiler
 from controller import LoopController
 from external_verdict import VerdictStore
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_bundle
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 
 def git(*args: str) -> None:
@@ -73,10 +77,32 @@ def async_envelope(compiler: CampaignCompiler) -> dict:
     return envelope
 
 
-def seed(store: GoalStore, *, goal_id: str, envelope: dict, event_key: str) -> None:
+def seed(store: GoalStore, *, goal_id: str, envelope: dict, event_key: str, source: Path, base: str) -> None:
+    binding = make_native_bundle(
+        source,
+        base,
+        goal_id,
+        "stage-async",
+        [{
+            "id": "worker-async-source-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--cached", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        [sys.executable, "-B", "-c", "from pathlib import Path; raise SystemExit(0 if Path('src/out.txt').is_file() else 1)"],
+        ["src/"],
+        int(envelope.get("max_attempts", 4)),
+        phase="async" if isinstance(envelope.get("external_verdict"), dict) else "sync",
+        goal={"feature_contract": "stage-async", "admission_envelope": envelope},
+    )
     store.record_event(event_id=event_key, idempotency_key=event_key, source="manual_intent", event_type="goal_candidate", payload={
         "candidate": {"goal_id": goal_id, "campaign_id": "campaign-w2", "stage_id": "stage-async",
-                      "goal": {"feature_contract": "stage-async", "admission_envelope": envelope}}
+                      "goal": binding["goal"]}
     })
 
 
@@ -94,7 +120,7 @@ def failing_model(workspace: Path, capsule: dict) -> dict:
 def make_worker(root: Path, name: str, source: Path, base: str, compiler: CampaignCompiler,
                 *, wired: bool = True) -> tuple[GoalLoopWorker, VerdictStore, FixtureAdapter]:
     goals = GoalStore(root / f"{name}-goals")
-    runs = RunStore(root / f"{name}-runs")
+    runs = RunStore(root / f"{name}-runs", command_runner=fixture_command_runner)
     verdicts = VerdictStore(root / f"{name}-verdicts")
     adapter = FixtureAdapter()
     kwargs: dict[str, Any] = {}
@@ -125,7 +151,7 @@ def main() -> int:
 
         # Flow A: park -> success verdict -> verified.
         worker_a, verdicts_a, adapter_a = make_worker(root, "a", source, base, compiler)
-        seed(worker_a.goal_store, goal_id="campaign-w2:async-a", envelope=async_envelope(compiler), event_key="w2-a-seed")
+        seed(worker_a.goal_store, goal_id="campaign-w2:async-a", envelope=async_envelope(compiler), event_key="w2-a-seed", source=source, base=base)
         parked_a = worker_a.tick(holder="w2-a", model=model, verdict_store=verdicts_a, conclusion_source=lambda op_key: None)
         run_a = parked_a["run"]["run_id"]
         run_a_state = RunStore(root / "a-runs").get_run(run_a)["state"]
@@ -137,7 +163,7 @@ def main() -> int:
 
         # Flow B: park -> failure verdict -> retry; identical diff dedupes the action.
         worker_b, verdicts_b, adapter_b = make_worker(root, "b", source, base, compiler)
-        seed(worker_b.goal_store, goal_id="campaign-w2:async-b", envelope=async_envelope(compiler), event_key="w2-b-seed")
+        seed(worker_b.goal_store, goal_id="campaign-w2:async-b", envelope=async_envelope(compiler), event_key="w2-b-seed", source=source, base=base)
         parked_b = worker_b.tick(holder="w2-b", model=model, verdict_store=verdicts_b, conclusion_source=lambda op_key: None)
         run_b = parked_b["run"]["run_id"]
         op_key_b = parked_b["run"].get("op_key")
@@ -150,19 +176,19 @@ def main() -> int:
 
         # Flow C: executor failure retries without parking.
         worker_c, verdicts_c, adapter_c = make_worker(root, "c", source, base, compiler)
-        seed(worker_c.goal_store, goal_id="campaign-w2:async-c", envelope=async_envelope(compiler), event_key="w2-c-seed")
+        seed(worker_c.goal_store, goal_id="campaign-w2:async-c", envelope=async_envelope(compiler), event_key="w2-c-seed", source=source, base=base)
         failed_c = worker_c.tick(holder="w2-c", model=failing_model, verdict_store=verdicts_c, conclusion_source=lambda op_key: None)
 
         # Flow D: async envelope on an unwired worker routes to a human.
         worker_d, verdicts_d, _adapter_d = make_worker(root, "d", source, base, compiler, wired=False)
-        seed(worker_d.goal_store, goal_id="campaign-w2:async-d", envelope=async_envelope(compiler), event_key="w2-d-seed")
+        seed(worker_d.goal_store, goal_id="campaign-w2:async-d", envelope=async_envelope(compiler), event_key="w2-d-seed", source=source, base=base)
         unwired_d = worker_d.tick(holder="w2-d", model=model)
         goal_d = GoalStore(root / "d-goals").get_goal("campaign-w2:async-d")["state"]
 
         # Flow E: classic verification_argv envelope still takes the local verifier,
         # even on a fully wired worker.
         worker_e, verdicts_e, adapter_e = make_worker(root, "e", source, base, compiler)
-        seed(worker_e.goal_store, goal_id="campaign-w2:sync-e", envelope=compiler.compile()["stages"]["stage-async"], event_key="w2-e-seed")
+        seed(worker_e.goal_store, goal_id="campaign-w2:sync-e", envelope=compiler.compile()["stages"]["stage-async"], event_key="w2-e-seed", source=source, base=base)
         sync_e = worker_e.tick(holder="w2-e", model=model, verdict_store=verdicts_e, conclusion_source=lambda op_key: None)
 
         # The async diff must include NEW untracked files (staging before diff).
@@ -174,7 +200,7 @@ def main() -> int:
         def boom_adapter(op_key, request):
             raise RuntimeError("push failed fixture")
         worker_f.external_adapter = type("Boom", (), {"perform": staticmethod(boom_adapter)})()
-        seed(worker_f.goal_store, goal_id="campaign-w2:async-f", envelope=async_envelope(compiler), event_key="w2-f-seed")
+        seed(worker_f.goal_store, goal_id="campaign-w2:async-f", envelope=async_envelope(compiler), event_key="w2-f-seed", source=source, base=base)
         exploded_f = worker_f.tick(holder="w2-f", model=model, verdict_store=verdicts_f, conclusion_source=lambda op_key: None)
         run_f_state = RunStore(root / "f-runs").get_run(exploded_f["run"]["run_id"])["state"] if exploded_f.get("run") else None
 
@@ -186,7 +212,13 @@ def main() -> int:
                  and adapter_a.calls == 1,
                  str(parked_a["run"])),
             case("landed-success-verdict-verifies-run",
-                 landed_a["external_resumed"] == [{"run_id": run_a, "op_key": op_key_a, "conclusion": "success", "state": "verified"}]
+                 len(landed_a["external_resumed"]) == 1
+                 and all(landed_a["external_resumed"][0].get(k) == v for k, v in
+                         {"run_id": run_a, "op_key": op_key_a,
+                          "conclusion": "success", "state": "verified"}.items())
+                 # N15: success crosses only through the LH-owned normalized
+                 # record; the row carries the ready proof.
+                 and landed_a["external_resumed"][0]["normalized"]["status"] == "ready"
                  and run_a_after == "verified",
                  str(landed_a["external_resumed"])),
             case("landed-failure-verdict-retries-run",
@@ -199,7 +231,11 @@ def main() -> int:
                  f"calls={adapter_b.calls} run={failed_b['run']}"),
             case("re-parked-run-is-polled-again-and-resolves",
                  awaiting_b_after_retry == [(run_b, op_key_b)]
-                 and second_b["external_resumed"] == [{"run_id": run_b, "op_key": op_key_b, "conclusion": "success", "state": "verified"}],
+                 and len(second_b["external_resumed"]) == 1
+                 and all(second_b["external_resumed"][0].get(k) == v for k, v in
+                         {"run_id": run_b, "op_key": op_key_b,
+                          "conclusion": "success", "state": "verified"}.items())
+                 and second_b["external_resumed"][0]["normalized"]["status"] == "ready",
                  f"awaiting={awaiting_b_after_retry} resumed={second_b['external_resumed']}"),
             case("executor-failure-retries-without-park",
                  failed_c["run"]["status"] == "retry_pending"

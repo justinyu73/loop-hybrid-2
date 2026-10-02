@@ -144,10 +144,10 @@ def routing_authority() -> dict[str, Any]:
                     ["repo_edit", "test_reasoning"],
                 ),
                 _resource(
-                    "evaluate-claude",
-                    "claude",
+                    "evaluate-codex",
+                    "codex",
                     ["bounded_judgment"],
-                    model="sonnet",
+                    model="judge-codex",
                     permission="read_only",
                     tools=[],
                 ),
@@ -189,7 +189,7 @@ def main() -> int:
         "id": "split-authority-composes-and-binds-provenance",
         "ok": (
             change_binding["binding_id"] == "edit-codex"
-            and evaluation["binding"]["binding_id"] == "evaluate-claude"
+            and evaluation["binding"]["binding_id"] == "evaluate-codex"
             and change_binding["routing_profile"] == "operator-default"
             and change_binding["registry_owner"] == "loop-hybrid-operator"
             and change_binding["resource_health_evidence_digest"] == DIGEST_B
@@ -303,14 +303,14 @@ def main() -> int:
         "required": ["verdict", "rationale"],
         "additionalProperties": False,
     }
-    claude_argv = executors.evaluation_argv(
-        "claude",
+    codex_argv = executors.evaluation_argv(
+        "codex",
         "prompt",
-        "sonnet",
+        "judge-codex",
         json_schema=schema,
     )
     envelope_payload = _evaluation_payload(
-        "claude",
+        "codex",
         json.dumps({
             "type": "result",
             "subtype": "success",
@@ -367,17 +367,12 @@ def main() -> int:
         },
     }
     cases.append({
-        "id": "claude-wire-is-schema-bound-and-unwrapped-before-parser",
+        "id": "provider-neutral-evaluation-wire-is-schema-bound-before-parser",
         "ok": (
-            "--output-format" in claude_argv
-            and "json" in claude_argv
-            and "--json-schema" in claude_argv
-            and "--permission-mode" in claude_argv
-            and "plan" in claude_argv
-            and "--tools" in claude_argv
-            and "" in claude_argv
-            and "--no-session-persistence" in claude_argv
-            and "--safe-mode" in claude_argv
+            codex_argv[:4] == ["codex", "exec", "-m", "judge-codex"]
+            and "--sandbox" in codex_argv
+            and "read-only" in codex_argv
+            and "--dangerously-bypass-approvals-and-sandbox" not in codex_argv
             and json.loads(envelope_payload) == {
                 "verdict": "accept",
                 "rationale": "fixture",
@@ -386,7 +381,7 @@ def main() -> int:
             and all(
                 _rejects(
                     lambda wire=wire: _evaluation_payload(
-                        "claude",
+                        "codex",
                         wire,
                         require_structured=True,
                     )
@@ -411,8 +406,8 @@ def main() -> int:
         ),
         "detail": json.dumps({
             "argv_flags": [
-                item for item in claude_argv
-                if item in {"--output-format", "--json-schema", "json"}
+                item for item in codex_argv
+                if item in {"--sandbox", "read-only"}
             ],
             "payload": envelope_payload,
         }),

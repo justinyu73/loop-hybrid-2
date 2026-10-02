@@ -43,6 +43,11 @@ CONTROL_EVENT_TYPES = {
     "successor_heartbeat",
     "rollover_finalized",
 }
+SAFE_OBSERVATION_POLICY_DECLARATION = (
+    "provider message bodies",
+    "secrets",
+    "credentials",
+)
 
 
 def _digest(value: Any) -> str:
@@ -139,7 +144,28 @@ def _validate_control_payload(event_type: str, payload: dict[str, Any], *, goal_
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if len(encoded) > 20000:
         raise ValueError("control payload exceeds bounded size")
-    lowered = encoded.lower()
+    scan_payload = json.loads(encoded)
+    if event_type == "rollover_requested":
+        packet = scan_payload.get("handoff_packet")
+        budget = (
+            packet.get("observation_budget")
+            if isinstance(packet, dict)
+            and isinstance(packet.get("observation_budget"), dict)
+            else None
+        )
+        if (
+            isinstance(budget, dict)
+            and tuple(budget.get("forbidden") or ())
+            == SAFE_OBSERVATION_POLICY_DECLARATION
+        ):
+            # This exact negative policy is canonical handoff metadata, not
+            # secret-bearing content. Any marker elsewhere remains rejected.
+            budget["forbidden"] = []
+    lowered = json.dumps(
+        scan_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+    ).lower()
     if any(marker in lowered for marker in ("transcript", "credential", "password", "cookie", "api_key", "private_key")):
         raise ValueError("control payload contains a forbidden secret/transcript marker")
     if event_type == "rollover_requested":
@@ -319,7 +345,11 @@ def _event_goal_id(event: dict[str, Any]) -> str | None:
     admission reused the Goal's historical source event.  Their result still
     carries the LH-owned admission/candidate link; reading that explicit
     pointer keeps status backward-compatible without matching by campaign or
-    stage names.
+    stage names.  A candidate embedded in the payload is only a proposal: it
+    is not a binding until GoalStore persists the event's ``goal_id`` or a
+    successful admission result names one.  A refused admission may echo the
+    candidate goal for diagnostics, but its missing ``run_id`` is not a
+    command-to-Goal binding.
     """
     direct = event.get("goal_id")
     if isinstance(direct, str) and direct:
@@ -329,11 +359,12 @@ def _event_goal_id(event: dict[str, Any]) -> str | None:
     for container in (admission, result):
         value = container.get("goal_id")
         if isinstance(value, str) and value:
+            if container is admission and not isinstance(container.get("run_id"), str):
+                continue
+            if container is admission and not container["run_id"].strip():
+                continue
             return value
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
-    value = candidate.get("goal_id")
-    return value if isinstance(value, str) and value else None
+    return None
 
 
 def _linked_goal_event(goal_store: GoalStore, event: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -414,7 +445,7 @@ def _execution_projection(goal_store: GoalStore, run_store: RunStore | None, eve
             "digest": receipt.get("receipt_digest"),
         }
         try:
-            projection["derived_verdict"] = value_reducer.verdict_for_run(run_store, run_id)
+            projection["derived_verdict"] = value_reducer.value_evidence_for_run(run_store, run_id, goal_store=goal_store)
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             projection["derived_verdict"] = {"verdict": "RED", "reasons": [f"projection_error: {type(exc).__name__}"]}
     return projection

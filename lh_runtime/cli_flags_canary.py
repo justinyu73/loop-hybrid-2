@@ -47,7 +47,7 @@ def _contract(root: Path) -> Path:
         "source_repo": str(root),
         "base_revision": "main",
         "runtime": {"goal_store": str(root / "goals"), "run_store": str(root / "runs"), "workspace_root": str(root / "ws")},
-        "models": {"execute": "codex", "judge": "kimi", "judge_model": "kimi-code/k3"},
+        "models": {"execute": "codex", "judge": "agy", "judge_model": "fixture-agy"},
     }
     path = root / "contract.json"
     path.write_text(json.dumps(contract), encoding="utf-8")
@@ -67,14 +67,14 @@ def _plan(argv: list[str]) -> dict:
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         contract = _contract(Path(raw))
-        both = _plan(["--contract", str(contract), "--executor", "claude", "--judge-executor", "claude", "--judge-model", "claude-x"])
+        both = _plan(["--contract", str(contract), "--executor", "orca", "--judge-executor", "codex", "--judge-model", "fixture-codex"])
         contract_only = _plan(["--contract", str(contract)])
         cases = [
             case("flag-and-contract-coexist-flag-wins",
-                 both["executor"] == "claude" and both["judge_executor"] == "claude" and both["judge_model"] == "claude-x",
+                 both["executor"] == "orca" and both["judge_executor"] == "codex" and both["judge_model"] == "fixture-codex",
                  json.dumps({"executor": both["executor"], "judge": both["judge_executor"]})),
             case("contract-models-applies-without-flags",
-                 contract_only["executor"] == "codex" and contract_only["judge_executor"] == "kimi" and contract_only["judge_model"] == "kimi-code/k3",
+                 contract_only["executor"] == "codex" and contract_only["judge_executor"] == "agy" and contract_only["judge_model"] == "fixture-agy",
                  json.dumps({"executor": contract_only["executor"], "judge": contract_only["judge_executor"]})),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]

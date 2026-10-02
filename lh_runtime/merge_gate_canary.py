@@ -16,6 +16,7 @@ with the sha guard and a readable audit chain.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -25,11 +26,13 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tests"))
 import external_action_port as eap
 import external_verdict as ev
 import goal_loop_run as glr
 import merge_trust
 from _fixture import make_campaign, make_source_repo
+from controller import LoopController
 from merge_gate import (
     MergeCredentialsMissing,
     MergeGate,
@@ -37,6 +40,9 @@ from merge_gate import (
     TrustRampStore,
     merge_op_key,
 )
+from native_delivery_fixture import make_native_run
+from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 TOKEN = "r2-fixture-merge-token"
 HEAD_SHA = "head-sha-r2-fixture"
@@ -90,16 +96,76 @@ def _routine_judge(_snapshot: dict) -> dict:
     return {"grade": "routine", "rationale": "fixture routine grade"}
 
 
+def _git(*args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], check=True, capture_output=True, text=True)
+
+
 def _seed(root: Path, *, run_id: str = "run-r2-parked", diff_text: str = DIFF_TEXT,
           allowed: tuple = ("src/",), conclusion: str = "success"):
     store_root = root / "runs"
-    from run_store import RunStore
-    store = RunStore(store_root)
-    goal = {"goal_id": GOAL_TYPE, "campaign_id": "campaign-r2", "stage_id": "stage-merge",
-            "admission_envelope": {"allowed_paths": list(allowed),
-                                   "acceptance_lamp": {"id": "lamp", "smoke": "marker", "verification_argv": LAMP_ARGV}}}
-    store.create_run(goal=goal, source_repo=root, base_revision="base-r2", run_id=run_id)
+    store = RunStore(store_root, command_runner=fixture_command_runner)
+    source, base = make_source_repo(root / "source")
+    verifier_path = "src/out.txt" if "src/" in allowed else "gate-pack/verify.sh"
+    goal = {
+        "goal_id": GOAL_TYPE,
+        "goal_revision": 1,
+        "node_id": "merge",
+        "campaign_id": "campaign-r2",
+        "stage_id": "stage-merge",
+        "feature_contract": "bounded merge candidate",
+        "admission_envelope": {
+            "allowed_paths": list(allowed),
+            "acceptance_lamp": {"id": "lamp", "smoke": "marker", "verification_argv": LAMP_ARGV},
+        },
+    }
+    native = make_native_run(
+        store,
+        source,
+        base,
+        GOAL_TYPE,
+        "merge",
+        [{
+            "id": "r2-merge-check",
+            "commands": [{
+                "id": "diff-check",
+                "argv": ["git", "diff", "--check"],
+                "cwd": "${WORKTREE}",
+                "expect_exit": 0,
+                "timeout_seconds": 10,
+            }],
+            "required_receipts": ["executor"],
+        }],
+        ["sh", "-c", f"grep -q lh-r2 {verifier_path}"],
+        list(allowed),
+        4,
+        goal=goal,
+        run_id=run_id,
+    )
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
+    candidate = root / "candidate"
+    _git("clone", "-q", str(source), str(candidate))
+    patch = root / "change.patch"
+    patch.write_text(diff_text, encoding="utf-8")
+    _git("-C", str(candidate), "apply", str(patch))
+    diff_digest = "sha256:" + hashlib.sha256(diff_text.encode()).hexdigest()
+    controller = LoopController(store, root / "workspaces")
+    delivery = controller._record_delivery_from_provider(
+        run_id=run_id,
+        ordinal=ordinal,
+        fence=store.attempt_fence(run_id, ordinal),
+        phase="final",
+        provider={"summary": "r2 bounded merge fixture"},
+        workspace=candidate,
+        diff_digest=diff_digest,
+        changed_paths=[verifier_path],
+        checker={"argv": LAMP_ARGV, "exit_code": 0, "stdout": "lamp ok\n", "stderr": ""},
+        dispatch_key=f"r2:{run_id}:{ordinal}:{diff_digest}",
+        terminal_state="verified",
+    )
+    if delivery.get("verdict") != "GREEN" or not isinstance(delivery.get("evidence"), dict):
+        raise AssertionError(f"final delivery fixture was not GREEN: {delivery}")
     diff_ref = store.write_artifact(run_id, ordinal, "diff.patch", diff_text)
     stdout_ref = store.write_artifact(run_id, ordinal, "verifier.stdout", "lamp ok\n")
     stderr_ref = store.write_artifact(run_id, ordinal, "verifier.stderr", "")
@@ -109,7 +175,16 @@ def _seed(root: Path, *, run_id: str = "run-r2-parked", diff_text: str = DIFF_TE
         "verification": {"argv": LAMP_ARGV, "exit_code": 0, "stdout": stdout_ref, "stderr": stderr_ref},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    if not store.finish_attempt_with_delivery(
+        run_id,
+        ordinal,
+        state="verified",
+        receipt_ref=ref["ref"],
+        receipt_digest=ref["digest"],
+        evidence=delivery["evidence"],
+        fence=store.attempt_fence(run_id, ordinal),
+    ):
+        raise AssertionError("final delivery fixture could not become verified")
     verdicts = ev.VerdictStore(store_root / "verdict.sqlite3")
     verdicts.park(run_id, "op-r2-open",
                   {"request": {"action_id": "open-pr"},

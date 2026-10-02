@@ -90,7 +90,7 @@ def index_run_evidence(*, run_store: RunStore, store: KnowledgeStore) -> dict[st
             counts["skipped"] += 1
             continue
         try:
-            verdict = value_reducer.verdict_for_run(run_store, run_id)
+            verdict = value_reducer.value_evidence_for_run(run_store, run_id)
             attempt = run_store.latest_attempt(run_id) or {}
             summary = {
                 "schema": "loop-hybrid-evidence-context/v1",

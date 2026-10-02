@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_campaign, make_goal as _make_goal, make_source_repo
 from admission_bridge import GoalAdmissionBridge
 from campaign_compiler import CampaignCompiler
 from controller import LoopController
 from goal_loop_worker import GoalLoopWorker, select_next_runnable
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 
 CAMPAIGN = "selector-fixture"
 
@@ -31,12 +36,33 @@ def make_goal(
     parent_goal_id: str | None = None,
     depends_on: list[str] | None = None,
     priority: int = 0,
+    goal: dict[str, object] | None = None,
 ) -> None:
-    _make_goal(
-        store,
-        goal_id,
+    if goal is None:
+        _make_goal(
+            store,
+            goal_id,
+            campaign_id=CAMPAIGN,
+            stage_id="stage-s",
+            parent_goal_id=parent_goal_id,
+            depends_on=depends_on,
+            priority=priority,
+        )
+        return
+    event_key = f"fixture-event:{goal_id}"
+    store.record_event(
+        event_id=f"evt-{goal_id}",
+        idempotency_key=event_key,
+        source="manual",
+        event_type="manual_intent",
+        payload={"campaign_id": CAMPAIGN, "goal_id": goal_id},
+    )
+    store.create_candidate(
+        event_key,
+        goal_id=goal_id,
         campaign_id=CAMPAIGN,
         stage_id="stage-s",
+        goal=goal,
         parent_goal_id=parent_goal_id,
         depends_on=depends_on,
         priority=priority,
@@ -44,7 +70,14 @@ def make_goal(
 
 
 def queue_run(goals: GoalStore, runs: RunStore, goal_id: str, run_id: str) -> None:
-    runs.create_run(goal={"goal_id": goal_id}, source_repo=Path("fixture-repo"), base_revision="fixture-rev", run_id=run_id)
+    root = ROOT
+    base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    make_native_run(
+        runs, root, base, goal_id, "selector",
+        [{"id": "selector-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+        ["git", "rev-parse", "HEAD"], ["loop-hybrid/"], 4,
+        goal={"goal_id": goal_id}, run_id=run_id,
+    )
     goals.activate_with_run(goal_id, run_id)
 
 
@@ -165,12 +198,38 @@ def main() -> int:
         source, base = make_source_repo(root)
 
         wire = GoalStore(root / "wire-goals")
-        wire_runs = RunStore(root / "wire-runs")
-        envelope = CampaignCompiler(campaign()).compile()["stages"]["stage-s"]
+        wire_runs = RunStore(root / "wire-runs", command_runner=fixture_command_runner)
+        # Keep the real producer chain under test: a sealed native bundle is
+        # first persisted as fixture input, then copied into the immutable
+        # Goal revision and admitted by GoalAdmissionBridge.  The selector
+        # must not manufacture a Run and call activate_with_run directly.
+        wire_bundle_runs = RunStore(root / "wire-bundle-runs")
         bridge = GoalAdmissionBridge(wire, wire_runs)
+        envelope = CampaignCompiler(campaign()).compile()["stages"]["stage-s"]
         for goal_id, priority in (("wire-low", 1), ("wire-high", 5)):
-            make_goal(wire, goal_id, priority=priority)
-            bridge.admit(goal_id, source_repo=source, base_revision=base, envelope=envelope)
+            native_goal = {
+                "goal_id": goal_id,
+                "campaign_id": CAMPAIGN,
+                "stage_id": "stage-s",
+                "admission_envelope": envelope,
+                "must_have": [goal_id],
+            }
+            native = make_native_run(
+                wire_bundle_runs, source, base, goal_id, "selector-wire",
+                [{"id": "selector-wire-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+                ["git", "rev-parse", "HEAD"], ["src/"], 4,
+                goal=native_goal,
+            )
+            bundle_goal = wire_bundle_runs.get_run(native["run_id"])["goal"]
+            make_goal(wire, goal_id, priority=priority, goal=bundle_goal)
+            admitted = bridge.admit(
+                goal_id,
+                source_repo=source,
+                base_revision=base,
+                envelope=envelope,
+            )
+            if admitted.get("status") not in {"active", "reused"} or not admitted.get("run_id"):
+                raise AssertionError(f"selector admission did not activate {goal_id}: {admitted}")
         worker = GoalLoopWorker(
             goal_store=wire,
             run_store=wire_runs,

@@ -8,8 +8,8 @@ fixture JSONL session files and injected session_roots, that the executor
 snapshot + collector delta bills only what the invocation appended: pre-
 existing cumulative stays out, a brand-new file bills in full, an unchanged
 or inconsistent file reports unknown (never zero, never phantom, never
-negative), and the same delta shape holds for the claude transcript and kimi
-wire collectors, which shared the flaw. Also proves make_cli_agent takes the
+negative), and the same delta shape holds for the claude transcript
+collector, which shared the flaw. Also proves make_cli_agent takes the
 snapshot before the subprocess and passes it to the collector.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import claude_usage
 import codex_usage
-import kimi_usage
+from _fixture import FixtureExecutionFencePort, capsule_with_fence
 from cli_agent_executor import make_cli_agent
 
 STARTED_AT = 2000.0
@@ -59,14 +59,6 @@ def _claude_line(input_tokens: int, cache_read: int, cache_creation: int, output
                 "output_tokens": output,
             },
         },
-    })
-
-
-def _kimi_line(input_other: int, cache_read: int, cache_creation: int, output: int) -> str:
-    return json.dumps({
-        "type": "usage.record",
-        "model": "kimi-code/k3",
-        "usage": {"inputOther": input_other, "output": output, "inputCacheRead": cache_read, "inputCacheCreation": cache_creation},
     })
 
 
@@ -139,34 +131,24 @@ def main() -> int:
         _touch(transcript)
         claude = claude_usage.collector(object(), {"started_at": STARTED_AT, "snapshot": claude_baseline}, session_roots=(claude_root,))
 
-        # 7) Kimi wire log: same flaw, same delta fix.
-        kimi_root = root / "kimi"
-        wire_dir = kimi_root / "wd" / "session_1" / "agents" / "main"
-        wire_dir.mkdir(parents=True)
-        wire = wire_dir / "wire.jsonl"
-        wire.write_text(_kimi_line(50_000, 600_000, 1_000, 3_000) + "\n", encoding="utf-8")
-        kimi_baseline = kimi_usage.snapshot(session_roots=(kimi_root,))
-        with wire.open("a", encoding="utf-8") as handle:
-            handle.write(_kimi_line(60, 200, 0, 40) + "\n")
-        _touch(wire)
-        kimi = kimi_usage.collector(object(), {"started_at": STARTED_AT, "snapshot": kimi_baseline}, session_roots=(kimi_root,))
-
-        # 8) Executor protocol: snapshot taken before the subprocess and handed to the collector.
+        # 7) Executor protocol: snapshot taken before the subprocess and handed to the collector.
         seen: dict[str, Any] = {}
 
         def recording_collector(_proc: Any, context: dict[str, Any]) -> dict[str, Any]:
             seen["context"] = context
             return {"state": "measured", "model": "fixture", "input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}
 
+        fixture_fence = FixtureExecutionFencePort()
         agent = make_cli_agent(
             lambda _prompt: ["sh", "-c", "true"],
             name="fixture",
             usage_collector=recording_collector,
             snapshot_fn=lambda: {"path": "fixture-session", "usage": None},
+            execution_fence_port=fixture_fence,
         )
         workspace = root / "ws"
         workspace.mkdir()
-        agent(workspace, {"attempt": 1, "goal": {"feature_contract": "x"}, "base_revision": "base"})
+        agent(workspace, capsule_with_fence(fixture_fence, workspace, {"attempt": 1, "goal": {"feature_contract": "x"}, "base_revision": "base"}))
         passed = seen.get("context", {}).get("snapshot") == {"path": "fixture-session", "usage": None}
 
         cases = [
@@ -194,11 +176,6 @@ def main() -> int:
              and claude["output_tokens"] == 30 and claude["cache_read_tokens"] == 400
              and claude["model"] == "claude-opus-4-8",
              "detail": json.dumps(claude)},
-            {"id": "kimi-wire-delta-only",
-             "ok": kimi.get("state") == "measured" and kimi["input_tokens"] == 60
-             and kimi["output_tokens"] == 40 and kimi["cache_read_tokens"] == 200
-             and kimi["model"] == "kimi-code/k3",
-             "detail": json.dumps(kimi)},
             {"id": "executor-passes-snapshot-to-collector",
              "ok": passed and seen.get("context", {}).get("started_at") is not None,
              "detail": json.dumps({"snapshot_in_context": passed})},

@@ -21,12 +21,10 @@ never an acceptance authority. The async external-verdict path is out of scope
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from cli_agent_executor import resolve_cli
+from cli_agent_executor import run_bounded_judge
 from turning_point import parse_decision
 
 SNAPSHOT_SCHEMA = "lh-grill-loop/v1"
@@ -180,12 +178,6 @@ def make_cli_judge(
     def grill(snapshot: dict[str, Any]) -> Any:
         prompt = build_judge_prompt(snapshot)
         argv = argv_builder(prompt)
-        argv[0] = resolve_cli(argv[0])
-        env = dict(os.environ)
-        env["PATH"] = f"{Path(argv[0]).parent}:{env.get('PATH', '')}"
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds, env=env)
-        if proc.returncode != 0:
-            raise RuntimeError(f"grill judge {name} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-        return parse_decision(proc.stdout)
+        return parse_decision(run_bounded_judge(argv, name=f"grill {name}", timeout_seconds=timeout_seconds))
 
     return grill

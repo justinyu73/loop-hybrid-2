@@ -219,6 +219,59 @@ def verdict_for_run(run_store: Any, run_id: str) -> dict[str, Any]:
     return verdict
 
 
+def value_evidence_for_run(run_store: Any, run_id: str, *, goal_store: Any = None) -> dict[str, Any]:
+    """The single value-evidence boundary (goal-lifecycle-v1 async boundary).
+
+    Sync runs judge the lamp receipt exactly as before. An async receipt
+    carries no exit_code -- feeding it to the lamp reader can only ever say
+    RED -- so the async arm judges the LH-owned normalized record instead:
+    ready-for-verified maps to a lamp-equivalent pass input and every other
+    value rule (empty diff, scope, artifact integrity) applies unchanged. A
+    reader without the goal store cannot see the normalized record and must
+    not invent a pass: async stays RED there, with the reason typed.
+    """
+    latest = run_store.latest_receipt(run_id)
+    if not latest or not latest.get("receipt_ref"):
+        return verdict_for_run(run_store, run_id)
+    try:
+        receipt = json.loads((run_store.root / latest["receipt_ref"]).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return verdict_for_run(run_store, run_id)
+    verification = receipt.get("verification") if isinstance(receipt.get("verification"), dict) else {}
+    if verification.get("mode") != "external_async":
+        return verdict_for_run(run_store, run_id)
+    allowed_paths = _allowed_paths(run_store, run_id)
+
+    def _red(reason: str) -> dict[str, Any]:
+        verdict = value_verdict(exit_code=None, diff_text=None, allowed_paths=allowed_paths)
+        verdict["reasons"] = [reason]
+        return verdict
+
+    if goal_store is None:
+        return _red("async run: normalized verifier record not readable by this consumer")
+    run = run_store.get_run(run_id)
+    normalized = goal_store.normalized_result_for(run_id, int(run["attempts"]))
+    if normalized is None:
+        return _red("async run: normalized verifier record missing")
+    if normalized.get("conflict") is not None:
+        # A conflict that lands after ready also invalidates that ready:
+        # the reader consults the record, not the event.
+        return _red("async run: normalized verifier conflict")
+    if normalized.get("outcome") != "verified" or not normalized.get("ready_event_key"):
+        return _red("async run: value reduction is not ready")
+    if normalized.get("receipt_digest") != latest.get("receipt_digest"):
+        return _red("async run: normalized record binds a different receipt")
+    diff_text = _read_ref_text(run_store, receipt.get("diff"))
+    verdict = value_verdict(exit_code=0, diff_text=diff_text, allowed_paths=allowed_paths)
+    problems = _consistency_problems(run_store, run_id, receipt, latest)
+    if problems:
+        verdict["reasons"] = verdict["reasons"] + problems
+        verdict["verdict"] = "RED"
+    verdict["normalized_binding"] = normalized["binding_digest"]
+    verdict["ready_event_key"] = normalized["ready_event_key"]
+    return verdict
+
+
 def aggregate(run_store: Any) -> dict[str, Any]:
     """Per-run value rollup (latest receipt each). Finding-only; RED runs are listed."""
     run_ids = sorted({record["run_id"] for record in run_store.usage_records()})

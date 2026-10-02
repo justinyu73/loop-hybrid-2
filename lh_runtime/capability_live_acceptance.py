@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,9 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import capability_resolver as cr
+import cli_agent_executor as executors
+import execution_fence as execution_fences
+import execution_host_port as ehp
 from campaign_compiler import CampaignCompiler
 from goal_loop_run import CapabilityRoutingSession, _make_capability_evaluator, run
 from goal_store import GoalStore
@@ -132,6 +136,31 @@ def _resource(
     if model is not None:
         resource["model"] = model
     return resource
+
+
+WINDOWS_ORCA_DEFAULT = "/mnt/c/Users/user/AppData/Local/Programs/orca/resources/bin/orca.exe"
+
+
+def _resolve_live_orca_cli() -> str:
+    """Same resolution as execution_host_port_live_canary: on this WSL host the
+    running Orca is the Windows app; ``~/.local/bin/orca`` is a stale Linux
+    install that answers runtime_unavailable (owner run 2026-08-24)."""
+    explicit = os.environ.get("LH_ORCA_CLI")
+    if explicit:
+        return explicit
+    if Path(WINDOWS_ORCA_DEFAULT).is_file():
+        return WINDOWS_ORCA_DEFAULT
+    return executors.resolve_orca_cli()
+
+
+def _bootstrap_authority(trusted_root: Path) -> dict[str, str]:
+    authority_path = trusted_root / "docs" / "bootstrap-authority.md"
+    return {
+        "decision_id": "LH-EXTERNAL-BOOTSTRAP-001",
+        "authority_ref": "docs/bootstrap-authority.md#lh-external-bootstrap-001",
+        "authority_digest": _sha256_bytes(authority_path.read_bytes()),
+        "root": str(trusted_root),
+    }
 
 
 def _routing_inputs(source: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -329,15 +358,73 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-repo", required=True)
     parser.add_argument("--base-revision", default="HEAD")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--execution-host",
+        choices=("external-orca",),
+        help="required with --execute since LH #93: a production model only runs through the ExecutionHostPort",
+    )
+    parser.add_argument(
+        "--host-root",
+        default="/path/to/external-host-checkout",
+        help="external host checkout whose LH-EXTERNAL-BOOTSTRAP-001 authority doc is digest-bound into the binding",
+    )
+    parser.add_argument(
+        "--keep-root",
+        help="persist goals/runs/workspaces under this directory instead of a TemporaryDirectory (diagnosis)",
+    )
     args = parser.parse_args(argv)
     source = Path(args.source_repo).resolve()
+    if args.execute and args.execution_host is None:
+        parser.error("--execute requires --execution-host external-orca")
+    bootstrap_authority = None
+    factory_overrides = None
+    fence_port = None
+    if args.execution_host is not None:
+        bootstrap_authority = _bootstrap_authority(Path(args.host_root).resolve())
+        os.environ["LH_TRUSTED_BOOTSTRAP_ROOT"] = bootstrap_authority["root"]
+        orca_cli_path = _resolve_live_orca_cli()
+        # prepare() pins the Orca CLI from LH_ORCA_CLI (sandbox launch classes);
+        # export the resolved path so the pin and the port agree.
+        os.environ["LH_ORCA_CLI"] = orca_cli_path
+        fence_port = execution_fences.configured_execution_fence()
+        if isinstance(fence_port, execution_fences.DisabledExecutionFencePort):
+            # Fail before the Attempt, not after: an unconfigured fence routes the
+            # whole run to human_required without ever invoking the provider.
+            parser.error(
+                "--execution-host needs LH_EXECUTION_FENCE_BACKEND=linux-bubblewrap-seccomp "
+                "(same value as deploy/systemd/loop-hybrid-supervisor.service.in)"
+            )
+        orca_cli = orca_cli_path
+
+        def codex_execution_host_port(*, timeout_seconds: float):
+            return ehp.make_execution_host_port(
+                agent="codex",
+                execution_host_binding={
+                    "schema": "lh-execution-host-binding/v1",
+                    "host_id": args.execution_host,
+                    "adapter": "orca-terminal",
+                    "bootstrap_authority": bootstrap_authority,
+                },
+                timeout_seconds=timeout_seconds,
+                execution_fence_port=fence_port,
+                orca_cli=orca_cli,
+            )
+
+        factory_overrides = {"codex": codex_execution_host_port}
     before = _run_text(["git", "status", "--porcelain=v1"], cwd=source)
     base = _run_text(["git", "rev-parse", args.base_revision], cwd=source)
     work_graph, authority, preflight = _routing_inputs(source)
     graph = cr.compose_graph(work_graph, authority)
     campaign = _campaign()
-    with tempfile.TemporaryDirectory(prefix="lh-example-project-capability-") as raw:
+    import contextlib
+    keep = (
+        contextlib.nullcontext(str(Path(args.keep_root).resolve()))
+        if args.keep_root
+        else tempfile.TemporaryDirectory(prefix="lh-example-project-capability-")
+    )
+    with keep as raw:
         root = Path(raw)
+        root.mkdir(parents=True, exist_ok=True)
         goal_id = _seed(root / "goals", campaign)
         result = run(
             execution_graph=graph,
@@ -353,6 +440,13 @@ def main(argv: list[str] | None = None) -> int:
             max_runtime_seconds=900,
             idle_limit=1,
             executor_timeout_seconds=600,
+            execution_host=args.execution_host,
+            bootstrap_authority=bootstrap_authority,
+            factory_overrides=factory_overrides,
+            # One fence instance for controller and port: descriptors are
+            # prepared in-memory per instance, a second instance reads
+            # descriptor_not_prepared at the verifier (run 4, 2026-08-23).
+            execution_fence_port=fence_port,
         )
         if not args.execute:
             print(json.dumps({
@@ -364,18 +458,23 @@ def main(argv: list[str] | None = None) -> int:
                 "provider_invocations": 0,
             }, ensure_ascii=False, indent=2))
             return 0
-        goal = GoalStore(root / "goals").get_goal(goal_id)
+        goal_store = GoalStore(root / "goals")
+        goal = goal_store.get_goal(goal_id)
         if not isinstance(goal, dict) or not isinstance(goal.get("run_id"), str):
             raise RuntimeError(f"live probe produced no run_id: {goal}")
         run_id = goal["run_id"]
         store = RunStore(root / "runs")
         latest = store.latest_receipt(run_id)
-        value = __import__("value_reducer").verdict_for_run(store, run_id)
+        value = __import__("value_reducer").value_evidence_for_run(store, run_id, goal_store=goal_store)
         if (
             goal.get("state") != "completed"
             or not isinstance(latest, dict)
             or value.get("verdict") != "GREEN"
         ):
+            if isinstance(latest, dict):
+                failed_receipt = store.root / latest["receipt_ref"]
+                print(f"receipt: {failed_receipt}", file=sys.stderr)
+                print(failed_receipt.read_text(encoding="utf-8")[:8000], file=sys.stderr)
             raise RuntimeError(
                 f"producer live probe did not close: goal={goal.get('state')} "
                 f"value={value}"
@@ -472,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
             "schema": "lh-capability-routing-live-evidence/v1",
             "status": "pass" if accepted else "fail",
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "source_project": "example-project",
+            "source_project": source.name,
             "source_repo": str(source),
             "source_revision": base,
             "source_checkout_unchanged": before == after,

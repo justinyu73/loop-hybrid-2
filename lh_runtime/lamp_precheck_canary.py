@@ -16,9 +16,13 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import value_reducer
 from controller import LoopController
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
+from native_delivery_fixture import make_native_run
 
 
 def git(*args: str) -> None:
@@ -55,28 +59,82 @@ def make_source(root: Path) -> tuple[Path, str]:
     return source, base
 
 
+def _check(obligation_id: str, command_id: str, argv: list[str]) -> dict[str, object]:
+    return {
+        "id": obligation_id,
+        "commands": [{
+            "id": command_id,
+            "argv": argv,
+            "cwd": "${WORKTREE}",
+            "expect_exit": 0,
+            "timeout_seconds": 10,
+        }],
+        "required_receipts": ["executor"],
+    }
+
+
+def _verifier(flag: Path | None = None, *, fail: bool = False) -> list[str]:
+    if fail:
+        program = "raise SystemExit(1)"
+    else:
+        flag_check = ""
+        if flag is not None:
+            flag_check = f"; assert Path({str(flag)!r}).is_file()"
+        program = (
+            "from pathlib import Path; import subprocess, os; "
+            "assert Path('baseline.txt').read_text(encoding='utf-8') == 'baseline\\n'"
+            f"{flag_check}; "
+            "assert Path(subprocess.check_output(['git','rev-parse','--show-toplevel'], text=True).strip()).resolve() == Path.cwd().resolve()"
+        )
+    return [sys.executable, "-B", "-c", program]
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         source, base = make_source(root)
-        store = RunStore(root / "run-store")
+        store = RunStore(root / "run-store", command_runner=fixture_command_runner)
         controller = LoopController(store, root / "workspaces")
-        goal = {"feature_contract": "w3 precheck fixture", "admission_envelope": {"allowed_paths": ["src/"]}}
-
-        green_run = store.create_run(goal=goal, source_repo=source, base_revision=base)
-        prechecked = controller.tick(green_run, holder="w3", model=forbidden_model, verifier_argv=["git", "diff", "--check"])
+        goal = {"feature_contract": "w3 precheck fixture", "admission_envelope": {"requires_non_empty_diff": False}}
+        checks = [_check("lamp-check", "lamp-diff-check", ["git", "diff", "--check"])]
+        green = make_native_run(
+            store, source, base, "w3-green", "lamp", checks, _verifier(), ["src/"], 2,
+            goal=goal, run_id="run-w3-green",
+        )
+        prechecked = controller.tick(green["run_id"], holder="w3", model=forbidden_model, verifier_argv=_verifier())
         receipt = json.loads((store.root / prechecked["receipt_ref"]).read_text(encoding="utf-8"))
-        verdict = value_reducer.verdict_for_run(store, green_run)
+        verdict = value_reducer.verdict_for_run(store, green["run_id"])
 
-        red_run = store.create_run(goal=goal, source_repo=source, base_revision=base)
+        failing_checks = checks + [_check(
+            "extra-red-obligation",
+            "intentional-red",
+            [sys.executable, "-B", "-c", "raise SystemExit(7)"],
+        )]
+        red_obligation = make_native_run(
+            store, source, base, "w3-red-obligation", "lamp", failing_checks, _verifier(), ["src/"], 2,
+            goal=goal, run_id="run-w3-red-obligation",
+        )
         counting_model.calls = 0
-        retried = controller.tick(red_run, holder="w3", model=counting_model, verifier_argv=[sys.executable, "-c", "raise SystemExit(1)"])
+        red_obligation_result = controller.tick(
+            red_obligation["run_id"], holder="w3", model=forbidden_model, verifier_argv=_verifier()
+        )
+        red_obligation_model_calls = counting_model.calls
 
-        post_model = store.create_run(goal=goal, source_repo=source, base_revision=base)
+        red = make_native_run(
+            store, source, base, "w3-red", "lamp", checks, _verifier(fail=True), ["src/"], 2,
+            goal=goal, run_id="run-w3-red",
+        )
+        counting_model.calls = 0
+        retried = controller.tick(red["run_id"], holder="w3", model=counting_model, verifier_argv=_verifier(fail=True))
+
         flip_flag = root / "flip-flag"
         flip_lamp = ["sh", "-c", f"test -f '{flip_flag}' && exit 0 || (touch '{flip_flag}'; exit 1)"]
+        post = make_native_run(
+            store, source, base, "w3-post-model", "lamp", checks, _verifier(flip_flag), ["src/"], 2,
+            goal=goal, run_id="run-w3-post-model",
+        )
         empty_after_model = controller.tick(
-            post_model, holder="w3", model=lambda ws, cap: {"summary": "changed nothing"},
+            post["run_id"], holder="w3", model=lambda ws, cap: {"summary": "changed nothing"},
             verifier_argv=flip_lamp)
 
         cases = [
@@ -92,6 +150,15 @@ def main() -> int:
             case("precheck-empty-diff-is-not-lamp-gaming",
                  verdict["verdict"] == "GREEN",
                  json.dumps(verdict["reasons"])),
+            case("red-obligation-cannot-promote-precheck",
+                 red_obligation_result["status"] == "retry_pending"
+                 and red_obligation_model_calls == 0
+                 and store.verify_delivery(red_obligation["run_id"], phase="final")["verdict"] == "RED",
+                 json.dumps({
+                     "result": red_obligation_result,
+                     "calls": red_obligation_model_calls,
+                     "delivery": store.verify_delivery(red_obligation["run_id"], phase="final"),
+                 })),
             case("red-lamp-takes-the-model-path",
                  retried["status"] == "retry_pending" and counting_model.calls == 1
                  and "precheck" not in retried,
@@ -99,8 +166,8 @@ def main() -> int:
             case("post-model-empty-diff-still-red",
                  empty_after_model["status"] == "verified"
                  and "precheck" not in empty_after_model
-                 and value_reducer.verdict_for_run(store, post_model)["verdict"] == "RED",
-                 json.dumps(value_reducer.verdict_for_run(store, post_model)["reasons"])),
+                 and value_reducer.verdict_for_run(store, post["run_id"])["verdict"] == "RED",
+                 json.dumps(value_reducer.verdict_for_run(store, post["run_id"])["reasons"])),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({

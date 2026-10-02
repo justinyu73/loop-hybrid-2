@@ -274,6 +274,20 @@ def _systemd_calendar_cadence_case() -> dict[str, Any]:
         "calendar_owns_one_minute_cadence": "OnCalendar=*:0/1" in timer,
         "timer_targets_supervisor_service": "Unit=loop-hybrid-supervisor.service" in timer,
         "persistent_calendar_rearms": "Persistent=true" in timer,
+        "headless_core_has_no_orca_requirement": all(
+            not line.startswith("Requires=external-orca-runtime.service")
+            and not line.startswith("After=external-orca-runtime.service")
+            for line in service.splitlines()
+        ),
+        "execstart_wires_post_merge_watch": (
+            "--post-merge-state-root @STATE_ROOT@/post-merge-resume" in service
+            and "--post-merge-admission-receipt @STATE_ROOT@/post-merge-resume/coordinator-child-admission.json" in service
+            and "tools/session_fleet_scheduler.py" in service
+        ),
+        "post_merge_root_is_service_bound": (
+            "Environment=LH_HOST_STATE_ROOT=@STATE_ROOT@" in service
+            and "Environment=LH_HOST_POST_MERGE_STATE_ROOT=@STATE_ROOT@/post-merge-resume" in service
+        ),
         "normal_ticks_are_not_start_rate_limited": "StartLimitIntervalSec=0" in service,
         "stale_burst_limit_removed": "StartLimitBurst=" not in service,
         "service_remains_bounded_oneshot": "Type=oneshot" in service and "Restart=" not in service,

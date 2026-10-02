@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -20,12 +21,16 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+ROOT = HERE.parent
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from _fixture import make_campaign, make_source_repo
 from campaign_compiler import CampaignCompiler
 from controller import LoopController
 from goal_loop_worker import GoalLoopWorker
 from goal_store import GoalStore
+from native_delivery_fixture import make_native_run
 from run_store import RunStore
+from p7_fence_fixture import fixture_command_runner
 from value_reducer import verdict_for_run
 
 CAMPAIGN_ID = "campaign-w8"
@@ -34,7 +39,7 @@ DIFF_TEXT = "diff --git a/src/hello.txt b/src/hello.txt\nnew file mode 100644\ni
 
 
 def _worker(root: Path, tag: str, source: Path, base: str) -> GoalLoopWorker:
-    runs = RunStore(root / f"{tag}-runs")
+    runs = RunStore(root / f"{tag}-runs", command_runner=fixture_command_runner)
     compiler = CampaignCompiler(make_campaign(CAMPAIGN_ID))
     return GoalLoopWorker(
         goal_store=GoalStore(root / f"{tag}-goals"),
@@ -51,6 +56,24 @@ def _seed_goal(worker: GoalLoopWorker, tag: str) -> None:
         "candidate": {"goal_id": GOAL_ID, "campaign_id": CAMPAIGN_ID, "stage_id": "stage-1",
                       "goal": {"feature_contract": "stage-1", "admission_envelope": envelope}}
     })
+    worker.goal_store.create_candidate(
+        f"w8-{tag}", goal_id=GOAL_ID, campaign_id=CAMPAIGN_ID, stage_id="stage-1",
+        goal={"feature_contract": "stage-1", "admission_envelope": envelope},
+    )
+    context = worker.execution_context[CAMPAIGN_ID]
+    native = make_native_run(
+        worker.run_store,
+        context["source_repo"],
+        context["base_revision"],
+        GOAL_ID,
+        "evidence-integrity",
+        [{"id": "evidence-check", "commands": [{"id": "diff-check", "argv": ["git", "diff", "--check"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+        ["git", "diff", "--check"],
+        ["src/"],
+        4,
+        goal={"feature_contract": "stage-1", "admission_envelope": envelope},
+    )
+    worker.goal_store.activate_with_run(GOAL_ID, native["run_id"])
 
 
 def _locking_model(workspace: Path, _capsule: dict) -> dict:
@@ -79,7 +102,14 @@ def _goal(*, lamp_argv: list[str] | None = None) -> dict:
 
 def _seed_run(store: RunStore, *, goal: dict, argv: list[str], exit_code: int = 0,
               stderr_text: str = "", tamper_diff: str | None = None, delete_diff: bool = False) -> str:
-    run_id = store.create_run(goal=goal, source_repo=HERE, base_revision="r")
+    base = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    run_id = make_native_run(
+        store, ROOT, base, f"evidence-{len(store.summary().get('runs_by_state', {}))}", "receipt-integrity",
+        [{"id": "receipt-check", "commands": [{"id": "repo", "argv": ["test", "-d", ".git"], "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 10}], "required_receipts": ["executor"]}],
+        ["git", "rev-parse", "HEAD"], ["src/"], 4,
+        goal=goal,
+        run_id=None,
+    )["run_id"]
     ordinal = store.begin_attempt(run_id, f"workspace://{run_id}/1")
     diff_ref = store.write_artifact(run_id, ordinal, "diff.patch", DIFF_TEXT)
     stdout_ref = store.write_artifact(run_id, ordinal, "verifier.stdout", "")
@@ -92,7 +122,7 @@ def _seed_run(store: RunStore, *, goal: dict, argv: list[str], exit_code: int = 
         "verification": {"argv": argv, "exit_code": exit_code, "stdout": stdout_ref, "stderr": stderr_ref},
     }
     ref = store.write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True))
-    store.finish_attempt(run_id, ordinal, state="verified", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
+    store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=ref["ref"], receipt_digest=ref["digest"])
     if tamper_diff is not None:
         (store.root / diff_ref["ref"]).write_text(tamper_diff, encoding="utf-8")
     if delete_diff:

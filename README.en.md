@@ -57,7 +57,45 @@ clone can reproduce the same closed loop.
 - `gate-pack/` — the deterministic gate pack run by `npm test`
   (boundary seal, ceremony grader, quota, improvement, and more).
 - `hooks/` — optional git hooks (e.g. a pre-commit ceremony check).
+- `governance/` — checks registry and decision-seal data read by the gates.
+- `tests/` — shared offline fixtures imported by the canaries (native delivery
+  run, fence fixture); they never start a provider.
+- `tools/portable_runtime_contract.py` — static check that the portable core
+  stays free of host-specific imports and fixed paths.
 - `.github/workflows/ci.yml` — CI: gate pack, lint, boundary seal, diff hygiene.
+
+## Engine additions in this version
+
+- **Parallel scheduler + work-unit store** (`parallel_scheduler.py`,
+  `work_unit_store.py`, `plan_node_controller.py`) — independent work units run
+  in isolated workspaces when dependencies and write sets allow; completion
+  integrates in the approved order.
+- **Delivery contract and completion** (`delivery_contract.py`,
+  `work_unit_completion.py`, `source_result.py`) — one sealed contract engine
+  shared by planning, execution, and verification.
+- **Verifier protocol** (`verifier_protocol.py`, `verifier_normalizer.py`) —
+  verifier results are normalized and bound to the attempt before they count.
+- **Execution fences** (`execution_fence*.py`) — an optional preventive fence
+  around agent CLIs (bubblewrap on Linux). It requires an egress policy file
+  (`LH_EGRESS_POLICY`); without one the fence refuses to start rather than run
+  unfenced.
+- **Platform ports** (`platform_ports.py`, `host_ports.py`, `instance_config.py`,
+  `lifecycle.py`) — host-specific behavior (locks, paths, process control) sits
+  behind ports, so the core carries no fixed host paths.
+- **Provider registry and input binding** (`provider_registry.py`,
+  `provider_input_binding.py`, `runner_adapter.py`) — capability-based routing;
+  project nodes never name a provider or model.
+
+## Platform support
+
+| Platform | Status |
+|---|---|
+| Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 72 of 86 gates pass. The remaining 14 rely on POSIX-only behavior: executable-bit fake CLIs, the bubblewrap fence, POSIX signals and process semantics, and a 15.6 ms monotonic clock. |
+| macOS | Not tested. |
+
+No Orca app, VS Code, or WSL is required. Orca is one optional execution-host
+adapter; the default executors are local coding CLIs in disposable clones.
 
 ## Quickstart
 

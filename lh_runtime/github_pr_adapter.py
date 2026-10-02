@@ -169,7 +169,7 @@ class GitHubPrAdapter:
         self._git(["git", "checkout", "--quiet", self.base_branch], repo)
         self._git(["git", "checkout", "--quiet", "-b", branch], repo)
         patch = workspace / "change.patch"
-        patch.write_text(diff_text, encoding="utf-8")
+        patch.write_text(diff_text, encoding="utf-8", newline="")
         self._git(["git", "apply", str(patch)], repo)
         self._git(["git", "add", "-A"], repo)
         message = f"lh: {goal_id} (run {run_id}, attempt {ordinal})"[:COMMIT_MESSAGE_CAP]
@@ -201,7 +201,7 @@ class GitHubPrAdapter:
         exit_code = verification.get("exit_code")
         stdout_tail = self._read_artifact(run_id, ordinal, "verifier.stdout")
         stderr_tail = self._read_artifact(run_id, ordinal, "verifier.stderr")
-        verdict = value_reducer.verdict_for_run(self.run_store, run_id)
+        verdict = value_reducer.value_evidence_for_run(self.run_store, run_id)
         usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else None
         if usage is not None and usage.get("state") == token_cost.USAGE_MEASURED:
             cost = token_cost.compute_cost(usage)
@@ -276,6 +276,49 @@ class GitHubPrAdapter:
         if not isinstance(request, dict):
             raise GitHubPrError("request must be an object")
         run_id, ordinal = _parse_workspace_ref(request.get("workspace_ref"))
+        run = self.run_store.get_run(run_id)
+        goal = run["goal"] if isinstance(run.get("goal"), dict) else {}
+        persisted_goal_id = goal.get("goal_id", run.get("goal_id"))
+        persisted_goal_revision = goal.get("goal_revision", goal.get("revision", run.get("goal_revision")))
+        persisted_node_id = goal.get("node_id", run.get("node_id"))
+        for field, persisted in (
+            ("goal_id", persisted_goal_id),
+            ("goal_revision", persisted_goal_revision),
+            ("node_id", persisted_node_id),
+        ):
+            requested = request.get(field)
+            if requested is not None and persisted is not None and requested != persisted:
+                raise GitHubPrError(f"delivery_unit_run_{field}_mismatch")
+        # The persisted Run is the only scope authority.  Request metadata and
+        # caller-supplied GREEN evidence can corroborate it, but never promote
+        # an incomplete binding or turn a managed Run into a standalone PR.
+        if persisted_goal_id is None:
+            if request.get("delivery_evidence") is not None or any(
+                request.get(field) is not None for field in ("goal_id", "goal_revision", "node_id")
+            ):
+                raise GitHubPrError("delivery_unit_persisted_goal_identity_missing")
+            goal_id = "goal"
+            goal_revision = None
+            node_id = None
+        else:
+            goal_id = str(persisted_goal_id)
+            goal_revision = persisted_goal_revision
+            node_id = persisted_node_id
+        required_binding = bool(request.get("delivery_evidence"))
+        if hasattr(self.run_store, "delivery_required"):
+            required_binding = required_binding or bool(self.run_store.delivery_required(run_id))
+        if required_binding:
+            if not hasattr(self.run_store, "delivery_preflight") or not hasattr(self.run_store, "verify_delivery"):
+                raise GitHubPrError("delivery_runstore_binding_unavailable")
+            binding = self.run_store.delivery_preflight(run_id, phase="source")
+            if binding.get("verdict") != "GREEN":
+                raise GitHubPrError(str(binding.get("reason", "delivery_binding_invalid")))
+            latest = self.run_store.latest_attempt(run_id)
+            if not isinstance(latest, dict) or latest.get("ordinal") != ordinal:
+                raise GitHubPrError("delivery_unit_attempt_not_current")
+            source = self.run_store.verify_delivery(run_id, phase="source", ordinal=ordinal)
+            if source.get("verdict") != "GREEN":
+                raise GitHubPrError(str(source.get("reason", "delivery_source_not_green")))
         diff_text = self._read_artifact(run_id, ordinal, "diff.patch")
         if diff_text is None:
             raise GitHubPrError(f"diff artifact is missing for {run_id} attempt {ordinal}")
@@ -283,9 +326,6 @@ class GitHubPrAdapter:
         actual_digest = "sha256:" + hashlib.sha256(diff_text.encode()).hexdigest()
         if isinstance(expected_digest, str) and expected_digest != actual_digest:
             raise GitHubPrError(f"diff digest mismatch: request {expected_digest} vs artifact {actual_digest}")
-        run = self.run_store.get_run(run_id)
-        goal = run["goal"] if isinstance(run.get("goal"), dict) else {}
-        goal_id = str(goal.get("goal_id") or "goal")
         branch = _validate_lh_branch(_branch_name(goal_id, run_id))
 
         head_sha = self._remote_branch_sha(branch)

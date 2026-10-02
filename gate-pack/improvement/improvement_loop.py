@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROPOSAL_SCHEMA = "loop-hybrid-improvement-proposal/v1"
 SHADOW_SCHEMA = "loop-hybrid-improvement-shadow-results/v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
