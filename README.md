@@ -93,7 +93,7 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：87 個 gate 中 73～74 個通過。13 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（4）、bubblewrap fence 含本機 provider 沙箱（4）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時偶爾超時。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：89 個 gate 中 73～74 個通過（請設定 `PYTHONUTF8=1`）。15 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（4）、bubblewrap fence——含本機 provider 沙箱、實測演練與 delivery 執行器的 Linux 案例（6）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時會超時，結果也和所在目錄有關。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 不需要 Orca App、VS Code 或 WSL。Orca 只是可選的 execution-host adapter；預設 executor 是在一次性 clone 中執行的本機 coding CLI。
@@ -131,7 +131,7 @@ python3 -B lh_runtime/local_provider_live_smoke.py --dry-run
 LH_LOCAL_PROVIDER_LIVE=1 python3 -B lh_runtime/local_provider_live_smoke.py --execute
 ```
 
-工具會自行宣告 codex，演練與真實執行走同一條宣告路徑。通過條件：policy 已釘住 codex；run 為 `verified`；diff 只有 `src/hello.txt`；來源 repo 不變；receipt 帶有 local provider 三項 proof；usage 為 measured；`CODEX_HOME` 與 `$HOME` 頂層沒有變動；沒有殘留程序。工具會使用 `tests/` 的非 kernel fixture 執行 delivery 檢查（見下方「目前限制」），報告中的 `known_gaps_open` 會如實列出。
+工具會自行宣告 codex，演練與真實執行走同一條宣告路徑。通過條件：policy 已釘住 codex；run 為 `verified`；diff 只有 `src/hello.txt`；來源 repo 不變；receipt 帶有 local provider 三項 proof；usage 為 measured；`CODEX_HOME` 與 `$HOME` 頂層沒有變動；沒有殘留程序；delivery 檢查確實在 fence 內執行。工具走正式路徑（stage 啟用 delivery，見「使用」第 3 節），不使用任何 `tests/` fixture。
 
 ## 安裝
 
@@ -176,7 +176,12 @@ python3 -B lh_runtime/goal_loop_run.py \
 - 每個 attempt 產生 receipt（含 usage）；`status_snapshot_out` 指向的檔案會得到即時狀態投影。
 - `runtime/loop-pause`（或 contract 的 `pause_flag`）存在即於下一個 tick 安全停止。
 
-> **目前限制**：引擎要求每個 run 都有 delivery 綁定（stage 的 delivery contract／plan／packet），delivery 檢查也必須經由 delivery command runner 執行。只有 campaign 的 contract（例如範例 contract）送出的 run 會停在 `planning_required`（`delivery_binding_missing`），不會呼叫模型。目前唯一的正式 command runner 來自 contract 的 `planner_recovery`（native-run 綁定），還需要 execution binding、provider registry 與 dispatch envelope；本 README 尚未提供這些範本。`lh_runtime/local_provider_live_smoke.py` 與 `lh_runtime/b12_live_smoke_canary.py` 示範了以 `tests/` fixture 補上 delivery 綁定與 command runner 後跑通的完整鏈路。
+> **delivery 綁定與執行（必讀）**：引擎要求每個 run 都有 delivery 綁定，而且 delivery 檢查與獨立驗證器必須在 execution fence 內執行。
+>
+> - **啟用**：在 stage 加上 `"delivery": {"derive": "acceptance_lamp"}`（見範例 contract）。載入 contract 時，會用該 stage 的驗收燈編出封存綁定：planner 標為 `operator-contract`，並綁定 contract 檔的 digest。可以用 `"checks": [{"id": "...", "argv": [...]}]` 指定 delivery 檢查，預設為 `git diff --cached --check`。
+> - **執行**：`--execute` 時，delivery 檢查與獨立驗證器經 `LH_EXECUTION_FENCE_BACKEND` 指定的 fence 逐指令執行（Linux：bubblewrap、無網路、唯讀 clone）。指令請用 `/usr/bin`、`/bin` 的系統工具（純名稱依沙箱 PATH 解析），或 clone 內的腳本。
+> - **沒有可用 fence 時**（Windows、macOS 或未設定 backend）：不安裝執行器，run 停在 `human_required`，原因寫在輸出的 `plan.delivery_command_runner`。
+> - 沒有 `delivery` 欄位的 stage 仍停在 `planning_required`；native-run 綁定（`planner_recovery`）不受影響。
 
 ### 4. 驗收紀律
 
@@ -194,18 +199,19 @@ Contract 的 `campaign.stages[]` 每個 stage 是一個 bounded 工作單位：`
 `allowed_paths`（diff 越界即 value RED）、`acceptance_lamp`（驗收燈）、`max_attempts`、
 `next_stage_id`（多 stage 自動接跑）。
 
-**燈的四條鐵律**（寫錯等於沒有驗收）：
+**燈的五條鐵律**（寫錯等於沒有驗收）：
 1. base 上必須是紅的——綠-on-base 表示工作已完成，引擎會以 precheck $0 直通，不會叫模型。
 2. deterministic、環境無關——路徑用絕對或 repo 相對，不依賴 PATH 裡的特定 venv、不觸網。
 3. 燈綠必須是「工作完成才成立」的正向證據，不是「沒有報錯」。
 4. 驗證器自身出錯（讀不到、缺依賴）必須非零退出——錯誤不能經任何 shell 邏輯變綠。
+5. 驗證器必須在 `allowed_paths` 之外——否則 agent 可以改掉驗證器讓燈變綠。啟用 delivery 的 stage 若違反，載入 contract 時就會被拒絕（`independent_verifier_in_write_scope`）。
 
 ### B. 下指令（goal 入庫）
 
 ```bash
 python3 -B lh_runtime/command_ingress.py --goal-store /path/to/goals \
   --source operator --event-type manual_intent --event-id cmd-1 \
-  --payload '{"campaign_id":"example-campaign","stage_id":"stage-1","intent":"..."}'
+  --payload '{"campaign_id":"example-campaign","stage_id":"feature","intent":"..."}'
 ```
 
 也可以讓 contract 的 `standing_intents` 每天自動發（daily health check 模式）。
@@ -218,7 +224,7 @@ python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json 
 ```
 
 鏈路：intent → admission → disposable clone 執行 → 燈 + value gate → receipt →
-（多 stage 時）自動派生下一 stage。前提是每個 run 都有 delivery 綁定與 command runner，見「使用」第 3 節的「目前限制」。`--status-snapshot-out` 給即時狀態投影；
+（多 stage 時）自動派生下一 stage。前提是 stage 已啟用 delivery，而且有可用的 execution fence，見「使用」第 3 節。`--status-snapshot-out` 給即時狀態投影；
 cron/systemd timer 定期呼叫同一指令即成常駐（每次都是有界 session，重啟可續）。
 
 ### D. 讀結果

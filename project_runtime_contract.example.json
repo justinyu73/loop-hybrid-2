@@ -1,5 +1,5 @@
 {
-  "_note": "Example project runtime contract. Copy to project_runtime_contract.json and adjust per project. The `models` block is optional: `execute` names the coding CLI that runs attempts; add `judge`/`judge_model` to route judging to a separate reasoning CLI.",
+  "_note": "Example project runtime contract. Copy to project_runtime_contract.json and adjust per project. Each stage that opts in with `delivery.derive = acceptance_lamp` gets a sealed delivery binding from its own acceptance lamp; the lamp's verifier must live outside `allowed_paths`. The `models` block is optional: `execute` names the coding CLI that runs attempts; add `judge`/`judge_model` to route judging to a separate reasoning CLI.",
   "schema": "lh-project-runtime-contract/v1",
   "project_id": "example-project",
   "campaign": {
@@ -7,10 +7,10 @@
     "campaign_id": "example-campaign",
     "stages": [
       {
-        "stage_id": "gate-green",
+        "stage_id": "feature",
         "goal": {
           "must_have": [
-            "gate-pack verify.sh green"
+            "the change described for this stage, with its tests"
           ],
           "must_not": [
             "push",
@@ -19,19 +19,33 @@
           ]
         },
         "allowed_paths": [
-          "lh_runtime/",
-          "gate-pack/"
+          "src/",
+          "tests/"
         ],
         "allowed_side_effects": [
           "workspace",
           "artifact"
         ],
         "acceptance_lamp": {
-          "id": "gate-pack",
-          "smoke": "sh gate-pack/verify.sh",
+          "id": "acceptance",
+          "smoke": "sh checks/acceptance.sh",
           "verification_argv": [
             "sh",
-            "gate-pack/verify.sh"
+            "checks/acceptance.sh"
+          ]
+        },
+        "delivery": {
+          "derive": "acceptance_lamp",
+          "checks": [
+            {
+              "id": "diff-hygiene",
+              "argv": [
+                "git",
+                "diff",
+                "--cached",
+                "--check"
+              ]
+            }
           ]
         },
         "max_attempts": 4,
