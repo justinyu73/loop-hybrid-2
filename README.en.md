@@ -175,7 +175,9 @@ independent verifier run inside the execution fence:
 - **Execution**: with `--execute`, each check and the verifier run through the
   fence named by `LH_EXECUTION_FENCE_BACKEND` (Linux: bubblewrap, no network,
   read-only clone). Use system tools from `/usr/bin` or `/bin` (bare names
-  resolve against the sandbox PATH) or scripts inside the clone.
+  resolve against the sandbox PATH) or scripts inside the clone. The fence has no
+  `/dev`: the default `git diff --cached --check` gets `/dev/null` through the
+  fence's closed grant; other git commands that need `/dev/null` fail.
 - **No usable fence** (Windows, macOS, or no backend configured): no runner is
   installed and the run stops at `human_required`; the reason is in the run's
   `plan.delivery_command_runner`.

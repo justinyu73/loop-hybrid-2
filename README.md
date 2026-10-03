@@ -179,7 +179,7 @@ python3 -B lh_runtime/goal_loop_run.py \
 > **delivery 綁定與執行（必讀）**：引擎要求每個 run 都有 delivery 綁定，而且 delivery 檢查與獨立驗證器必須在 execution fence 內執行。
 >
 > - **啟用**：在 stage 加上 `"delivery": {"derive": "acceptance_lamp"}`（見範例 contract）。載入 contract 時，會用該 stage 的驗收燈編出封存綁定：planner 標為 `operator-contract`，並綁定 contract 檔的 digest。可以用 `"checks": [{"id": "...", "argv": [...]}]` 指定 delivery 檢查，預設為 `git diff --cached --check`。
-> - **執行**：`--execute` 時，delivery 檢查與獨立驗證器經 `LH_EXECUTION_FENCE_BACKEND` 指定的 fence 逐指令執行（Linux：bubblewrap、無網路、唯讀 clone）。指令請用 `/usr/bin`、`/bin` 的系統工具（純名稱依沙箱 PATH 解析），或 clone 內的腳本。
+> - **執行**：`--execute` 時，delivery 檢查與獨立驗證器經 `LH_EXECUTION_FENCE_BACKEND` 指定的 fence 逐指令執行（Linux：bubblewrap、無網路、唯讀 clone）。指令請用 `/usr/bin`、`/bin` 的系統工具（純名稱依沙箱 PATH 解析），或 clone 內的腳本。fence 內沒有 `/dev`：預設的 `git diff --cached --check` 透過 fence 的封閉授權取得 `/dev/null`，其他需要 `/dev/null` 的 git 指令會失敗。
 > - **沒有可用 fence 時**（Windows、macOS 或未設定 backend）：不安裝執行器，run 停在 `human_required`，原因寫在輸出的 `plan.delivery_command_runner`。
 > - 沒有 `delivery` 欄位的 stage 仍停在 `planning_required`；native-run 綁定（`planner_recovery`）不受影響。
 
