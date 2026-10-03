@@ -330,9 +330,10 @@ def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
     with runs._connect() as conn:
         attempts = [dict(row) for row in conn.execute(
             "SELECT run_id, ordinal, state, receipt_ref FROM attempts ORDER BY run_id, ordinal").fetchall()]
-        delivery_evidence = " ".join(str(value) for row in conn.execute(
+        delivery_rows = [value for row in conn.execute(
             "SELECT delivery_source_evidence_json, delivery_final_evidence_json FROM runs").fetchall()
-            for value in row if value)
+            for value in row if value]
+    delivery_evidence = " ".join(str(value) for value in delivery_rows)
     runner = (result.get("plan") or {}).get("delivery_command_runner") or {}
     receipt: dict[str, Any] = {}
     files_touched: list[str] = []
@@ -384,8 +385,33 @@ def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
             "driver": {key: driver.get(key) for key in ("stop_reason", "cycles", "runs_dispatched")},
             "leftover_processes": leftovers,
             "delivery_command_runner": runner,
+            "delivery": delivery_summary(delivery_rows),
         },
     }
+
+
+def delivery_summary(evidence_json: Any) -> list[dict[str, Any]]:
+    """Verdicts, reasons and exit codes recorded by the delivery steps, for the report."""
+    found: list[dict[str, Any]] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            entry = {key: node[key] for key in ("verdict", "reason", "exit_code", "error", "timeout")
+                     if key in node and not isinstance(node[key], (dict, list))}
+            if entry:
+                found.append({"at": path[-96:], **entry})
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+
+    for raw in evidence_json:
+        try:
+            walk(json.loads(raw), "$")
+        except (TypeError, ValueError):
+            continue
+    return found[:24]
 
 
 def _linux_bubblewrap() -> str | None:

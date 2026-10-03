@@ -320,14 +320,16 @@ def e5_child(root: Path) -> int:
     runs = RunStore(root / "runs")
     with runs._connect() as conn:
         states = [row["state"] for row in conn.execute("SELECT state FROM attempts").fetchall()]
-        evidence = " ".join(str(value) for row in conn.execute(
+        rows = [value for row in conn.execute(
             "SELECT delivery_source_evidence_json, delivery_final_evidence_json FROM runs").fetchall()
-            for value in row if value)
+            for value in row if value]
+    evidence = " ".join(str(value) for value in rows)
     print(json.dumps({
         "exit": code,
         "attempts": states,
         "fixtures_loaded": sorted(FIXTURE_MODULES & set(sys.modules)),
         "delivery_fenced": fences.LINUX_BACKEND_ID in evidence and "non-kernel" not in evidence,
+        "delivery": smoke.delivery_summary(rows),
         "tail": output.getvalue()[-300:],
     }))
     return 0
