@@ -240,11 +240,64 @@ def _campaign(source: Path, base: str) -> dict[str, Any]:
     return campaign
 
 
-def bounded_run(root: Path, *, codex_home: Path, provider_override: Path | None,
-                path_prefix: str | None, timeout_seconds: float) -> dict[str, Any]:
+def write_stand_in(bin_dir: Path) -> Path:
+    """Put a stand-in ``codex`` first on PATH (a ``.cmd`` shim where PATHEXT applies)."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        stand_in = bin_dir / f"{AGENT}.cmd"
+        stand_in.write_text("@echo off\r\n", encoding="utf-8")
+    else:
+        stand_in = bin_dir / AGENT
+        stand_in.write_text(STAND_IN_SOURCE, encoding="utf-8")
+        stand_in.chmod(0o755)
+    return stand_in.resolve()
+
+
+def prepare_instance(root: Path, *, codex_home: Path,
+                     path_prefix: str | None) -> tuple[Any, dict[str, str], dict[str, Any]]:
+    """Initialize a run-local instance that declares Codex as its provider.
+
+    Instance init pins only declared providers; an undeclared provider gets no
+    policy entry and the fence refuses at prepare.  The rehearsal and the live
+    run therefore declare Codex the same way -- ``LH_PROVIDER_NAMES`` and
+    PATH -- and differ only in which ``codex`` PATH finds first.
+    """
+    import instance_config
+
+    environ = dict(os.environ)
+    environ.update({"CODEX_HOME": str(codex_home), "LH_PROVIDER_NAMES": AGENT,
+                    "LH_STATE_ROOT": str(root / "state"), "LH_WORKSPACE_ROOT": str(root / "instance-workspaces"),
+                    "LH_CACHE_ROOT": str(root / "cache"), "LH_LOGS_ROOT": str(root / "logs")})
+    if path_prefix is not None:
+        environ["PATH"] = path_prefix + os.pathsep + environ.get("PATH", "")
+    instance = instance_config.initialize_instance(
+        root / "instance" / "instance.json", system=platform.system(), environ=environ,
+        home=Path.home(), cwd=root)
+    policy = json.loads(instance.egress_policy_path.read_text(encoding="utf-8"))
+    return instance, environ, (policy.get("providers") or {}).get(AGENT) or {}
+
+
+def instance_pin_case() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="lh-live-smoke-pin-") as raw:
+        root = Path(raw).resolve()
+        stand_in = write_stand_in(root / "bin")
+        codex_home = root / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text("{}\n", encoding="utf-8")
+        try:
+            _instance, _environ, pin = prepare_instance(root, codex_home=codex_home, path_prefix=str(root / "bin"))
+        except Exception as exc:
+            return case("instance-declares-and-pins-codex", False, f"{type(exc).__name__}: {exc}")
+        pinned = pin.get("path")
+        ok = (isinstance(pinned, str) and Path(pinned).is_file() and Path(pinned).samefile(stand_in)
+              and str(pin.get("sha256", "")).startswith("sha256:"))
+        return case("instance-declares-and-pins-codex", ok, {"pinned": pinned, "expected": str(stand_in)})
+
+
+def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
+                timeout_seconds: float) -> dict[str, Any]:
     """Run one Goal through ``goal_loop_run.run(executor="local")`` and grade it."""
     import goal_loop_run
-    import instance_config
     from command_ingress import submit_command
     from goal_store import GoalStore
     from p7_native_runstore_fixture import explicit_runstore_factory
@@ -255,18 +308,7 @@ def bounded_run(root: Path, *, codex_home: Path, provider_override: Path | None,
     home_before = _top_level(home)
     source, base = _source_repo(root)
     campaign = _campaign(source, base)
-    environ = dict(os.environ)
-    environ.update({"CODEX_HOME": str(codex_home),
-                    "LH_STATE_ROOT": str(root / "state"), "LH_WORKSPACE_ROOT": str(root / "instance-workspaces"),
-                    "LH_CACHE_ROOT": str(root / "cache"), "LH_LOGS_ROOT": str(root / "logs")})
-    if path_prefix is not None:
-        environ["PATH"] = path_prefix + os.pathsep + environ.get("PATH", "")
-    overrides = {"cli": {"providers": {AGENT: str(provider_override)}}} if provider_override else None
-    instance = instance_config.initialize_instance(
-        root / "instance" / "instance.json", system=platform.system(), environ=environ,
-        home=home, cwd=root, overrides=overrides)
-    policy = json.loads(instance.egress_policy_path.read_text(encoding="utf-8"))
-    provider_pin = (policy.get("providers") or {}).get(AGENT) or {}
+    instance, environ, provider_pin = prepare_instance(root, codex_home=codex_home, path_prefix=path_prefix)
 
     goals = GoalStore(root / "goals")
     submitted = submit_command(goals, source="local-provider-live-smoke", event_type="manual_intent",
@@ -306,6 +348,11 @@ def bounded_run(root: Path, *, codex_home: Path, provider_override: Path | None,
         if diff.is_file():
             files_touched = sorted(line.split()[3][2:] for line in diff.read_text(encoding="utf-8").splitlines()
                                    if line.startswith("diff --git ") and len(line.split()) >= 4)
+    provider_failure = None
+    if len(attempts) == 1:
+        provider_record = runs.root / "artifacts" / attempts[0]["run_id"] / str(attempts[0]["ordinal"]) / "provider.json"
+        if provider_record.is_file():
+            provider_failure = json.loads(provider_record.read_text(encoding="utf-8")).get("failure")
     fence = receipt.get("execution_fence") or {}
     proofs = {track: (value or {}).get("result") for track, value in (fence.get("proofs") or {}).items()}
     usage = runs.usage_records()
@@ -313,6 +360,7 @@ def bounded_run(root: Path, *, codex_home: Path, provider_override: Path | None,
                 and int(row.get("input_tokens") or 0) + int(row.get("output_tokens") or 0) > 0]
     leftovers = _processes_running(str(root))
     checks = {
+        "provider_pinned": bool(provider_pin.get("path")),
         "intent_received": submitted.get("status") == "received",
         "run_verified": [row["state"] for row in attempts] == ["verified"],
         "diff_only_in_target": files_touched == [TARGET_FILE],
@@ -329,6 +377,8 @@ def bounded_run(root: Path, *, codex_home: Path, provider_override: Path | None,
         "checks": checks,
         "evidence": {
             "provider": {"path": provider_pin.get("path"), "sha256": provider_pin.get("sha256")},
+            "fence": {"status": fence.get("status"), "reason": fence.get("reason")},
+            "provider_failure": str(provider_failure)[:400] if provider_failure else None,
             "profile_digest": ((fence.get("local_provider") or {}).get("provider_sandbox") or {}).get("profile_digest"),
             "proofs": proofs,
             "attempts": [{key: row[key] for key in ("ordinal", "state")} for row in attempts],
@@ -363,16 +413,12 @@ def rehearsal_case() -> dict[str, Any]:
     root = _work_root(None)
     try:
         bin_dir = root / "bin"
-        bin_dir.mkdir()
-        stand_in = bin_dir / AGENT
-        stand_in.write_text(STAND_IN_SOURCE, encoding="utf-8")
-        stand_in.chmod(0o755)
+        write_stand_in(bin_dir)
         codex_home = root / "codex-home"
         codex_home.mkdir()
         # A default Codex login: auth.json and no config.toml.
         (codex_home / "auth.json").write_text("{}\n", encoding="utf-8")
-        graded = bounded_run(root, codex_home=codex_home, provider_override=stand_in.resolve(),
-                             path_prefix=str(bin_dir), timeout_seconds=120)
+        graded = bounded_run(root, codex_home=codex_home, path_prefix=str(bin_dir), timeout_seconds=120)
     except Exception as exc:  # A crash is a failed exam, never a skipped one.
         return case("rehearsal-run-verifies-through-local-provider", False, f"{type(exc).__name__}: {exc}")
     finally:
@@ -381,7 +427,7 @@ def rehearsal_case() -> dict[str, Any]:
 
 
 def dry_run() -> int:
-    cases = [*provider_home_cases(), opt_in_case(), rehearsal_case()]
+    cases = [*provider_home_cases(), opt_in_case(), instance_pin_case(), rehearsal_case()]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({
         "check_id": CHECK_ID,
@@ -415,8 +461,7 @@ def execute(work_root: Path | None, keep_root: bool) -> int:
         return _refuse("codex_login_missing", codex_home=str(codex_home))
     root = _work_root(work_root)
     try:
-        graded = bounded_run(root, codex_home=codex_home.resolve(), provider_override=None,
-                             path_prefix=None, timeout_seconds=600)
+        graded = bounded_run(root, codex_home=codex_home.resolve(), path_prefix=None, timeout_seconds=600)
     except Exception as exc:
         graded = {"checks": {"completed_without_error": False}, "error": f"{type(exc).__name__}: {exc}"}
     finally:
