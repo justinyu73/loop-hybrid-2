@@ -18,6 +18,7 @@ from typing import Any
 
 import assignment_packet
 import capability_resolver as cr
+import delivery_binding
 import instance_config as ic
 
 CONTRACT_SCHEMA = "lh-project-runtime-contract/v1"
@@ -117,6 +118,20 @@ def resolve_project(
             if existing != packet_assignment:
                 raise SystemExit("target contract goal_assignment conflicts with the packet")
         stage["goal_assignment"] = packet_assignment
+
+    # Stages that opt in with "delivery": {"derive": "acceptance_lamp"} get a
+    # sealed delivery binding from their own lamp, bound to this file's bytes;
+    # every other stage is returned unchanged.
+    try:
+        campaign = delivery_binding.compile_campaign_delivery(
+            campaign,
+            contract_ref=str(path),
+            contract_digest="sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+            source_repo=source_repo,
+            base_revision=str(contract["base_revision"]),
+        )
+    except delivery_binding.DeliveryBindingError as exc:
+        raise SystemExit(f"contract delivery binding refused: {exc}") from exc
 
     run_kwargs: dict[str, Any] = {
         "campaign": campaign,  # deep-validated by CampaignCompiler in build_worker

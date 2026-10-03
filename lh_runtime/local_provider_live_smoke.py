@@ -17,11 +17,12 @@ caller's Codex login.  It needs ``LH_LOCAL_PROVIDER_LIVE=1``, Linux,
 bubblewrap and libseccomp; the stage allows one attempt, so it spends at most
 one model call.
 
-Delivery checks run through the explicit non-kernel fixture runner
-(``tests/p7_fence_fixture``): the compatibility executor path has no
-production delivery command runner, so a verified run here proves the provider
-sandbox, the verifier and the receipt -- not kernel-contained delivery checks.
-The report says so in ``known_gaps_open``.
+The stage opts in to a delivery binding derived from its acceptance lamp
+(``delivery_binding``), and the run executes delivery checks and the
+independent verifier through the same execution fence
+(``fence_command_runner``).  Nothing here imports a ``tests/`` fixture, so a
+verified run proves the provider sandbox, the kernel-contained delivery checks
+and the receipt on the production path.
 """
 
 from __future__ import annotations
@@ -41,7 +42,6 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent / "tests"))
 
 import execution_fence as fences  # noqa: E402
 import execution_fence_linux as linux_fence  # noqa: E402
@@ -68,8 +68,6 @@ EXPECTED_PROOFS = {
     "provider_sandbox": "applied",
 }
 KNOWN_GAPS = [
-    "delivery checks run through the explicit non-kernel fixture runner; "
-    "the compatibility executor path has no production delivery command runner",
     "provider network egress is host network by design; only argv is preflighted against the policy",
     "kernel-contained local provider runs are Linux-only",
 ]
@@ -209,10 +207,13 @@ def _source_repo(root: Path) -> tuple[Path, str]:
 
 
 def _campaign(source: Path, base: str) -> dict[str, Any]:
-    from campaign_compiler import CampaignCompiler
-    from native_delivery_fixture import make_native_bundle
+    import hashlib
 
-    verifier = [sys.executable, "-B", "-c", VERIFIER_SOURCE]
+    import delivery_binding
+
+    # The verifier also runs inside the fence, where a bare name resolves
+    # against the sandbox PATH; ``python3`` is the system interpreter there.
+    verifier = ["python3", "-B", "-c", VERIFIER_SOURCE]
     stage = {
         "stage_id": STAGE_ID,
         "goal": {"feature_contract": FEATURE_CONTRACT},
@@ -222,22 +223,13 @@ def _campaign(source: Path, base: str) -> dict[str, Any]:
                             "verification_argv": verifier},
         "max_attempts": 1,
         "next_stage_id": None,
+        "delivery": {"derive": "acceptance_lamp"},
     }
     campaign = {"schema": "lh-campaign/v1", "campaign_id": CAMPAIGN_ID, "stages": [stage]}
-    envelope = CampaignCompiler(campaign).compile()["stages"][STAGE_ID]
-    bundle = make_native_bundle(
-        source, base, f"{CAMPAIGN_ID}:{STAGE_ID}", STAGE_ID,
-        [{"id": "diff-check",
-          "commands": [{"id": "diff-check", "argv": ["git", "diff", "--cached", "--check"],
-                        "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 30}],
-          "required_receipts": ["executor"]}],
-        verifier, ["src/"], 1,
-        goal={"feature_contract": stage["goal"], "admission_envelope": envelope},
-    )
-    stage["goal"] = {**stage["goal"], "delivery_required": True,
-                     "delivery_contract": bundle["contract"], "delivery_plan": bundle["plan"],
-                     "delivery_packet": bundle["packet"]}
-    return campaign
+    digest = hashlib.sha256(json.dumps(campaign, sort_keys=True).encode("utf-8")).hexdigest()
+    return delivery_binding.compile_campaign_delivery(
+        campaign, contract_ref="local_provider_live_smoke", contract_digest=f"sha256:{digest}",
+        source_repo=str(source), base_revision=base)
 
 
 def write_stand_in(bin_dir: Path) -> Path:
@@ -300,7 +292,6 @@ def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
     import goal_loop_run
     from command_ingress import submit_command
     from goal_store import GoalStore
-    from p7_native_runstore_fixture import explicit_runstore_factory
     from run_store import RunStore
 
     home = Path.home()
@@ -321,14 +312,13 @@ def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
     saved = {name: os.environ.get(name) for name in overlay}
     try:
         os.environ.update(overlay)
-        with explicit_runstore_factory(goal_loop_run):
-            result = goal_loop_run.run(
-                executor="local", execute=True,
-                goal_store_root=root / "goals", run_store_root=root / "runs",
-                workspace_root=root / "workspaces", campaign=campaign,
-                source_repo=source, base_revision=base, holder="local-provider-live-smoke",
-                max_cycles=3, idle_limit=1, executor_timeout_seconds=timeout_seconds,
-                sleep_fn=lambda _seconds: None)
+        result = goal_loop_run.run(
+            executor="local", execute=True,
+            goal_store_root=root / "goals", run_store_root=root / "runs",
+            workspace_root=root / "workspaces", campaign=campaign,
+            source_repo=source, base_revision=base, holder="local-provider-live-smoke",
+            max_cycles=3, idle_limit=1, executor_timeout_seconds=timeout_seconds,
+            sleep_fn=lambda _seconds: None)
     finally:
         for name, value in saved.items():
             if value is None:
@@ -340,6 +330,11 @@ def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
     with runs._connect() as conn:
         attempts = [dict(row) for row in conn.execute(
             "SELECT run_id, ordinal, state, receipt_ref FROM attempts ORDER BY run_id, ordinal").fetchall()]
+        delivery_rows = [value for row in conn.execute(
+            "SELECT delivery_source_evidence_json, delivery_final_evidence_json FROM runs").fetchall()
+            for value in row if value]
+    delivery_evidence = " ".join(str(value) for value in delivery_rows)
+    runner = (result.get("plan") or {}).get("delivery_command_runner") or {}
     receipt: dict[str, Any] = {}
     files_touched: list[str] = []
     if len(attempts) == 1 and attempts[0].get("receipt_ref"):
@@ -371,6 +366,8 @@ def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
         "codex_home_unchanged": _tree_snapshot(codex_home) == codex_before,
         "home_has_no_new_entries": set(_top_level(home)) <= set(home_before),
         "no_leftover_processes": not leftovers,
+        "delivery_checks_fenced": runner.get("status") == "fenced"
+        and str(runner.get("backend")) in delivery_evidence and "non-kernel" not in delivery_evidence,
     }
     driver = result.get("driver") or {}
     return {
@@ -387,9 +384,34 @@ def bounded_run(root: Path, *, codex_home: Path, path_prefix: str | None,
                       for row in usage],
             "driver": {key: driver.get(key) for key in ("stop_reason", "cycles", "runs_dispatched")},
             "leftover_processes": leftovers,
-            "delivery_command_runner": "non-kernel-fixture",
+            "delivery_command_runner": runner,
+            "delivery": delivery_summary(delivery_rows),
         },
     }
+
+
+def delivery_summary(evidence_json: Any) -> list[dict[str, Any]]:
+    """Verdicts, reasons and exit codes recorded by the delivery steps, for the report."""
+    found: list[dict[str, Any]] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            entry = {key: node[key] for key in ("verdict", "reason", "exit_code", "error", "timeout")
+                     if key in node and not isinstance(node[key], (dict, list))}
+            if entry:
+                found.append({"at": path[-96:], **entry})
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+
+    for raw in evidence_json:
+        try:
+            walk(json.loads(raw), "$")
+        except (TypeError, ValueError):
+            continue
+    return found[:24]
 
 
 def _linux_bubblewrap() -> str | None:
