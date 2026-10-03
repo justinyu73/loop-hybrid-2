@@ -33,6 +33,7 @@ import diff_grader
 import dispatch_envelope as dispatches
 import execution_fence as execution_fences
 import execution_host_port as execution_hosts
+import fence_command_runner as delivery_runners
 import external_action_port as eap
 import external_verdict as ev
 import github_conclusion_source as ghc
@@ -872,6 +873,12 @@ def build_worker(
     if native_execution_binding is not None:
         native_execution_binding.attach_native_store(runs)
         runs.command_runner = native_execution_binding.command
+    elif (execution_fence_port is not None
+          and not isinstance(execution_fence_port, execution_fences.DisabledExecutionFencePort)
+          and runs.command_runner is None):
+        # Compatibility runs execute delivery checks and the independent
+        # verifier through the same fence; a caller-supplied runner is kept.
+        runs.command_runner = delivery_runners.FenceCommandRunner(execution_fence_port)
     campaign_id = campaign["campaign_id"]
     knowledge_store = KnowledgeStore(Path(knowledge_store_root)) if knowledge_store_root is not None else None
     return GoalLoopWorker(
@@ -1369,6 +1376,11 @@ def run(
         dispatch_envelope=dispatch_envelope,
         execution_fence_port=fence_port,
         native_execution_binding=native_binding,
+    )
+    plan["delivery_command_runner"] = (
+        {"status": "native"}
+        if native_binding is not None
+        else delivery_runners.runner_status(worker.run_store.command_runner, fence_port)
     )
     startup_external_resumed = []
     if verdict_store is not None and conclusion_source is not None:
