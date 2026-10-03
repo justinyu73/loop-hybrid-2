@@ -91,7 +91,7 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 73–74 of 89 gates pass (set `PYTHONUTF8=1`). 15 always fail because they rely on POSIX-only behavior: executable-bit fake CLIs (4), the bubblewrap fences including the local provider sandbox, the live-smoke rehearsal and the delivery runner's Linux cases (6), POSIX signals and process-holder semantics (2), and POSIX path or platform defaults (3). 1 more (run verdict) is timing-dependent: its fixed 0.25 s budget is exceeded when Windows process start-up is slow, and the outcome also depends on the checkout directory. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 74–75 of 90 gates pass (set `PYTHONUTF8=1`). 15 always fail because they rely on POSIX-only behavior: executable-bit fake CLIs (4), the bubblewrap fences including the local provider sandbox, the live-smoke rehearsal and the delivery runner's Linux cases (6), POSIX signals and process-holder semantics (2), and POSIX path or platform defaults (3). 1 more (run verdict) is timing-dependent: its fixed 0.25 s budget is exceeded when Windows process start-up is slow, and the outcome also depends on the checkout directory. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 No Orca app, VS Code, or WSL is required. Orca is one optional execution-host
