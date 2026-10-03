@@ -70,6 +70,7 @@ run_gate lh-run-liveness python3 -B lh_runtime/run_liveness_canary.py || exit $?
 run_gate lh-durable-budget python3 -B lh_runtime/durable_budget_canary.py || exit $?
 run_gate lh-b12-live-smoke python3 -B lh_runtime/b12_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-executor-wiring python3 -B lh_runtime/executor_wiring_canary.py || exit $?
+run_gate lh-pure-loop-boundary python3 -B lh_runtime/pure_loop_boundary_canary.py || exit $?
 run_gate lh-orca-executor-cut5 python3 -B lh_runtime/orca_executor_canary.py || exit $?
 run_gate lh-execution-host-port python3 -B lh_runtime/execution_host_port_canary.py || exit $?
 run_gate lh-execution-host-adapter-p5 python3 -B lh_runtime/execution_host_adapter_canary.py || exit $?
