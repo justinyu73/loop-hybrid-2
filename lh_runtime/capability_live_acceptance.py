@@ -138,18 +138,13 @@ def _resource(
     return resource
 
 
-WINDOWS_ORCA_DEFAULT = "/mnt/c/Users/user/AppData/Local/Programs/orca/resources/bin/orca.exe"
-
-
 def _resolve_live_orca_cli() -> str:
-    """Same resolution as execution_host_port_live_canary: on this WSL host the
-    running Orca is the Windows app; ``~/.local/bin/orca`` is a stale Linux
-    install that answers runtime_unavailable (owner run 2026-08-24)."""
-    explicit = os.environ.get("LH_ORCA_CLI")
-    if explicit:
-        return explicit
-    if Path(WINDOWS_ORCA_DEFAULT).is_file():
-        return WINDOWS_ORCA_DEFAULT
+    """The Orca CLI for the optional execution-host path.
+
+    An explicit ``LH_ORCA_CLI`` wins; otherwise the shared executable
+    discovery runs.  A missing or unresolvable CLI is a named
+    ``FileNotFoundError`` -- no location on another platform is guessed.
+    """
     return executors.resolve_orca_cli()
 
 

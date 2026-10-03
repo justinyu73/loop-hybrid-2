@@ -93,7 +93,7 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：89 個 gate 中 73～74 個通過（請設定 `PYTHONUTF8=1`）。15 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（4）、bubblewrap fence——含本機 provider 沙箱、實測演練與 delivery 執行器的 Linux 案例（6）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時會超時，結果也和所在目錄有關。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：90 個 gate 中 74～75 個通過（請設定 `PYTHONUTF8=1`）。15 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（4）、bubblewrap fence——含本機 provider 沙箱、實測演練與 delivery 執行器的 Linux 案例（6）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時會超時，結果也和所在目錄有關。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 不需要 Orca App、VS Code 或 WSL。Orca 只是可選的 execution-host adapter；預設 executor 是在一次性 clone 中執行的本機 coding CLI。
