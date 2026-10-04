@@ -284,10 +284,6 @@ class WindowsNativeExecutionFence(ExecutionFencePort):
     def prepare(self, binding: Mapping[str, Any]) -> dict[str, Any]:
         self._validate_backend()
         normalized = _validate_binding(binding)
-        if str(normalized["adapter_id"]).startswith("orca-"):
-            raise ExecutionFenceUnavailable("adapter_provider_channel_unsupported")
-        if str(normalized["adapter_id"]).startswith("execution-host-port-"):
-            raise ExecutionFenceUnavailable("windows_control_plane_unsupported")
         binding_digest = digest_json(normalized)
         filesystem = _filesystem_policy(normalized)
         egress = _egress_policy(normalized)
@@ -354,7 +350,7 @@ class WindowsNativeExecutionFence(ExecutionFencePort):
             "backend_digest": backend_digest,
             "proofs": proofs,
             "proofs_digest": digest_json(proofs),
-            "launch_classes": {"control": 0, "mutation": 1},
+            "launch_classes": {"mutation": 1},
             "mutation_dispatch": "enabled_for_descriptor",
             "helper_attestation": attestation,
         }

@@ -110,10 +110,8 @@ def main() -> int:
         source, base = _source_repo(root)
         camp = campaign()
 
-        kimi_rejected, kimi_detail = _rejects(lambda: executors.kimi_argv("P"))
-        presets_ok = set(EXECUTORS) == {"codex", "orca"} \
-            and executors.codex_argv("P") == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "P"] \
-            and kimi_rejected and "kimi_retired" in kimi_detail
+        presets_ok = set(EXECUTORS) == {"codex"} \
+            and executors.codex_argv("P") == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "P"]
 
         spy = _Spy()
         dry = run(executor="codex", execute=False, goal_store_root=root / "d-goals", run_store_root=root / "d-runs",
@@ -152,7 +150,7 @@ def main() -> int:
         "total": len(cases),
         "blocking_failures": failures,
         "known_gaps_open": [
-            "actually invoking a provider or Orca is a human live smoke; this gate injects a fake executor",
+            "actually invoking a provider is a human live smoke; this gate injects a fake executor",
             "GitHub PR adapter and promotion remain later/human-owned nodes",
         ],
     }, ensure_ascii=False, indent=2))

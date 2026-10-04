@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from pathlib import PurePath, PureWindowsPath
+from pathlib import PurePath
 from typing import Any
 
 PROVIDER_REGISTRY_SCHEMA = "host-provider-registry/v1"
@@ -23,15 +23,6 @@ class ProviderRegistryError(ValueError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
-
-
-def is_kimi_executable(value: Any) -> bool:
-    """Recognize only a direct Kimi executable name/path, never shell text."""
-    if not isinstance(value, str):
-        return False
-    return PureWindowsPath(value.strip()).name.casefold() in {
-        "kimi", "kimi.exe", "kimi.cmd", "kimi.bat", "kimi.com", "kimi.ps1",
-    }
 
 
 def _text(name: str, value: Any) -> str:
@@ -61,8 +52,6 @@ def _command(name: str, value: Any) -> list[str]:
         raise ProviderRegistryError(f"{name}_invalid")
     if any(any(char in item for char in "\r\n\x00") for item in value):
         raise ProviderRegistryError(f"{name}_invalid")
-    if is_kimi_executable(value[0]):
-        raise ProviderRegistryError("retired_provider_command:kimi")
     executable = PurePath(value[0]).name
     lowered = [item.strip().lower() for item in value]
     if executable.lower() == _RETIRED_PROVIDER:
@@ -89,8 +78,6 @@ def validate_provider_registry(raw: Any) -> dict[str, Any]:
     normalized: dict[str, dict[str, Any]] = {}
     for provider_id, descriptor in providers.items():
         provider_id = _text("provider_id", provider_id)
-        if provider_id.casefold() == "kimi":
-            raise ProviderRegistryError("retired_provider:kimi")
         if provider_id.lower() == _RETIRED_PROVIDER:
             raise ProviderRegistryError("retired_provider")
         if not isinstance(descriptor, Mapping):
@@ -125,8 +112,6 @@ def select_provider(registry: Mapping[str, Any], provider_id: str | None) -> dic
     if not isinstance(provider_id, str) or not provider_id.strip():
         raise ProviderRegistryError("provider_selection_missing")
     provider_id = provider_id.strip()
-    if provider_id.casefold() == "kimi":
-        raise ProviderRegistryError("retired_provider:kimi")
     descriptor = normalized["providers"].get(provider_id)
     if descriptor is None:
         raise ProviderRegistryError("provider_unregistered:" + provider_id)
@@ -140,7 +125,6 @@ def select_provider(registry: Mapping[str, Any], provider_id: str | None) -> dic
 __all__ = [
     "PROVIDER_REGISTRY_SCHEMA",
     "ProviderRegistryError",
-    "is_kimi_executable",
     "select_provider",
     "validate_provider_registry",
 ]

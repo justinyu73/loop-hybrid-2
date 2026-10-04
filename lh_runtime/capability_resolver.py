@@ -266,11 +266,6 @@ def _validate_resource(
         runner = _text(f"{binding_id}.runner", runner)
     elif runner is not None:
         runner = _text(f"{binding_id}.runner", runner)
-    if runner == "orca":
-        raise ValueError(
-            f"{binding_id}.runner must identify a model adapter; "
-            "Orca belongs in execution_host"
-        )
     scores = raw.get("scores", {})
     if not isinstance(scores, dict):
         raise ValueError(f"{binding_id}.scores must be an object")
@@ -282,7 +277,7 @@ def _validate_resource(
             key: _text(f"{binding_id}.provider_binding.{key}", provider_binding.get(key))
             for key in ("runner", "base_url", "model")
         }
-        if _PROFILE_RE.fullmatch(provider_binding["runner"]) is None or provider_binding["runner"] == "orca":
+        if _PROFILE_RE.fullmatch(provider_binding["runner"]) is None:
             raise ValueError(
                 f"{binding_id}.provider_binding.runner must be an explicit provider adapter"
             )

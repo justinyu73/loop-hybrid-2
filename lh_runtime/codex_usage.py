@@ -110,7 +110,7 @@ def extract_usage_from_session_file(path: str | Path, *, model: str = "codex") -
 def extract_usage_from_jsonl(text: str, *, model: str = "codex") -> dict[str, Any] | None:
     """Extract cumulative token usage from Codex ``--json`` output.
 
-    Orca-hosted Codex runs with ``--ephemeral --json`` so the child provider
+    A sandboxed Codex runs with ``--ephemeral --json`` so the child provider
     cannot attribute the outer agent's session history to the LH attempt. The
     JSONL stream carries the same cumulative usage shape as the rollout file,
     but it is scoped to this invocation.

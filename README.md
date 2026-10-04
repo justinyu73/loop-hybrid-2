@@ -53,7 +53,7 @@ flowchart LR
 flowchart LR
     Q[queued run] --> W[worker tick<br/>單 holder lease]
     W --> CL[disposable clone<br/>@ pinned commit]
-    CL --> X[executor CLI<br/>codex / claude / kimi]
+    CL --> X[executor CLI<br/>codex]
     X --> V{acceptance lamp<br/>verification_argv}
     V -->|exit 0| RC[receipt + usage 入帳]
     V -->|失敗| RT[retry<br/>上限 max_attempts]
@@ -93,12 +93,12 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：90 個 gate 中 74～75 個通過（請設定 `PYTHONUTF8=1`）。15 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（4）、bubblewrap fence——含本機 provider 沙箱、實測演練與 delivery 執行器的 Linux 案例（6）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時會超時，結果也和所在目錄有關。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：87 個 gate 中 73～74 個通過（請設定 `PYTHONUTF8=1`）。13 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（2）、bubblewrap fence——含本機 provider 沙箱、實測演練與 delivery 執行器的 Linux 案例（6）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時會超時，結果也和所在目錄有關。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
-不需要 Orca App、VS Code 或 WSL。Orca 只是可選的 execution-host adapter；預設 executor 是在一次性 clone 中執行的本機 coding CLI。
+引擎不依賴任何 IDE、終端機宿主或平台橋接。executor 是在一次性 clone 中執行的本機 coding CLI（`codex`），或在 Linux 沙箱中由引擎直接啟動的 provider（`local`）。
 
-## 不經 Orca 的沙箱 provider 執行（Linux）
+## 沙箱 provider 執行（Linux）
 
 `local` executor 由 LH 直接啟動 provider CLI（目前支援 Codex），執行環境是已簽入每次 attempt launch descriptor 的 bubblewrap 沙箱：
 
@@ -120,7 +120,7 @@ export LH_LOCAL_PROVIDER_AGENT=codex                          # 或改傳 provid
 python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --executor local --execute
 ```
 
-provider 採明示宣告：沒有用 `LH_PROVIDER_NAMES`（或 `LH_CODEX_CLI`）宣告的 provider 不會寫入 policy，fence 會在 prepare 拒絕（run 停在 `human_required`，不會呼叫 provider）。Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`；只有偵測到 Orca 二進位時才會釘住 Orca。Codex 的 provider home 只需要 `auth.json`；`config.toml` 存在時才會以唯讀方式掛入。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
+provider 採明示宣告：沒有用 `LH_PROVIDER_NAMES`（或 `LH_CODEX_CLI`）宣告的 provider 不會寫入 policy，fence 會在 prepare 拒絕（run 停在 `human_required`，不會呼叫 provider）。Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`。Codex 的 provider home 只需要 `auth.json`；`config.toml` 存在時才會以唯讀方式掛入。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
 
 實測工具 `lh_runtime/local_provider_live_smoke.py` 會用暫存目錄跑一個 Goal（請 provider 建立 `src/hello.txt`），完整走過 instance init → manual intent → `goal_loop_run(executor="local")` → provider 沙箱 → 驗證器 → receipt：
 
@@ -144,7 +144,7 @@ npm test        # 跑全部確定性 gate（必須全綠）
 npm run lint    # shell 語法 + Python 編譯檢查
 ```
 
-要執行真實 coding agent，需任一已登入的 CLI：`codex`、`claude` 或 `kimi`。
+要執行真實 coding agent，需要已登入的 `codex` CLI。
 
 ## 使用
 

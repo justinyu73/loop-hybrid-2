@@ -32,7 +32,6 @@ import cli_agent_executor as executors
 import diff_grader
 import dispatch_envelope as dispatches
 import execution_fence as execution_fences
-import execution_host_port as execution_hosts
 import fence_command_runner as delivery_runners
 import external_action_port as eap
 import external_verdict as ev
@@ -56,7 +55,6 @@ from status_snapshot import DEFAULT_EXECUTOR_TIMEOUT_SECONDS
 # Model-agnostic executor registry. Add a CLI preset here, not a hardcoded model.
 EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
     "codex": executors.CODEX,
-    "orca": executors.ORCA,
 }
 # Execution hosts that start the provider themselves (no CLI preset of their
 # own).  Kept apart so EXECUTORS stays the closed set of CLI presets.
@@ -69,7 +67,7 @@ JUDGE_EXECUTORS = {"agy", "codex"}
 CAPABILITY_EVALUATION_EXECUTORS = {"codex"}
 EXECUTION_HOST_SCHEMA = "lh-execution-host-binding/v1"
 BOOTSTRAP_AUTHORITY_SCHEMA = "lh-bootstrap-authority/v1"
-EXECUTION_HOSTS = {"external-orca", "headless_cli"}
+EXECUTION_HOSTS = {"headless_cli"}
 TRUSTED_BOOTSTRAP_ROOT_ENV = "LH_TRUSTED_BOOTSTRAP_ROOT"
 EXPECTED_BOOTSTRAP_DECISION_ID = "LH-EXTERNAL-BOOTSTRAP-001"
 EXPECTED_BOOTSTRAP_AUTHORITY_REL = (
@@ -166,7 +164,7 @@ def build_execution_host_binding(
     return {
         "schema": EXECUTION_HOST_SCHEMA,
         "host_id": execution_host,
-        "adapter": "headless_cli" if execution_host == "headless_cli" else "orca-terminal",
+        "adapter": "headless_cli",
         "bootstrap_authority": {
             "schema": BOOTSTRAP_AUTHORITY_SCHEMA,
             **normalized,
@@ -185,14 +183,12 @@ def resolve_executor(
 ) -> ModelRunner | None:
     """Fail closed on an unknown executor (even in dry-run). Return the real
     model only when ``execute`` is true; dry-run returns None so nothing runs."""
-    if name == "kimi":
-        raise ValueError("kimi_retired: executor selection refused")
     factories = {**EXECUTORS, **HOST_EXECUTORS, **(factory_overrides or {})}
     if name not in factories:
         raise ValueError(f"unknown executor: {name!r}; choose one of {sorted(factories)}")
     if provider_binding is not None:
-        if name not in {"orca", "local"}:
-            raise ValueError("provider_binding is currently supported only with executor='orca' or 'local'")
+        if name != "local":
+            raise ValueError("provider_binding is currently supported only with executor='local'")
         runner = provider_binding.get("runner") if isinstance(provider_binding, dict) else None
         if not isinstance(runner, str) or not runner.strip():
             raise ValueError("provider_binding.runner is required; no provider default is allowed")
@@ -304,8 +300,6 @@ class CapabilityRoutingSession:
             if resource["executor_kind"] != "model":
                 continue
             runner = resource["runner"]
-            if runner == "kimi":
-                raise ValueError("kimi_retired: capability resource refused")
             if runner not in EXECUTORS and runner not in HOST_EXECUTORS and runner not in self.factories:
                 raise ValueError(f"no runtime adapter registered for resource runner {runner!r}")
             if runner in self.factories and (
@@ -351,7 +345,7 @@ class CapabilityRoutingSession:
                 f"{sorted(CAPABILITY_EVALUATION_EXECUTORS)}, got {resource['runner']!r}"
             )
         if resource.get("provider_binding") is not None:
-            raise ValueError("evaluate_transition does not support an Orca provider binding")
+            raise ValueError("evaluate_transition does not support a provider binding")
         if resource.get("model") is None:
             raise ValueError("evaluate_transition requires an explicit model binding")
         actual = (
@@ -375,11 +369,10 @@ class CapabilityRoutingSession:
             return self.factories[runner](timeout_seconds=timeout_seconds)
         if self.execution_host_binding is None:
             raise ValueError(
-                "capability production model requires the external execution host"
+                "capability production model requires execution_host='headless_cli'"
             )
-        return execution_hosts.make_execution_host_port(
-            agent=runner,
-            execution_host_binding=self.execution_host_binding,
+        return executors.make_named_cli_agent(
+            runner,
             model=resource.get("model"),
             provider_binding=resource.get("provider_binding"),
             timeout_seconds=timeout_seconds,
@@ -1148,7 +1141,7 @@ def run(
         ):
             raise ValueError(
                 "capability execution with a production model requires "
-                "execution_host='external-orca'"
+                "execution_host='headless_cli'"
             )
         has_evaluate_node = any(
             node["operation"] == "evaluate_transition" for node in routing.graph["nodes"]
@@ -1432,7 +1425,7 @@ def main(argv: list[str] | None = None) -> int:
         "--execution-host",
         default=None,
         choices=sorted(EXECUTION_HOSTS),
-        help="host adapter for capability execution; external-host production uses external-orca",
+        help="execution host for capability-routed production (headless_cli)",
     )
     parser.add_argument("--bootstrap-decision-id", default=None)
     parser.add_argument("--bootstrap-authority-ref", default=None)

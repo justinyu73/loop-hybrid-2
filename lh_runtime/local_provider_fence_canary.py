@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Local provider fence: a kernel-contained provider run on Linux without Orca.
+"""Local provider fence: a kernel-contained provider run on Linux.
 
 LH starts the provider itself under the descriptor-signed provider-sandbox
-profile (bubblewrap bind set, provider seccomp table, host network) -- no Orca
-control plane, no ``LH_ORCA_CLI``, no ``orca`` on PATH.  Executor wiring and
+profile (bubblewrap bind set, provider seccomp table, host network).  Executor wiring and
 the unsupported-backend refusals are platform-neutral and run everywhere; the
 bubblewrap cases need Linux with bubblewrap and libseccomp.
 
@@ -44,7 +43,7 @@ KEYCTL_SYSCALL = {"x86_64": 250, "aarch64": 219}
 # The fake provider reports what it observed from inside the sandbox.  It is a
 # plain Python script so no node runtime binding is involved.
 PROVIDER_SOURCE = """#!/usr/bin/python3
-import ctypes, json, os, platform, sys, time
+import ctypes, json, os, platform, socket, sys, time
 report = {
     "argv": sys.argv[1:],
     "cwd": os.getcwd(),
@@ -66,6 +65,25 @@ try:
     report["ro_write"] = True
 except OSError as exc:
     report["ro_write"] = exc.errno
+try:
+    with open(os.path.join("escape-link", "escaped.txt"), "w") as handle:
+        handle.write("x")
+    report["symlink_write"] = True
+except OSError as exc:
+    report["symlink_write"] = exc.errno
+try:
+    handle = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    handle.close()
+    report["socket"] = "ok"
+except OSError as exc:
+    report["socket"] = exc.errno
+try:
+    os.unshare(os.CLONE_NEWUTS)
+    report["unshare"] = "ok"
+except OSError as exc:
+    report["unshare"] = exc.errno
+except AttributeError:
+    report["unshare"] = "unavailable"
 number = {"x86_64": 250, "aarch64": 219}.get(platform.machine())
 if number is not None:
     libc = ctypes.CDLL(None, use_errno=True)
@@ -129,7 +147,7 @@ def _codex_home(root: Path) -> Path:
 
 
 def _policy(provider: Path, bwrap: Path, bin_dir: Path, codex_home: Path) -> dict[str, Any]:
-    # Deliberately no "orca_cli": the local provider path must not need one.
+    # The local provider path pins only the provider and bubblewrap.
     return {
         "schema": fences.EGRESS_POLICY_SCHEMA,
         "issuer": "lh-local-provider-canary",
@@ -150,7 +168,7 @@ def _policy(provider: Path, bwrap: Path, bin_dir: Path, codex_home: Path) -> dic
     }
 
 
-def _binding(clone: Path) -> dict[str, Any]:
+def _binding(clone: Path, adapter_id: str = fences.LOCAL_PROVIDER_ADAPTER_PREFIX + AGENT) -> dict[str, Any]:
     return fences.build_attempt_binding(
         goal={"goal_id": "local-provider-canary"},
         run_id="run-local-provider",
@@ -159,7 +177,7 @@ def _binding(clone: Path) -> dict[str, Any]:
         base_revision="0" * 40,
         clone_root=clone,
         verifier_argv=["true"],
-        adapter_id=fences.LOCAL_PROVIDER_ADAPTER_PREFIX + AGENT,
+        adapter_id=adapter_id,
         adapter_version="v1",
         timeout_seconds=300,
     )
@@ -194,11 +212,12 @@ def linux_cases() -> list[dict[str, Any]]:
     if not sys.platform.startswith("linux") or bwrap_found is None:
         reason = "local_provider_fence_requires_linux_bubblewrap"
         return [case(name, False, reason) for name in (
-            "L1-prepare-without-orca", "L2-provider-runs-inside-sandbox",
+            "L1-prepare-pins-provider-and-bwrap", "L2-provider-runs-inside-sandbox",
             "L3-refusals-are-reasoned", "L4-timeout-ends-process-group",
-            "L7-instance-policy-drives-local-provider")]
+            "L7-instance-policy-drives-local-provider", "L8-policy-refusals-at-prepare",
+            "L9-signed-profile-is-the-only-launch-basis")]
     root = _fixture_root()
-    saved = {name: os.environ.get(name) for name in ("PATH", "LH_EGRESS_POLICY", "LH_ORCA_CLI")}
+    saved = {name: os.environ.get(name) for name in ("PATH", "LH_EGRESS_POLICY")}
     cases: list[dict[str, Any]] = []
     try:
         bin_dir = root / "bin"
@@ -211,15 +230,14 @@ def linux_cases() -> list[dict[str, Any]]:
         policy_path.write_text(json.dumps(_policy(provider, bwrap, bin_dir, codex_home)), encoding="utf-8")
         os.environ["PATH"] = f"{bin_dir}:/usr/bin:/bin"
         os.environ["LH_EGRESS_POLICY"] = str(policy_path)
-        os.environ.pop("LH_ORCA_CLI", None)
-        orca_absent = shutil.which("orca") is None and "LH_ORCA_CLI" not in os.environ
         fence = fences.configured_execution_fence({"LH_EXECUTION_FENCE_BACKEND": fences.LINUX_BACKEND_ID})
         if isinstance(fence, fences.DisabledExecutionFencePort):
             reason = f"linux_backend_unavailable:{fence.reason}"
             return [case(name, False, reason) for name in (
-                "L1-prepare-without-orca", "L2-provider-runs-inside-sandbox",
+                "L1-prepare-pins-provider-and-bwrap", "L2-provider-runs-inside-sandbox",
                 "L3-refusals-are-reasoned", "L4-timeout-ends-process-group",
-                "L7-instance-policy-drives-local-provider")]
+                "L7-instance-policy-drives-local-provider", "L8-policy-refusals-at-prepare",
+                "L9-signed-profile-is-the-only-launch-basis")]
 
         # L1: prepare pins provider and bwrap, carries no control plane.
         descriptor = fence.prepare(_binding(clone))
@@ -227,11 +245,10 @@ def linux_cases() -> list[dict[str, Any]]:
         proofs = descriptor.get("proofs") or {}
         receipt = fence.receipt_projection(descriptor)
         l1 = (
-            orca_absent
-            and "control_plane" not in descriptor
+            "control_plane" not in descriptor
             and (local.get("provider") or {}).get("path") == str(provider)
             and (local.get("provider") or {}).get("sha256") == _sha256(provider)
-            and descriptor.get("launch_classes") == {"control": 0, "mutation": 0, "provider": 1}
+            and descriptor.get("launch_classes") == {"mutation": 0, "provider": 1}
             and {track: (proofs.get(track) or {}).get("result") for track in fences.REQUIRED_PROOF_TRACKS} == {
                 "filesystem_effect_containment": "applied_by_provider_sandbox",
                 "provider_control_egress": "host_network_policy_preflight",
@@ -241,13 +258,16 @@ def linux_cases() -> list[dict[str, Any]]:
             and ((receipt.get("local_provider") or {}).get("provider_sandbox") or {}).get("profile_digest")
             == (local.get("provider_sandbox") or {}).get("profile_digest")
         )
-        cases.append(case("L1-prepare-without-orca", l1, json.dumps({
-            "orca_absent": orca_absent, "launch_classes": descriptor.get("launch_classes"),
+        cases.append(case("L1-prepare-pins-provider-and-bwrap", l1, json.dumps({
+            "launch_classes": descriptor.get("launch_classes"),
             "proofs": {track: (proofs.get(track) or {}).get("result") for track in proofs},
             "has_control_plane": "control_plane" in descriptor})))
 
         # L2: the provider observes the sandbox from the inside.
         baseline_keyctl = _keyctl_errno()
+        escape_target = root / "outside-target"
+        escape_target.mkdir()
+        (clone / "escape-link").symlink_to(escape_target)
         argv = _provider_argv(provider, "PROMPT-L2")
         proc = fence.launch_provider(descriptor, argv, env_overlay={"LH_CANARY_OVERLAY": "overlay-ok"},
                                      input_text="stdin-ok", timeout_seconds=60)
@@ -268,6 +288,10 @@ def linux_cases() -> list[dict[str, Any]]:
             and set(report.get("env_keys") or []) <= allowed_env
             and (report.get("keyctl") or [None, None])[1] == errno.EPERM
             and baseline_keyctl != errno.EPERM
+            and report.get("symlink_write") in {errno.ENOENT, errno.EPERM, errno.EACCES, errno.EROFS}
+            and not (escape_target / "escaped.txt").exists()
+            and report.get("socket") == "ok"
+            and report.get("unshare") == errno.EPERM
         )
         cases.append(case("L2-provider-runs-inside-sandbox", l2, json.dumps(
             {"returncode": proc.returncode, "report": report, "baseline_keyctl": baseline_keyctl,
@@ -298,8 +322,9 @@ def linux_cases() -> list[dict[str, Any]]:
         classes = fence.prepare(_binding(clone))
         refusals["mutation_launch"] = _refusal(lambda: fence.launch(
             classes, ["/bin/true"], timeout_seconds=30))
-        refusals["control_launch"] = _refusal(lambda: fence.launch_control(
-            classes, {"op": "repo_list"}, timeout_seconds=30))
+        plain = fence.prepare(_binding(clone, adapter_id="fixture-mutation"))
+        refusals["provider_launch_on_mutation_descriptor"] = _refusal(lambda: fence.launch_provider(
+            plain, argv, timeout_seconds=30))
         expected = {
             "replayed": "descriptor_replayed",
             "tampered": "descriptor_digest_invalid",
@@ -307,7 +332,7 @@ def linux_cases() -> list[dict[str, Any]]:
             "argv_outside_policy": "control_provider_argv_outside_policy",
             "env_overlay": "local_provider_env_overlay_invalid",
             "mutation_launch": "launch_class_not_authorized",
-            "control_launch": "launch_class_not_authorized",
+            "provider_launch_on_mutation_descriptor": "launch_class_not_authorized",
         }
         cases.append(case("L3-refusals-are-reasoned", refusals == expected, json.dumps(refusals)))
 
@@ -328,7 +353,88 @@ def linux_cases() -> list[dict[str, Any]]:
         cases.append(case("L4-timeout-ends-process-group", timed_out and not survivors,
                           json.dumps({"timed_out": timed_out, "survivors": survivors})))
 
-        # L7: an instance-generated policy (no hand-written profile, no Orca)
+        # L8: policy values outside the signed policy refuse at prepare, while
+        # a PATH alias of the pinned provider is admitted by its canonical path.
+        base_policy = _policy(provider, bwrap, bin_dir, codex_home)
+
+        def prepare_with(policy_value: dict[str, Any] | None) -> str | None:
+            if policy_value is None:
+                policy_path.unlink()
+            else:
+                policy_path.write_text(json.dumps(policy_value), encoding="utf-8")
+            return _refusal(lambda: fence.prepare(_binding(clone)))
+
+        drifted = json.loads(json.dumps(base_policy))
+        drifted["providers"][AGENT]["sha256"] = "sha256:" + "0" * 64
+        no_profile = json.loads(json.dumps(base_policy))
+        del no_profile["provider_sandbox_profile"]
+        foreign = json.loads(json.dumps(base_policy))
+        foreign["provider_sandbox_profile"]["provider_home_ro_binds"] = {"someone-else": []}
+        prepare_refusals = {
+            "unlisted": prepare_with({**base_policy, "providers": {}}),
+            "drift": prepare_with(drifted),
+            "no_profile": prepare_with(no_profile),
+            "foreign_profile": prepare_with(foreign),
+            "missing": prepare_with(None),
+        }
+        policy_path.write_text(json.dumps(base_policy), encoding="utf-8")
+        alias_dir = root / "provider-alias"
+        alias_dir.mkdir()
+        (alias_dir / AGENT).symlink_to(provider)
+        os.environ["PATH"] = f"{alias_dir}:{bin_dir}:/usr/bin:/bin"
+        try:
+            alias_refusal = _refusal(lambda: fence.prepare(_binding(clone)))
+        finally:
+            os.environ["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        expected_prepare = {
+            "unlisted": "egress_policy_provider_not_listed",
+            "drift": "egress_policy_provider_mismatch",
+            "no_profile": "egress_policy_sandbox_profile_missing",
+            "foreign_profile": "egress_policy_sandbox_profile_provider_missing",
+            "missing": "egress_policy_unreadable",
+        }
+        cases.append(case("L8-policy-refusals-at-prepare",
+                          prepare_refusals == expected_prepare and alias_refusal is None,
+                          json.dumps({"refusals": prepare_refusals, "alias": alias_refusal})))
+
+        # L9: the profile signed at prepare is the launch's only basis -- a
+        # policy rewritten afterwards never reaches it -- and a pinned
+        # bubblewrap that drifts after prepare refuses the launch.
+        stale = fence.prepare(_binding(clone))
+        signed_digest = ((stale.get("local_provider") or {}).get("provider_sandbox") or {}).get("profile_digest")
+        rewritten = json.loads(json.dumps(base_policy))
+        rewritten["provider_sandbox_profile"]["ro_binds"] = ["/usr"]
+        policy_path.write_text(json.dumps(rewritten), encoding="utf-8")
+        try:
+            stale_run = fence.launch_provider(stale, _provider_argv(provider, "PROMPT-L9"), timeout_seconds=60)
+        finally:
+            policy_path.write_text(json.dumps(base_policy), encoding="utf-8")
+        stale_audit = (fence.provider_audit.get(stale["launch_descriptor_digest"]) or [{}])[-1]
+        drift_bwrap = bin_dir / "bwrap-pinned-copy"
+        shutil.copy2(bwrap, drift_bwrap)
+        drift_policy = json.loads(json.dumps(base_policy))
+        drift_policy["provider_sandbox_profile"]["bubblewrap"] = {
+            "path": str(drift_bwrap), "sha256": _sha256(drift_bwrap), "version": "0.9.0"}
+        policy_path.write_text(json.dumps(drift_policy), encoding="utf-8")
+        try:
+            drift_descriptor = fence.prepare(_binding(clone))
+            with open(drift_bwrap, "ab") as handle:
+                handle.write(b"\n# drifted after prepare\n")
+            drift_refusal = _refusal(lambda: fence.launch_provider(
+                drift_descriptor, _provider_argv(provider, "PROMPT-L9"), timeout_seconds=30))
+        finally:
+            policy_path.write_text(json.dumps(base_policy), encoding="utf-8")
+        cases.append(case(
+            "L9-signed-profile-is-the-only-launch-basis",
+            stale_run.returncode == 0
+            and signed_digest is not None
+            and stale_audit.get("provider_sandbox_profile_digest") == signed_digest
+            and drift_refusal == "provider_sandbox_bwrap_drifted",
+            json.dumps({"stale_rc": stale_run.returncode, "signed": signed_digest,
+                        "audit": stale_audit.get("provider_sandbox_profile_digest"),
+                        "drift": drift_refusal, "stderr": (stale_run.stderr or "")[-300:]})))
+
+        # L7: an instance-generated policy (no hand-written profile)
         # is enough to prepare and run the local provider.
         import instance_config
         home = root / "home"
@@ -345,14 +451,14 @@ def linux_cases() -> list[dict[str, Any]]:
         generated_run = fence.launch_provider(generated_descriptor, _provider_argv(provider, "PROMPT-L7"),
                                               timeout_seconds=60)
         l7 = (
-            "orca_cli" not in generated
+            not [key for key in generated if key.endswith("_cli")]
             and (profile.get("bubblewrap") or {}).get("path") == str(bwrap)
             and profile.get("network") == "host"
             and generated_run.returncode == 0
             and _report(generated_run).get("cwd") == str(clone)
         )
         cases.append(case("L7-instance-policy-drives-local-provider", l7, json.dumps({
-            "has_orca_cli": "orca_cli" in generated, "profile_keys": sorted(profile),
+            "cli_pins": [key for key in generated if key.endswith("_cli")], "profile_keys": sorted(profile),
             "returncode": generated_run.returncode, "stderr": (generated_run.stderr or "")[-300:]})))
     except Exception as exc:  # A crash is a failed exam, never a skipped one.
         cases.append(case("linux-cases-crashed", False, f"{type(exc).__name__}: {exc}"))
@@ -380,10 +486,6 @@ class _RecordingPort(fences.ExecutionFencePort):
     def launch(self, descriptor: Any, argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.other_calls += 1
         raise fences.ExecutionFenceUnavailable("recording_port_mutation_launch")
-
-    def launch_control(self, descriptor: Any, request: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        self.other_calls += 1
-        raise fences.ExecutionFenceUnavailable("recording_port_control_launch")
 
     def receipt_projection(self, descriptor: Any) -> dict[str, Any]:
         return {}

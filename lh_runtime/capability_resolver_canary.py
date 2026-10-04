@@ -170,7 +170,7 @@ def graph(*, first_quality: float = 9, second_quality: float = 8, evaluate: bool
     }
 
 
-def _orca_graph(base_url: str) -> dict[str, Any]:
+def _bound_graph(base_url: str) -> dict[str, Any]:
     candidate = graph(evaluate=False)
     resource = candidate["registry"]["resources"][0]
     resource["runner"] = "codex"
@@ -357,7 +357,7 @@ def main() -> int:
     bad_trust = graph()
     bad_trust["registry"]["resources"][0]["trust_tier"] = "process_bound"
     trust_rejected, trust_detail = _rejects(lambda: cr.validate_graph(bad_trust))
-    invalid_orca_urls = [
+    invalid_binding_urls = [
         "https://user:pass@example.test/v1",
         "https://example.test:notaport/v1",
         "https://example.test:99999/v1",
@@ -365,8 +365,8 @@ def main() -> int:
         "https://example.test/v1#fragment",
     ]
     invalid_url_results = {
-        url: _rejects(lambda candidate=_orca_graph(url): cr.validate_graph(candidate))
-        for url in invalid_orca_urls
+        url: _rejects(lambda candidate=_bound_graph(url): cr.validate_graph(candidate))
+        for url in invalid_binding_urls
     }
     revalidated = cr.resolve_operation(
         cr.validate_graph(cr.validate_graph(graph())),
@@ -919,8 +919,8 @@ def main() -> int:
         )
         contract.pop("models")
         invalid_project_url_results: dict[str, tuple[bool, str]] = {}
-        for invalid_url in invalid_orca_urls:
-            contract["execution_graph"] = _orca_graph(invalid_url)
+        for invalid_url in invalid_binding_urls:
+            contract["execution_graph"] = _bound_graph(invalid_url)
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             invalid_project_url_results[invalid_url] = _rejects(
                 lambda: resolve_project(contract_path)
@@ -972,7 +972,7 @@ def main() -> int:
         cli_result = json.loads(cli_stdout.getvalue())
         hosted_args = [
                 "--contract", str(contract_path),
-                "--execution-host", "external-orca",
+                "--execution-host", "headless_cli",
                 "--bootstrap-decision-id", "LH-EXTERNAL-BOOTSTRAP-001",
                 "--bootstrap-authority-ref",
                 "docs/bootstrap-authority.md#lh-external-bootstrap-001",
@@ -1025,9 +1025,9 @@ def main() -> int:
         cases.append(case(
             "mm11-execution-host-is-separate-and-bootstrap-bound",
             hosted_exit == 0
-            and hosted_result["plan"]["execution_host"]["host_id"] == "external-orca"
+            and hosted_result["plan"]["execution_host"]["host_id"] == "headless_cli"
             and hosted_binding["runner"] == "codex"
-            and hosted_binding["execution_host"]["host_id"] == "external-orca"
+            and hosted_binding["execution_host"]["host_id"] == "headless_cli"
             and hosted_binding["execution_host"]["bootstrap_authority"]["decision_id"]
             == "LH-EXTERNAL-BOOTSTRAP-001"
             and hosted_binding["execution_host"]["bootstrap_authority"]["authority_digest"]
@@ -1044,16 +1044,6 @@ def main() -> int:
                 "digest": spoofed_digest_detail,
                 "root": alternate_root_detail,
             }, sort_keys=True),
-        ))
-        orca_as_model = graph(evaluate=False)
-        orca_as_model["registry"]["resources"][0]["runner"] = "orca"
-        orca_rejected, orca_detail = _rejects(
-            lambda: cr.validate_graph(orca_as_model)
-        )
-        cases.append(case(
-            "mm11-orca-cannot-be-a-capability-model-runner",
-            orca_rejected,
-            orca_detail,
         ))
 
         contract.pop("execution_graph")
