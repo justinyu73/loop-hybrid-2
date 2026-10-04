@@ -12,7 +12,6 @@ from typing import Any, Callable
 import external_action_port as eap
 import external_verdict as ev
 import grill_loop
-import merge_gate as merge_gate_mod
 import turning_point as tp
 import value_reducer
 import verifier_normalizer
@@ -104,7 +103,6 @@ class GoalLoopWorker:
         action_ledger: eap.ActionLedger | None = None,
         external_adapter: eap.ExternalAdapter | None = None,
         grill_runner: grill_loop.GrillRunner | None = None,
-        merge_gate: merge_gate_mod.MergeGate | None = None,
         now_fn: Callable[[], datetime] | None = None,
         knowledge_store: KnowledgeStore | None = None,
         knowledge_repo_roots: tuple[Path, ...] = (),
@@ -125,9 +123,6 @@ class GoalLoopWorker:
         # W6a: optional challenger grill before a sync run's last allowed
         # attempt. None = today's behavior; the grill is advisory everywhere.
         self.grill_runner = grill_runner
-        # B13: optional conditional auto-merge gate, consulted only when a
-        # parked run resolves. None = output stops at the draft PR.
-        self.merge_gate = merge_gate
         # W9f: clock for the standing-intent day window; injectable so the
         # emitter's window math stays testable without sleeping.
         self._now_fn = now_fn if now_fn is not None else lambda: datetime.now(timezone.utc)
@@ -167,24 +162,18 @@ class GoalLoopWorker:
                 verdict_store=verdict_store, source=conclusion_source,
                 normalizer=normalize,
             )
-        auto_merge = []
-        if self.merge_gate is not None and external:
-            # B13: human merges found on poll feed the trust ramp; runs that
-            # resolved verified-with-success go through the gate's conditions.
-            auto_merge = self.merge_gate.on_poll_resolved(external, at=time.time())
         terminal_before = self._reduce_one_terminal_run()
         self._enqueue_campaign_recoveries()
         event_result = self._process_one_event(holder)
         run_result = self._dispatch_one_run(holder, model, turning_point=turning_point, verdict_store=verdict_store)
         terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped", "human_required"} else None
         campaign_stops = self._campaign_failure_lines()
-        progressed = any(item is not None and item != [] for item in (standing, startup, external, auto_merge, terminal_before, event_result, run_result, terminal_after, campaign_stops))
+        progressed = any(item is not None and item != [] for item in (standing, startup, external, terminal_before, event_result, run_result, terminal_after, campaign_stops))
         return {
             "status": "progress" if progressed else "idle",
             "standing_emitted": standing,
             "startup_reconciled": startup,
             "external_resumed": external,
-            "auto_merge": auto_merge,
             "terminal_before": terminal_before,
             "event": event_result,
             "run": run_result,

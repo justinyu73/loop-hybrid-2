@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Generic external-action port with operation-key idempotency (the dedup leg).
 
-本模組定義介面與本地 ledger，不直接讀取 provider 憑證或發出網路請求。
-goal_loop_run 已可依 Project Runtime Contract 注入 GitHubPrAdapter；
-是否允許外部作用仍由該 contract、授權及 adapter 能力判定，不能由
-介面存在或離線 canary 推論 live 已通過。
+本模組定義介面與本地 ledger，不直接讀取憑證或發出網路請求。
+引擎不附帶任何外部服務的 adapter；使用者透過引擎 API 注入。是否允許外部作用
+由注入方的授權與 adapter 能力判定，不能由介面存在或離線 canary 推論已通過。
 
 The at-most-once guarantee needs BOTH sides to key on the same operation_key:
   - the local ActionLedger, so a completed action is never re-issued; and
@@ -12,8 +11,8 @@ The at-most-once guarantee needs BOTH sides to key on the same operation_key:
     lost) is NOT duplicated when the loop retries — the external system recognises
     the key and returns the existing result instead of a second side-effect.
 實際 adapter 必須對 operation_key 實作可驗證的去重或既有效果讀回；
-本地 ledger 本身不保證外部 API exactly-once，也不假設 GitHub 提供
-通用 Idempotency-Key。既有 GitHub 接線見 github_pr_adapter.py。
+本地 ledger 本身不保證外部 API exactly-once，也不假設外部服務提供
+通用 Idempotency-Key。
 """
 from __future__ import annotations
 

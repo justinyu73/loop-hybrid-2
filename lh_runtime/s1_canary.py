@@ -44,7 +44,7 @@ def _diff(path: str) -> str:
 
 
 def _verdict(path: str, *, lamp_argv=None) -> dict[str, Any]:
-    return value_verdict(exit_code=0, diff_text=_diff(path), allowed_paths=["src/", "gate-pack/", "tests/", ".github/", "docs/", ""], lamp_argv=lamp_argv)
+    return value_verdict(exit_code=0, diff_text=_diff(path), allowed_paths=["src/", "gate-pack/", "tests/", ".ci/", "docs/", ""], lamp_argv=lamp_argv)
 
 
 def _seed_run(store: RunStore, run_id: str, *, lamp_argv: list[str], diff_path: str) -> None:
@@ -97,13 +97,12 @@ def main() -> int:
             "CURSOR.md",
             "docs/contracts/goal-lifecycle-v1.md",
             "docs/active/lh-auto-runner-gap-review-plan.md",
-            ".github/workflows/ci.yml",
+            ".ci/workflow.yml",
             "project_runtime_contract.json",
             "projects/example-project/project_runtime_contract.json",
             "lh_runtime/authority_surface.py",
             "lh_runtime/value_reducer.py",
             "lh_runtime/diff_grader.py",
-            "lh_runtime/merge_gate.py",
             "lh_runtime/project_binding.py",
             "deploy/lh-driver.service",
             "docs/promotion-policy.md",

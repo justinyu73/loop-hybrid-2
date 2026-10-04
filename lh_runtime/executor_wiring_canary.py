@@ -151,7 +151,7 @@ def main() -> int:
         "blocking_failures": failures,
         "known_gaps_open": [
             "actually invoking a provider is a human live smoke; this gate injects a fake executor",
-            "GitHub PR adapter and promotion remain later/human-owned nodes",
+            "external adapters and promotion remain later/human-owned nodes",
         ],
     }, ensure_ascii=False, indent=2))
     return 0 if not failures else 1

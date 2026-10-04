@@ -12,7 +12,6 @@ from typing import Iterable
 
 
 AUTHORITY_PREFIXES = (
-    ".github/",
     "deploy/",
     "docs/active/",
     "docs/contracts/",
@@ -21,7 +20,6 @@ AUTHORITY_PREFIXES = (
 
 AUTHORITY_BASENAMES = frozenset({
     "AGENTS.md",
-    "CLAUDE.md",
     "CURSOR.md",
     "GOVERNANCE.md",
     "project_runtime_contract.json",
@@ -33,8 +31,6 @@ AUTHORITY_FILES = frozenset({
     "lh_runtime/diff_grader.py",
     "lh_runtime/goal_loop_run.py",
     "lh_runtime/goal_loop_worker.py",
-    "lh_runtime/merge_gate.py",
-    "lh_runtime/merge_trust.py",
     "lh_runtime/project_binding.py",
     "lh_runtime/value_reducer.py",
 })
@@ -63,7 +59,8 @@ def is_authority_path(path: str, *, lamp_paths: Iterable[str] = ()) -> bool:
     normalized = _normalize(path)
     if not normalized:
         return False
-    basename = PurePosixPath(normalized).name
+    parts = PurePosixPath(normalized).parts
+    basename = parts[-1]
     dynamic_lamps = {_normalize(item) for item in lamp_paths if isinstance(item, str)}
     return (
         normalized in AUTHORITY_FILES
@@ -71,6 +68,9 @@ def is_authority_path(path: str, *, lamp_paths: Iterable[str] = ()) -> bool:
         or normalized in dynamic_lamps
         or any(normalized == prefix.rstrip("/") or normalized.startswith(prefix)
                for prefix in AUTHORITY_PREFIXES)
+        # A hidden top-level directory holds repository tooling (CI, editor,
+        # hosting configuration); it is authority whatever service reads it.
+        or (len(parts) > 1 and parts[0].startswith(".") and parts[0] not in {".", ".."})
         or any(basename.endswith(suffix) for suffix in AUTHORITY_SUFFIXES)
         or any(marker in basename.lower() for marker in AUTHORITY_POLICY_MARKERS)
     )

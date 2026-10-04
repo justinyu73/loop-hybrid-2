@@ -41,7 +41,6 @@ run_gate lh-verifier-normalizer-n15 python3 -B lh_runtime/verifier_normalizer_ca
 run_gate lh-lamp-precheck python3 -B lh_runtime/lamp_precheck_canary.py || exit $?
 run_gate execution-receipt python3 gate-pack/execution_receipt/canary.py || exit $?
 run_gate verification-reducer python3 gate-pack/verification_reducer/canary.py || exit $?
-run_gate value-route python3 gate-pack/value_route/canary.py || exit $?
 run_gate lh-native-runtime python3 lh_runtime/canary.py || exit $?
 run_gate lh-knowledge-fts5 python3 lh_runtime/knowledge_canary.py || exit $?
 run_gate lh-knowledge-indexer python3 -B lh_runtime/knowledge_indexer_canary.py || exit $?
@@ -76,8 +75,6 @@ run_gate lh-instance-config python3 -B lh_runtime/instance_config_canary.py || e
 run_gate lh-project-binding python3 -B lh_runtime/project_binding_canary.py || exit $?
 run_gate lh-lifecycle-p3 python3 -B lh_runtime/lifecycle_canary.py || exit $?
 run_gate lh-second-project-b5 python3 -B lh_runtime/second_project_canary.py || exit $?
-run_gate lh-github-conclusion python3 -B lh_runtime/github_conclusion_canary.py || exit $?
-run_gate lh-github-verdict-wiring python3 -B lh_runtime/github_verdict_wiring_canary.py || exit $?
 run_gate lh-owner-durability python3 -B lh_runtime/owner_durability_canary.py || exit $?
 run_gate lh-grill-loop python3 -B lh_runtime/grill_loop_canary.py || exit $?
 run_gate lh-failure-case-live-acceptance python3 -B lh_runtime/failure_case_live_acceptance_canary.py || exit $?
@@ -88,12 +85,9 @@ run_gate lh-live-smoke python3 -B lh_runtime/live_smoke_canary.py || exit $?
 run_gate lh-usage-void python3 -B lh_runtime/usage_void_canary.py || exit $?
 run_gate lh-standing-intent python3 -B lh_runtime/standing_intent_canary.py || exit $?
 run_gate lh-run-revival python3 -B lh_runtime/revival_canary.py || exit $?
-run_gate lh-github-pr-adapter python3 -B lh_runtime/github_pr_adapter_canary.py || exit $?
 run_gate lh-diff-grader python3 -B lh_runtime/diff_grader_canary.py || exit $?
-run_gate lh-merge-gate python3 -B lh_runtime/merge_gate_canary.py || exit $?
 run_gate lh-authority-surface python3 -B lh_runtime/s1_canary.py || exit $?
 run_gate lh-evidence-integrity python3 -B lh_runtime/evidence_integrity_canary.py || exit $?
-run_gate lh-b7-live-smoke python3 -B lh_runtime/b7_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-codex-usage python3 -B lh_runtime/codex_usage_canary.py || exit $?
 run_gate lh-usage-parsers python3 -B lh_runtime/usage_parser_canary.py || exit $?
 run_gate lh-value-reducer python3 -B lh_runtime/value_reducer_canary.py || exit $?

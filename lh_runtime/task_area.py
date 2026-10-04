@@ -1403,7 +1403,7 @@ class TaskAreaController:
 
     def merge_prerequisite_intent(self, manifest: dict, ref: dict) -> dict:
         """Read the approved immutable intent; SCM observations are separate."""
-        if (ref.get("kind") != "github_merge_ci"
+        if (ref.get("kind") != "scm_merge_ci"
             or ref not in manifest.get("source_prerequisites", [])
             or not any(task.get("status") == "approved"
                        and ref in task.get("required_preconditions", [])
@@ -1714,7 +1714,7 @@ class TaskAreaController:
                 validate_event(self, manifest, event)
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 raise TaskAreaError(str(exc)) from exc
-        if ref.get("kind") == "github_merge_ci":
+        if ref.get("kind") == "scm_merge_ci":
             self._verify_reviewed_binding(manifest)
             intent = self.merge_prerequisite_intent(manifest, ref)
             binding = manifest["reviewed_task_list_binding"]

@@ -328,7 +328,7 @@ def main() -> int:
             "path": "existing external_verdict -> controller.resume_external",
             "network": "none; injected transport only",
         },
-        "known_gaps_open": ["No provider-specific GitHub, push, merge, publish, quota, or promotion adapter is included in this G6 slice."],
+        "known_gaps_open": ["No service-specific push, merge, publish, quota, or promotion adapter is included in this G6 slice."],
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if not failures else 1

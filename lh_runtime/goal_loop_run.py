@@ -22,23 +22,19 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import capability_resolver as cr
 import provider_input_binding as provider_inputs
 import cli_agent_executor as executors
-import diff_grader
 import dispatch_envelope as dispatches
 import execution_fence as execution_fences
 import fence_command_runner as delivery_runners
 import external_action_port as eap
 import external_verdict as ev
-import github_conclusion_source as ghc
-import github_pr_adapter as gpa
 import grill_loop
-import merge_gate as mg
 import project_binding
 import instance_config
 import turning_point as tp
@@ -853,7 +849,6 @@ def build_worker(
     base_revision: str,
     executor_timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     grill_runner: grill_loop.GrillRunner | None = None,
-    merge_gate: mg.MergeGate | None = None,
     action_ledger: eap.ActionLedger | None = None,
     external_adapter: eap.ExternalAdapter | None = None,
     knowledge_store_root: str | Path | None = None,
@@ -891,144 +886,12 @@ def build_worker(
         compilers={campaign_id: CampaignCompiler(campaign)},
         execution_context={campaign_id: {"source_repo": Path(source_repo), "base_revision": base_revision}},
         grill_runner=grill_runner,
-        merge_gate=merge_gate,
         action_ledger=action_ledger,
         external_adapter=external_adapter,
         knowledge_store=knowledge_store,
         knowledge_repo_roots=tuple(Path(item) for item in knowledge_repo_roots),
         recovery_binding=native_execution_binding,
     )
-
-
-def build_pr_adapter(
-    github_pr_adapter: dict[str, Any],
-    *,
-    run_store_root: str | Path,
-    repo_root: str | Path | None = None,
-    environ: Mapping[str, str] | None = None,
-    transport: gpa.PrTransport | None = None,
-) -> tuple[eap.ActionLedger, eap.ExternalAdapter]:
-    """R1: construct the durable action ledger and the draft-PR adapter.
-
-    The ledger lives under the run store root (at-most-once survives
-    restarts). Credential binding is deferred until ``perform`` so an idle
-    resident tick can still refresh ownership and heartbeat evidence. A
-    missing token still raises before any git or API call, and the controller
-    records the external-action failure on the Attempt. The remote URL
-    defaults to github.com and can be overridden for fixtures or SSH remotes
-    via ``LH_GITHUB_GIT_REMOTE``.
-    """
-    values = os.environ if environ is None else environ
-    ledger = eap.ActionLedger(Path(run_store_root) / "action-ledger.sqlite3")
-    adapter: eap.ExternalAdapter = gpa.DeferredGitHubPrAdapter(
-        owner=github_pr_adapter["owner"],
-        repo=github_pr_adapter["repo"],
-        base_branch=github_pr_adapter["base_branch"],
-        run_store=RunStore(Path(run_store_root)),
-        environ=values,
-        remote_url=values.get("LH_GITHUB_GIT_REMOTE") or None,
-        transport=transport,
-    )
-    # The integration delivery route owns the pre-merge watch.  It is enabled
-    # by the service's durable state-root binding, not by a user --arm command;
-    # absent that binding, the legacy standalone adapter remains unchanged.
-    post_merge_root = values.get("LH_HOST_POST_MERGE_STATE_ROOT")
-    if post_merge_root and repo_root is not None:
-        tools_root = Path(__file__).resolve().parents[1] / "tools"
-        if str(tools_root) not in sys.path:
-            sys.path.insert(0, str(tools_root))
-        import session_post_merge_resume as host_post_merge  # type: ignore
-
-        canonical_repo = host_post_merge.canonical_repository_slug(Path(repo_root))
-        producer = host_post_merge.PostMergeWatchProducer(
-            repo_root=Path(repo_root),
-            state_root=Path(post_merge_root),
-            allow_production_state_root=True,
-        )
-        adapter = host_post_merge.PostMergeDeliveryEntrypoint(
-            adapter=adapter,
-            watch_producer=producer,
-            binding={
-                "repository_id": canonical_repo,
-                "goal_id": host_post_merge.DEFAULT_GOAL_ID,
-                "goal_revision": host_post_merge.DEFAULT_GOAL_REVISION,
-                "node_id": host_post_merge.DEFAULT_NODE_ID,
-            },
-        )
-    return ledger, adapter
-
-
-def build_merge_gate(
-    github_pr_adapter: dict[str, Any],
-    *,
-    run_store_root: str | Path,
-    verdict_store: ev.VerdictStore,
-    ledger: eap.ActionLedger,
-    goal_store: Any = None,
-    judge: diff_grader.GraderRunner | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> mg.DeferredMergeGate:
-    """B13: construct the conditional auto-merge gate for an allowlisted repo.
-
-    The merge credential is a SEPARATE token from the R1 draft-PR token
-    (LH_GITHUB_MERGE_TOKEN, merge-only scope, allowlisted repo); a missing
-    credential is bound only when a resolved row reaches the merge hook, so
-    idle ticks never depend on it. The trust-ramp store sits next to the
-    action ledger under the run store root, so ramp evidence survives restarts
-    with the runs it refers to.
-    """
-    values = os.environ if environ is None else environ
-    return mg.DeferredMergeGate(
-        owner=github_pr_adapter["owner"],
-        repo=github_pr_adapter["repo"],
-        base_branch=github_pr_adapter["base_branch"],
-        run_store=RunStore(Path(run_store_root)),
-        verdict_store=verdict_store,
-        ledger=ledger,
-        ramp_store=mg.TrustRampStore(Path(run_store_root) / "ramp.sqlite3"),
-        goal_store=goal_store,
-        judge=judge,
-        environ=values,
-    )
-
-
-def build_github_verdict(
-    github_verdict: dict[str, str],
-    *,
-    run_store_root: str | Path,
-    environ: Mapping[str, str] | None = None,
-    transport: ghc.Transport | None = None,
-) -> tuple[ev.VerdictStore, ev.ConclusionSource]:
-    """Construct the durable verdict store and the GitHub conclusion source.
-
-    The store lives under the run store root so the awaiting state survives
-    host restarts next to the runs it parks. The token comes from the
-    environment only and is bound lazily when an awaiting operation is
-    actually polled. An idle tick therefore does not depend on GitHub
-    credentials. Missing credentials or an unavailable source leave the run
-    parked through the existing poll-and-resume unknown-preserving path. The token is
-    never written to the store, receipts, or any artifact.
-    """
-    store = ev.VerdictStore(Path(run_store_root) / "verdict.sqlite3")
-
-    def sha_resolver(op_key: str) -> str | None:
-        action = store.action_for_op_key(op_key)
-        external = action.get("external") if isinstance(action, dict) else None
-        head_sha = external.get("head_sha") if isinstance(external, dict) else None
-        return head_sha if isinstance(head_sha, str) and head_sha.strip() else None
-
-    def source(op_key: str) -> dict[str, str] | None:
-        client = ghc.GitHubConclusionSource.from_env(
-            github_verdict["owner"],
-            github_verdict["repo"],
-            github_verdict["workflow"],
-            sha_resolver,
-            environ=environ,
-            transport=transport,
-        )
-        return client(op_key)
-
-    return store, source
 
 
 def run(
@@ -1053,10 +916,6 @@ def run(
     status_snapshot_out: str | Path | None = None,
     verdict_store: ev.VerdictStore | None = None,
     conclusion_source: ev.ConclusionSource | None = None,
-    github_verdict: dict[str, str] | None = None,
-    github_environ: Mapping[str, str] | None = None,
-    github_transport: ghc.Transport | None = None,
-    github_pr_adapter: dict[str, Any] | None = None,
     factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
     driver_fn: Callable[..., dict[str, Any]] = run_driver,
     sleep_fn: Callable[[float], None] | None = None,
@@ -1096,12 +955,6 @@ def run(
             else execution_fences.DisabledExecutionFencePort()
         )
     )
-    if github_verdict is not None:
-        if verdict_store is not None or conclusion_source is not None:
-            raise ValueError("github_verdict cannot be combined with an explicit verdict_store/conclusion_source")
-        verdict_store, conclusion_source = build_github_verdict(
-            github_verdict, run_store_root=run_store_root, environ=github_environ, transport=github_transport,
-        )
     if (verdict_store is None) != (conclusion_source is None):
         raise ValueError("verdict_store and conclusion_source must be supplied together")
     execution_host_binding = build_execution_host_binding(
@@ -1199,7 +1052,6 @@ def run(
             "executor_timeout_seconds": executor_timeout_seconds,
             "status_snapshot_out": str(status_snapshot_out) if status_snapshot_out is not None else None,
             "external_verdict_poll": verdict_store is not None,
-            "auto_merge": github_pr_adapter is not None and github_pr_adapter.get("auto_merge") is True,
             "daily_soft_cap_usd": daily_soft_cap_usd,
             "daily_hard_cap_usd": daily_hard_cap_usd,
             "quota_gate": quota_reader is not None,
@@ -1259,24 +1111,11 @@ def run(
         ]
     if model is None:
         return {"mode": "dry_run", "invoked": False, "plan": plan}
-    action_ledger: eap.ActionLedger | None = None
-    external_adapter: eap.ExternalAdapter | None = None
-    if github_pr_adapter is not None:
-        # R1: credential binding is deferred until a real external action.
-        # Idle resident ticks can still publish ownership/heartbeat evidence;
-        # a missing token still stops that action before any git or API call.
-        action_ledger, external_adapter = build_pr_adapter(
-            github_pr_adapter,
-            run_store_root=run_store_root,
-            repo_root=source_repo,
-            environ=github_environ,
-        )
     grill_runner: grill_loop.GrillRunner | None = None
-    grader: diff_grader.GraderRunner | None = None
     if routing is not None and has_evaluate_node:
         # Capability evaluation is deliberately post-Attempt.  Turning-point
         # selection happens before an actual produce binding exists and remains
-        # deterministic; grill and diff grading resolve against the persisted
+        # deterministic; the grill resolves against the persisted
         # binding they are reviewing.
         grill_runner = _make_capability_evaluator(
             routing,
@@ -1292,28 +1131,6 @@ def run(
                     },
                 },
                 "required": ["decision"],
-                "additionalProperties": False,
-            },
-        )
-        grader = _make_capability_evaluator(
-            routing,
-            kind="diff_grader",
-            prompt_builder=diff_grader.build_grader_prompt,
-            parser=diff_grader.parse_grade,
-            output_schema={
-                "type": "object",
-                "properties": {
-                    "grade": {
-                        "type": "string",
-                        "enum": ["routine", "sensitive"],
-                    },
-                    "rationale": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": diff_grader.MAX_RATIONALE_CHARS,
-                    },
-                },
-                "required": ["grade", "rationale"],
                 "additionalProperties": False,
             },
         )
@@ -1333,25 +1150,6 @@ def run(
             lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
             name=judge_executor,
         )
-        # B13: the same layering carries the merge gate's semantic diff
-        # grader. Absent judge = the grader's deterministic checks still run
-        # and everything else routes to a human.
-        grader = diff_grader.make_cli_grader(
-            lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
-            name=judge_executor,
-        )
-    gate: mg.MergeGate | None = None
-    if external_adapter is not None and github_pr_adapter is not None and github_pr_adapter.get("auto_merge") is True:
-        # B13: the contract declared conditional auto-merge for this repo. A
-        # Credential binding is deferred until a resolved row reaches the
-        # merge hook. Undeclared repos get no gate at all.
-        if verdict_store is None:
-            raise ValueError("auto_merge requires the external verdict wiring (github_verdict or verdict_store/conclusion_source)")
-        gate = build_merge_gate(
-            github_pr_adapter, run_store_root=run_store_root, verdict_store=verdict_store,
-            ledger=action_ledger, goal_store=GoalStore(Path(goal_store_root)),
-            judge=grader, environ=github_environ,
-        )
     worker = build_worker(
         goal_store_root=goal_store_root,
         run_store_root=run_store_root,
@@ -1361,9 +1159,6 @@ def run(
         base_revision=base_revision,
         executor_timeout_seconds=executor_timeout_seconds,
         grill_runner=grill_runner,
-        merge_gate=gate,
-        action_ledger=action_ledger,
-        external_adapter=external_adapter,
         knowledge_store_root=knowledge_store_root,
         knowledge_repo_roots=knowledge_repo_roots,
         dispatch_envelope=dispatch_envelope,

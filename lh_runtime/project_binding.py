@@ -231,29 +231,9 @@ def resolve_project(
             "authority_ref": str(path),
             "authority_digest": cr.digest_json(contract),
         }
-    external_verdict = contract.get("external_verdict")
-    if external_verdict is not None:
-        if not isinstance(external_verdict, dict):
-            raise SystemExit("contract.external_verdict must be an object")
-        for field in ("owner", "repo", "workflow"):
-            if not isinstance(external_verdict.get(field), str) or not external_verdict[field].strip():
-                raise SystemExit(f"contract.external_verdict.{field} must be a non-empty string")
-        run_kwargs["github_verdict"] = {field: external_verdict[field].strip() for field in ("owner", "repo", "workflow")}
-        adapter = external_verdict.get("adapter")
-        if adapter is not None:
-            if not isinstance(adapter, dict) or adapter.get("type") != "github_pr":
-                raise SystemExit("contract.external_verdict.adapter must be an object with type 'github_pr'")
-            for field in ("owner", "repo", "base_branch"):
-                if not isinstance(adapter.get(field), str) or not adapter[field].strip():
-                    raise SystemExit(f"contract.external_verdict.adapter.{field} must be a non-empty string")
-            # B13: opt-in conditional auto-merge for this repo. Absent/false
-            # means no gate is built and behavior is unchanged.
-            auto_merge = adapter.get("auto_merge", False)
-            if not isinstance(auto_merge, bool):
-                raise SystemExit("contract.external_verdict.adapter.auto_merge must be a boolean")
-            run_kwargs["github_pr_adapter"] = {field: adapter[field].strip() for field in ("owner", "repo", "base_branch")}
-            if auto_merge:
-                run_kwargs["github_pr_adapter"]["auto_merge"] = True
+    if "external_verdict" in contract:
+        raise SystemExit("contract.external_verdict is not supported; inject a verdict store and "
+                         "conclusion source through the engine API")
     result: dict[str, Any] = {"project_id": contract["project_id"], "run_kwargs": run_kwargs}
     if instance is not None:
         result["instance_config"] = instance.readback()

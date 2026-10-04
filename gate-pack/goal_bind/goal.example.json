@@ -8,7 +8,7 @@
   "approval_mode": "feature_contract_is_approval",
   "plan": {
     "grill_ref": "discussion://example/goal-overlay",
-    "assumptions": ["LH owns the execution and GitHub adapters"]
+    "assumptions": ["LH owns the execution and external adapters"]
   },
   "acceptance": {
     "static": ["npm run lint"],
