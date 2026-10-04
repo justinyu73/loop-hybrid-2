@@ -214,7 +214,7 @@ def main() -> int:
         "total": len(cases),
         "blocking_failures": failures,
         "known_gaps_open": [
-            "provider/Orca adapter subprocess seams remain outside this P1 controller/driver slice",
+            "provider adapter subprocess seams remain outside this P1 controller/driver slice",
             "PlatformPaths is a P1 contract seam; live instance-root wiring is P2 scope",
             "Windows msvcrt locking requires a Windows-hosted acceptance run",
         ],

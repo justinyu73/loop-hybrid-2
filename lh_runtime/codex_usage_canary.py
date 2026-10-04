@@ -29,7 +29,7 @@ SESSION_LINE = json.dumps({
     "last_token_usage": {"input_tokens": 42371, "cached_input_tokens": 0, "output_tokens": 100, "total_tokens": 42471},
 })
 
-ORCA_STREAM_LINE = json.dumps({
+JSONL_STREAM_LINE = json.dumps({
     "type": "turn.completed",
     "usage": {"input_tokens": 18654, "cached_input_tokens": 8960, "output_tokens": 8, "reasoning_output_tokens": 0},
 })
@@ -51,7 +51,7 @@ def main() -> int:
 
         extracted = extract_usage_from_session_file(newer)
         streamed = extract_usage_from_jsonl(SESSION_LINE)
-        streamed_without_total = extract_usage_from_jsonl(ORCA_STREAM_LINE)
+        streamed_without_total = extract_usage_from_jsonl(JSONL_STREAM_LINE)
         latest = find_latest_session((root / "sessions",), since_ts=1500)
         collected = collector(object(), {"started_at": 1500}, session_roots=(root / "sessions",))
         empty = collector(object(), {"started_at": 0}, session_roots=(root / "empty",))
@@ -74,8 +74,8 @@ def main() -> int:
             case("collector-returns-measured", collected["state"] == "measured" and collected["input_tokens"] == 67757, str(collected)),
             case("missing-session-is-unknown-not-zero", empty["state"] == "unknown", str(empty)),
             case("cost-is-cache-aware-on-real-shape", cost["state"] == "measured" and cost["cost_usd"] == expected_cost, f"{cost} expected {expected_cost}"),
-            case("orca-json-stream-is-scoped-and-cache-aware", streamed == extracted, json.dumps({"streamed": streamed, "session": extracted})),
-            case("orca-turn-usage-derives-missing-total", streamed_without_total["state"] == "measured" and streamed_without_total["input_tokens"] == 9694 and streamed_without_total["cache_read_tokens"] == 8960 and streamed_without_total["output_tokens"] == 8, str(streamed_without_total)),
+            case("jsonl-stream-is-scoped-and-cache-aware", streamed == extracted, json.dumps({"streamed": streamed, "session": extracted})),
+            case("jsonl-turn-usage-derives-missing-total", streamed_without_total["state"] == "measured" and streamed_without_total["input_tokens"] == 9694 and streamed_without_total["cache_read_tokens"] == 8960 and streamed_without_total["output_tokens"] == 8, str(streamed_without_total)),
             case("real-model-id-wins-over-executor-fallback", extracted_modeled["model"] == "gpt-5.6-luna" and extracted["model"] == "codex", json.dumps({"modeled": extracted_modeled["model"], "fallback": extracted["model"]})),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
@@ -85,7 +85,7 @@ def main() -> int:
         "total": len(cases),
         "blocking_failures": failures,
         "known_gaps_open": [
-            "direct Codex attribution assumes serial single-worker; Orca-hosted Codex uses ephemeral JSONL instead",
+            "direct Codex attribution assumes serial single-worker; sandboxed Codex uses ephemeral JSONL instead",
             "pricing calibrated 2026-07-18 to official provider pages; re-check rates when providers reprice",
         ],
     }, ensure_ascii=False, indent=2))

@@ -506,7 +506,7 @@ def _resolve_task_area_execution_binding(manifest: Mapping[str, Any]):
 
     raw = manifest.get("execution_binding")
     fields = {"schema", "capability_contract_ref", "provider_registry_ref", "provider_selection",
-              "host_contract_ref", "host_adapters_ref", "fence", "bootstrap_authority"}
+              "host_contract_ref", "fence", "bootstrap_authority"}
     trusted = isinstance(raw, Mapping) and raw.get("schema") == "host-task-area-execution-binding/v2"
     if trusted:
         fields |= {"project_id", "execution_policy_ref"}
@@ -571,9 +571,8 @@ def _resolve_task_area_execution_binding(manifest: Mapping[str, Any]):
     if (providers["coding"]["identity"] == providers["verifier"]["identity"]
             or providers["coding"]["identity"].get("principal") == providers["verifier"]["identity"].get("principal")):
         raise CapabilityError("execution_binding_verifier_independence_required")
-    host = resolve_host_ports(read_ref(raw["host_contract_ref"]),
-                              read_ref(raw["host_adapters_ref"], optional=True))
-    execution_host = "headless_cli" if host["interface"] == "headless_cli" else "host-" + host["interface"]
+    host = resolve_host_ports(read_ref(raw["host_contract_ref"]))
+    execution_host = host["interface"]
     if not isinstance(raw["bootstrap_authority"], Mapping):
         raise CapabilityError("execution_binding_bootstrap_authority_invalid")
     bootstrap = build_execution_host_binding(execution_host, dict(raw["bootstrap_authority"]))

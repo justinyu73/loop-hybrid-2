@@ -23,10 +23,8 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 try:
-    from .provider_registry import is_kimi_executable
     from .execution_fence import PROVIDER_SANDBOX_DEFAULT_DENIED_SYSCALLS
 except ImportError:
-    from provider_registry import is_kimi_executable
     from execution_fence import PROVIDER_SANDBOX_DEFAULT_DENIED_SYSCALLS
 
 
@@ -38,17 +36,6 @@ INSTANCE_CONFIG_ENV = "LH_INSTANCE_CONFIG"
 INSTANCE_ROOT_ENV = "LH_INSTANCE_ROOT"
 PATH_KEYS = ("repo", "state", "workspace", "cache", "logs")
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
-CONTROL_OPS = (
-    "capability_probe",
-    "repo_list",
-    "repo_add",
-    "project_setup_delete",
-    "terminal_create",
-    "terminal_wait",
-    "terminal_read",
-    "terminal_stop",
-    "terminal_close",
-)
 OPTIONAL_PROVIDER_RULES: dict[str, dict[str, Any]] = {
     "codex": {
         "flags": ["exec", "--ephemeral", "--json", "--dangerously-bypass-approvals-and-sandbox"],
@@ -212,8 +199,6 @@ def discover_executable(
     name: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one executable and return path/digest provenance only."""
-    if any(is_kimi_executable(str(value)) for value in (command, explicit, name) if value is not None):
-        raise InstanceConfigError("kimi_retired: executable discovery refused")
     env = _environment(environ)
     home_path = _home_path(env, home)
     label = name or command
@@ -374,13 +359,7 @@ def _default_config_data(
             paths[key] = legacy_value.strip()
 
     cli_overrides = override_data.get("cli") if isinstance(override_data.get("cli"), Mapping) else {}
-    orca_spec = cli_overrides.get("orca")
-    orca_command = str(orca_spec.get("command", "orca")) if isinstance(orca_spec, Mapping) else "orca"
-    orca_override = _cli_override(orca_spec) or env.get("LH_ORCA_CLI") or None
-    cli = {
-        "orca": discover_executable(orca_command, explicit=orca_override, environ=env, home=home_path, name="orca"),
-        "providers": {},
-    }
+    cli: dict[str, Any] = {"providers": {}}
     provider_overrides = cli_overrides.get("providers") if isinstance(cli_overrides.get("providers"), Mapping) else {}
     configured_names = {
         str(name) for name in provider_overrides
@@ -393,11 +372,11 @@ def _default_config_data(
     )
     # Compatibility environment variables are opt-in declarations, not
     # defaults: an unset variable creates no provider entry.
-    for name in ("codex", "kimi", "claude"):
+    for name in ("codex", "claude"):
         if env.get(f"LH_{name.upper()}_CLI", "").strip():
             configured_names.add(name)
     for name in sorted(configured_names):
-        if PROVIDER_NAME_RE.fullmatch(name) is None or name == "orca":
+        if PROVIDER_NAME_RE.fullmatch(name) is None:
             raise InstanceConfigError(f"invalid provider adapter name: {name!r}")
         spec = provider_overrides.get(name)
         command = str(spec.get("command", name)) if isinstance(spec, Mapping) else name
@@ -410,7 +389,7 @@ def _default_config_data(
     provider_sandbox: dict[str, Any] | None = None
     if normalized == "linux":
         # The local provider sandbox needs a pinned bubblewrap and the
-        # read-only provider homes; Orca is not part of it.
+        # read-only provider homes.
         bubblewrap_spec = cli_overrides.get("bubblewrap")
         bubblewrap_override = _cli_override(bubblewrap_spec) or env.get("LH_BUBBLEWRAP") or None
         bubblewrap = discover_executable(
@@ -517,19 +496,14 @@ class InstanceConfig:
         if not isinstance(paths, dict) or any(not isinstance(paths.get(key), str) or not paths[key].strip() for key in PATH_KEYS):
             raise InstanceConfigError("paths must contain non-empty repo/state/workspace/cache/logs strings")
         cli = self.data["cli"]
-        if not isinstance(cli, dict) or not isinstance(cli.get("orca"), dict) or not isinstance(cli.get("providers"), dict):
-            raise InstanceConfigError("cli must contain orca and providers objects")
+        if not isinstance(cli, dict) or not isinstance(cli.get("providers"), dict):
+            raise InstanceConfigError("cli must contain a providers object")
         for name, entry in cli["providers"].items():
-            if is_kimi_executable(name):
-                raise InstanceConfigError("kimi_retired: provider binding refused")
-            if not isinstance(name, str) or PROVIDER_NAME_RE.fullmatch(name) is None or name == "orca":
+            if not isinstance(name, str) or PROVIDER_NAME_RE.fullmatch(name) is None:
                 raise InstanceConfigError(f"cli.providers has invalid provider name: {name!r}")
             if not isinstance(entry, dict) or not isinstance(entry.get("command"), str) or not entry["command"].strip():
                 raise InstanceConfigError(f"cli.providers.{name} must contain a command")
             self._validate_cli_entry(entry, f"cli.providers.{name}")
-        if not isinstance(cli["orca"].get("command"), str) or not cli["orca"]["command"].strip():
-            raise InstanceConfigError("cli.orca must contain a command")
-        self._validate_cli_entry(cli["orca"], "cli.orca")
         if "bubblewrap" in cli:
             bubblewrap = cli["bubblewrap"]
             if not isinstance(bubblewrap, dict) or not isinstance(bubblewrap.get("command"), str):
@@ -556,8 +530,6 @@ class InstanceConfig:
 
     @staticmethod
     def _validate_cli_entry(entry: Mapping[str, Any], label: str) -> None:
-        if any(is_kimi_executable(entry.get(field)) for field in ("command", "path")):
-            raise InstanceConfigError("kimi_retired: provider command refused")
         path = entry.get("path")
         digest = entry.get("sha256")
         if path is not None and not isinstance(path, str):
@@ -611,8 +583,6 @@ class InstanceConfig:
             "issuer": "host-instance",
             "enforced_by": EGRESS_POLICY_ENFORCED_BY,
             "declared": "Per-installation client preflight policy; credentials and host mediation remain outside this artifact.",
-            "control_ops": list(CONTROL_OPS),
-            "control_launch_budget_max": 12,
             "agent_context_schema_version": 1,
             "providers": providers,
             "instance_binding": {
@@ -621,10 +591,6 @@ class InstanceConfig:
                 "platform": self.data["platform"],
             },
         }
-        # The Orca control plane is pinned only when an Orca binary exists;
-        # an installation without Orca must not carry a phantom pin.
-        if self.data["cli"]["orca"].get("path"):
-            policy["orca_cli"] = pinned(self.data["cli"]["orca"])
         profile = self.provider_sandbox_profile()
         if profile is not None:
             policy["provider_sandbox_profile"] = profile
@@ -727,10 +693,6 @@ class InstanceConfig:
             "LH_EGRESS_POLICY": str(self.egress_policy_path),
         }
         cli_dirs: list[str] = []
-        orca = self.data["cli"]["orca"].get("path")
-        if isinstance(orca, str) and orca.strip():
-            overlay["LH_ORCA_CLI"] = orca
-            cli_dirs.append(str(Path(orca).parent))
         for name, entry in self.data["cli"]["providers"].items():
             path = entry.get("path")
             if isinstance(path, str) and path.strip():

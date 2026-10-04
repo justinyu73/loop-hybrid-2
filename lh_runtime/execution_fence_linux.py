@@ -6,7 +6,6 @@ and imports this backend lazily.
 """
 from __future__ import annotations
 
-import atexit
 import ctypes
 import ctypes.util
 import errno
@@ -15,32 +14,30 @@ import json
 import os
 import re
 import shutil
-import shlex
 import signal
 import stat
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 if __package__:
     from .execution_fence import (
-        LINUX_BACKEND_ID, BINDING_SCHEMA, BINDING_SCHEMA_V2, CONTROL_LAUNCH_BUDGET,
-        CONTROL_OPS, DESCRIPTOR_SCHEMA, EGRESS_POLICY_ENFORCED_BY, EXECUTION_HOST_ADAPTER_PREFIX,
+        LINUX_BACKEND_ID, BINDING_SCHEMA, BINDING_SCHEMA_V2,
+        DESCRIPTOR_SCHEMA, EGRESS_POLICY_ENFORCED_BY,
         ExecutionFencePort, ExecutionFenceUnavailable, PROOF_SCHEMA,
-        _validate_provider_argv_against_policy, digest_json, load_egress_policy,
-        validate_egress_provider, DisabledExecutionFencePort, validate_phase_roots, validate_null_device_check,
+        _validate_provider_argv_against_policy, digest_json,
+        DisabledExecutionFencePort, validate_phase_roots, validate_null_device_check,
         LOCAL_PROVIDER_ADAPTER_PREFIX, LOCAL_PROVIDER_LAUNCH_BUDGET, load_local_provider_policy,
         validate_local_provider,
     )
 else:
     from execution_fence import (
-        LINUX_BACKEND_ID, BINDING_SCHEMA, BINDING_SCHEMA_V2, CONTROL_LAUNCH_BUDGET,
-        CONTROL_OPS, DESCRIPTOR_SCHEMA, EGRESS_POLICY_ENFORCED_BY, EXECUTION_HOST_ADAPTER_PREFIX,
+        LINUX_BACKEND_ID, BINDING_SCHEMA, BINDING_SCHEMA_V2,
+        DESCRIPTOR_SCHEMA, EGRESS_POLICY_ENFORCED_BY,
         ExecutionFencePort, ExecutionFenceUnavailable, PROOF_SCHEMA,
-        _validate_provider_argv_against_policy, digest_json, load_egress_policy,
-        validate_egress_provider, DisabledExecutionFencePort, validate_phase_roots, validate_null_device_check,
+        _validate_provider_argv_against_policy, digest_json,
+        DisabledExecutionFencePort, validate_phase_roots, validate_null_device_check,
         LOCAL_PROVIDER_ADAPTER_PREFIX, LOCAL_PROVIDER_LAUNCH_BUDGET, load_local_provider_policy,
         validate_local_provider,
     )
@@ -52,12 +49,10 @@ REQUIRED_PROOF_TRACKS = (
     "provider_control_egress",
     "provider_sandbox",
 )
-# lh-provider-sandbox: the hosted provider's own containment is composed
-# by this client, not enforced by the execution host -- the proof track says
-# exactly that and no more (packet §7: proof semantics do not upgrade).
+# lh-provider-sandbox: the provider's own containment is composed by this
+# client -- the proof track says exactly that and no more (packet §7: proof
+# semantics do not upgrade).
 PROVIDER_SANDBOX_ENFORCED_BY = "lh-client-composed"
-PROVIDER_SECCOMP_PROGRAM_BASENAME = ".lh-provider-seccomp.bpf"
-PROVIDER_SECCOMP_TMP_PREFIX = "lh-host-provider-seccomp-"
 CODEX_TRANSIENT_HOME = "/tmp/codex-home"
 # A local provider's env overlay may add provider-specific variables, but it
 # never replaces a fence-owned value or steers the dynamic loader.
@@ -389,126 +384,6 @@ def _sandbox_bwrap_argv(
     return argv
 
 
-def compose_terminal_command(
-    provider_argv: Sequence[str],
-    *,
-    output_path: str | None = None,
-    env_overlay: Mapping[str, str] | None = None,
-    sandbox: Mapping[str, Any] | None = None,
-    seccomp_program_path: str | None = None,
-    clone_root: str | None = None,
-) -> str:
-    """Compose the one shell string a control-plane terminal may run.
-
-    The fence composes this itself so an adapter never passes a free-form
-    ``--command`` string (decision packet constraint 2). With ``sandbox``
-    (lh-provider-sandbox), the provider argv is wrapped in the
-    descriptor-signed bubblewrap profile; the seccomp program rides an fd
-    redirect because a detached terminal string cannot inherit one."""
-    argv = [str(item) for item in provider_argv]
-    if not argv:
-        raise ExecutionFenceUnavailable("control_provider_argv_empty")
-    if sandbox is not None:
-        if not seccomp_program_path or not clone_root:
-            raise ExecutionFenceUnavailable("provider_sandbox_compose_invalid")
-        provider_runtime_bin_dirs = _provider_runtime_bin_dirs(argv[0], sandbox)
-        bwrap_argv = _sandbox_bwrap_argv(
-            sandbox,
-            provider_bin_dir=str(Path(argv[0]).parent),
-            provider_runtime_bin_dirs=provider_runtime_bin_dirs,
-            clone_root=str(clone_root),
-            env_overlay=env_overlay,
-        )
-        bwrap_argv.extend(["--seccomp", "9"])
-        command = (
-            f"exec 9<{shlex.quote(str(seccomp_program_path))}; "
-            f"exec {shlex.join(bwrap_argv)} -- {shlex.join(argv)}"
-        )
-    else:
-        env_prefix = " ".join(
-            f"{name}={shlex.quote(str(value))}"
-            for name, value in sorted((env_overlay or {}).items())
-        )
-        prefix = f"PATH={shlex.quote(str(Path(argv[0]).parent))}:$PATH"
-        if env_prefix:
-            prefix = f"{env_prefix} {prefix}"
-        command = f"{prefix} exec {shlex.join(argv)}"
-    if output_path is None:
-        return command
-    captured = shlex.quote(str(output_path))
-    return f"({command}) > {captured} 2>&1; status=$?; cat {captured}; exit $status"
-
-
-def _selector_matches_clone(selector: str, clone_root: str) -> bool:
-    """A worktree selector may name the clone in POSIX form or in the
-    ``\\\\wsl.localhost\\<distro>\\...`` UNC form a Windows-hosted Orca stores
-    (cli_agent_executor._orca_worktree_selector emits both). Either way it must
-    resolve to exactly the descriptor-bound clone root."""
-    if not selector.startswith("path:"):
-        return False
-    value = selector[len("path:"):]
-    if value == clone_root:
-        return True
-    distro = os.environ.get("WSL_DISTRO_NAME")
-    unc_prefix = f"\\\\wsl.localhost\\{distro}\\" if distro else None
-    if unc_prefix and value.startswith(unc_prefix):
-        posix = "/" + value[len(unc_prefix):].replace("\\", "/")
-        return posix == clone_root
-    return False
-
-
-def compose_control_argv(request: Mapping[str, Any]) -> list[str]:
-    """Map one structured control request to Orca CLI arguments.
-
-    Free strings are structurally impossible: every op has a closed argument
-    schema, and ``terminal_create``'s command is composed here."""
-    op = request.get("op")
-    if op == "capability_probe":
-        # Released Orca exposes its versioned runtime vector through status;
-        # the adapter normalizes that observation into its closed capability
-        # schema before admitting any other control operation.
-        return ["status", "--json"]
-    if op == "repo_list":
-        return ["repo", "list", "--json"]
-    if op == "repo_add":
-        return ["repo", "add", "--path", str(request["path"]), "--json"]
-    if op == "project_setup_delete":
-        return ["project", "setup-delete", "--setup", str(request["setup"]), "--json"]
-    if op == "terminal_create":
-        command = compose_terminal_command(
-            request["provider_argv"],
-            output_path=request.get("output_path"),
-            env_overlay=request.get("env_overlay"),
-            sandbox=request.get("provider_sandbox_profile"),
-            seccomp_program_path=request.get("provider_seccomp_program_path"),
-            clone_root=request.get("clone_root"),
-        )
-        return [
-            "terminal", "create",
-            "--worktree", str(request["worktree_selector"]),
-            "--title", str(request["title"]),
-            "--command", command,
-            "--json",
-        ]
-    if op == "terminal_wait":
-        return [
-            "terminal", "wait", "--terminal", str(request["handle"]),
-            "--for", "exit", "--timeout-ms", str(int(request["timeout_ms"])), "--json",
-        ]
-    if op == "terminal_read":
-        return [
-            "terminal", "read", "--terminal", str(request["handle"]),
-            "--limit", str(int(request["limit"])), "--json",
-        ]
-    if op == "terminal_stop":
-        return ["terminal", "stop", "--worktree", str(request["worktree_selector"]), "--json"]
-    if op == "terminal_close":
-        return ["terminal", "close", "--terminal", str(request["handle"]), "--json"]
-    raise ExecutionFenceUnavailable("control_op_unknown")
-
-
-
-
 class LinuxBubblewrapExecutionFence(ExecutionFencePort):
     """bubblewrap 0.9.0 mount/net namespaces plus a libseccomp filter."""
 
@@ -623,63 +498,7 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
         self._prepared: dict[str, dict[str, Any]] = {}
         self._consumed: set[str] = set()
         self.launch_count = 0
-        self._control_counts: dict[str, int] = {}
-        self.control_audit: dict[str, list[dict[str, Any]]] = {}
-        self._provider_seccomp_paths: dict[str, list[str]] = {}
         self.provider_audit: dict[str, list[dict[str, Any]]] = {}
-        # A failed control RPC can occur before the adapter has a terminal
-        # handle with which to request cleanup.  The process-exit hook keeps
-        # those task-owned temporary files out of the target clone and avoids
-        # leaving them behind after an interrupted Attempt.
-        atexit.register(self._cleanup_all_provider_seccomp)
-
-    def _cleanup_provider_seccomp(self, descriptor_digest: str) -> None:
-        for path in self._provider_seccomp_paths.pop(descriptor_digest, []):
-            try:
-                Path(path).unlink()
-            except OSError:
-                pass
-
-    def _cleanup_all_provider_seccomp(self) -> None:
-        for descriptor_digest in list(self._provider_seccomp_paths):
-            self._cleanup_provider_seccomp(descriptor_digest)
-
-    def _write_provider_seccomp_program(
-        self, program: bytes, descriptor_digest: str
-    ) -> str:
-        """Persist a descriptor-derived BPF file outside the target clone.
-
-        Orca receives a detached shell command and therefore cannot inherit
-        the in-process memfd directly.  The file is task-owned, mode 0600,
-        tracked by descriptor digest, and removed on terminal close or process
-        exit.  It is deliberately not part of the target repository diff.
-        """
-        try:
-            fd, program_path = tempfile.mkstemp(
-                prefix=PROVIDER_SECCOMP_TMP_PREFIX, suffix=".bpf"
-            )
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(program)
-                os.chmod(program_path, 0o600)
-            except BaseException:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-                try:
-                    Path(program_path).unlink()
-                except OSError:
-                    pass
-                raise
-        except OSError as exc:
-            raise ExecutionFenceUnavailable(
-                "provider_seccomp_program_unwritable"
-            ) from exc
-        self._provider_seccomp_paths.setdefault(descriptor_digest, []).append(
-            program_path
-        )
-        return program_path
 
     @classmethod
     def discover(
@@ -793,79 +612,13 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
     def prepare(self, binding: Mapping[str, Any]) -> dict[str, Any]:
         self._validate_backend()
         normalized = self._validate_binding(binding)
-        if str(normalized["adapter_id"]).startswith("orca-"):
-            raise ExecutionFenceUnavailable(
-                "adapter_provider_channel_unsupported"
-            )
         binding_digest = digest_json(normalized)
         adapter_id = str(normalized["adapter_id"])
-        launch_classes = {"control": 0, "mutation": 1}
-        control_plane: dict[str, Any] | None = None
-        if adapter_id.startswith(EXECUTION_HOST_ADAPTER_PREFIX):
-            # Control-plane RPCs run outside the sandbox; pin both binaries by
-            # digest now so a later launch cannot swap them (packet constraint 2).
-            agent = adapter_id[len(EXECUTION_HOST_ADAPTER_PREFIX):]
-            orca_value = os.environ.get("LH_ORCA_CLI", "").strip()
-            if not orca_value:
-                raise ExecutionFenceUnavailable("control_orca_cli_unpinned")
-            orca_path = Path(orca_value)
-            orca_digest = _sha256_file(orca_path)
-            if not orca_path.is_absolute() or orca_digest is None:
-                raise ExecutionFenceUnavailable("control_orca_cli_unreadable")
-            provider_path = shutil.which(agent)
-            if provider_path is not None:
-                provider_path = str(Path(provider_path).resolve(strict=False))
-            provider_digest = _sha256_file(provider_path) if provider_path else None
-            if provider_path is None or provider_digest is None:
-                raise ExecutionFenceUnavailable("control_provider_unresolved")
-            policy, policy_digest = load_egress_policy()
-            provider_policy = validate_egress_provider(
-                policy,
-                agent,
-                provider_path=str(provider_path),
-                provider_digest=provider_digest,
-                orca_path=str(orca_path),
-                orca_digest=orca_digest,
-            )
-            launch_classes = {"control": CONTROL_LAUNCH_BUDGET, "mutation": 0}
-            sandbox_profile = normalize_sandbox_profile(
-                policy.get("provider_sandbox_profile") or {}, agent
-            )
-            runtime_binding = _provider_runtime_binding(
-                str(provider_path), sandbox_profile
-            )
-            pinned_bwrap = sandbox_profile["bubblewrap"]
-            if _sha256_file(pinned_bwrap["path"]) != pinned_bwrap["sha256"]:
-                raise ExecutionFenceUnavailable("provider_sandbox_bwrap_mismatch")
-            provider_binding = {
-                "agent": agent,
-                "path": str(provider_path),
-                "sha256": provider_digest,
-            }
-            if runtime_binding is not None:
-                provider_binding["runtime"] = runtime_binding
-            control_plane = {
-                "orca_cli": {"path": str(orca_path), "sha256": orca_digest},
-                "provider": provider_binding,
-                "egress_policy": {
-                    "digest": policy_digest,
-                    "issuer": str(policy.get("issuer")),
-                    "enforced_by": EGRESS_POLICY_ENFORCED_BY,
-                    "flags": sorted(str(x) for x in provider_policy.get("flags") or []),
-                    "value_flags": sorted(str(x) for x in provider_policy.get("value_flags") or []),
-                    "prompt_flags": sorted(str(x) for x in provider_policy.get("prompt_flags") or []),
-                    "trailing_prompt": bool(provider_policy.get("trailing_prompt")),
-                },
-                "provider_sandbox": {
-                    "profile": sandbox_profile,
-                    "profile_digest": digest_json(sandbox_profile),
-                },
-            }
+        launch_classes = {"mutation": 1}
         local_provider: dict[str, Any] | None = None
         if adapter_id.startswith(LOCAL_PROVIDER_ADAPTER_PREFIX):
             # Local execution host: LH starts the provider itself under the
-            # signed provider-sandbox profile.  There is no control plane, so
-            # neither an Orca binary nor LH_ORCA_CLI is consulted.
+            # signed provider-sandbox profile.
             agent = adapter_id[len(LOCAL_PROVIDER_ADAPTER_PREFIX):]
             provider_path = shutil.which(agent)
             if provider_path is not None:
@@ -897,7 +650,6 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             if runtime_binding is not None:
                 local_binding["runtime"] = runtime_binding
             launch_classes = {
-                "control": 0,
                 "mutation": 0,
                 "provider": LOCAL_PROVIDER_LAUNCH_BUDGET,
             }
@@ -988,26 +740,13 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
                 "schema": PROOF_SCHEMA,
                 "track": "provider_sandbox",
                 # A pure-mutation descriptor launches its child under this
-                # kernel fence itself; there is no hosted provider terminal
-                # for a composed sandbox to apply to.
+                # kernel fence itself; there is no separate provider sandbox
+                # to apply.
                 "result": "not_applicable",
                 "attempt_binding_digest": binding_digest,
                 "backend_digest": backend_digest,
             },
         }
-        if control_plane is not None:
-            # The provider process runs on the execution host (an Orca
-            # terminal), not under this kernel fence. Saying "admissible"
-            # here would be a false attestation (packet constraint 3).
-            egress = proofs["provider_control_egress"]
-            egress["result"] = "delegated_to_execution_host"
-            egress["control_plane_digest"] = digest_json(control_plane)
-            sandbox_proof = proofs["provider_sandbox"]
-            sandbox_proof["result"] = "applied"
-            sandbox_proof["profile_digest"] = control_plane[
-                "provider_sandbox"
-            ]["profile_digest"]
-            sandbox_proof["enforced_by"] = PROVIDER_SANDBOX_ENFORCED_BY
         if local_provider is not None:
             # The provider runs under this backend, but under the provider
             # profile, not the mutation profile: say which policy contains its
@@ -1026,12 +765,7 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             sandbox_proof["result"] = "applied"
             sandbox_proof["profile_digest"] = sandbox_digest
             sandbox_proof["enforced_by"] = PROVIDER_SANDBOX_ENFORCED_BY
-        if launch_classes["mutation"] > 0:
-            mutation_dispatch = "enabled_for_descriptor"
-        elif local_provider is not None:
-            mutation_dispatch = "local_provider"
-        else:
-            mutation_dispatch = "delegated_to_execution_host"
+        mutation_dispatch = "enabled_for_descriptor" if local_provider is None else "local_provider"
         body = {
             "schema": DESCRIPTOR_SCHEMA,
             "binding": normalized,
@@ -1043,8 +777,6 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             "launch_classes": launch_classes,
             "mutation_dispatch": mutation_dispatch,
         }
-        if control_plane is not None:
-            body["control_plane"] = control_plane
         if local_provider is not None:
             body["local_provider"] = local_provider
         descriptor = {**body, "launch_descriptor_digest": digest_json(body)}
@@ -1084,20 +816,14 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
         proofs = normalized.get("proofs")
         if not isinstance(proofs, dict) or set(proofs) != set(REQUIRED_PROOF_TRACKS):
             raise ExecutionFenceUnavailable("proof_track_incomplete")
-        classes = normalized.get("launch_classes") or {"control": 0, "mutation": 1}
-        control_plane = normalized.get("control_plane")
-        hosted = (
-            int(classes.get("mutation", 1)) == 0
-            and int(classes.get("control", 0)) > 0
-            and isinstance(control_plane, dict)
-        )
+        classes = normalized.get("launch_classes") or {"mutation": 1}
+        if not set(classes) <= {"mutation", "provider"}:
+            raise ExecutionFenceUnavailable("launch_class_invalid")
         local_plane = normalized.get("local_provider")
         local = (
             int(classes.get("provider", 0)) > 0
             and int(classes.get("mutation", 1)) == 0
-            and int(classes.get("control", 0)) == 0
             and isinstance(local_plane, dict)
-            and control_plane is None
         )
         if not local and ("local_provider" in normalized or int(classes.get("provider", 0)) > 0):
             # A provider launch class or plane never rides on another shape.
@@ -1110,15 +836,10 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
         for track in REQUIRED_PROOF_TRACKS:
             proof = proofs.get(track)
             allowed_results = {"admissible"}
-            if track == "provider_control_egress" and hosted:
-                # A host-delegated descriptor must say so -- and only such a
-                # descriptor may (sandbox packet constraint 3).
-                allowed_results = {"delegated_to_execution_host"}
             if track == "provider_sandbox":
-                # Hosted descriptors carry the composed profile; mutation
-                # descriptors have no hosted provider to sandbox. Either way
+                # A mutation descriptor has no separate provider to sandbox;
                 # only its own honest value is admissible.
-                allowed_results = {"applied"} if hosted else {"not_applicable"}
+                allowed_results = {"not_applicable"}
             if local:
                 # A local provider descriptor has its own honest triple and
                 # may claim nothing else -- in particular never "admissible".
@@ -1133,9 +854,8 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
                 or proof.get("backend_digest") != normalized.get("backend_digest")
             ):
                 raise ExecutionFenceUnavailable("proof_track_invalid")
-        if hosted or local:
-            plane = control_plane if hosted else local_plane
-            sandbox = (plane or {}).get("provider_sandbox")
+        if local:
+            sandbox = (local_plane or {}).get("provider_sandbox")
             sandbox_proof = proofs.get("provider_sandbox") or {}
             if (
                 not isinstance(sandbox, dict)
@@ -1166,26 +886,6 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
 
     def _seccomp_fd(self) -> int:
         return self._seccomp_program_fd(DENIED_SYSCALLS)
-
-    def _provider_seccomp_program(
-        self, seccomp_policy: Mapping[str, Any]
-    ) -> bytes:
-        """Compile the descriptor-signed provider syscall table to BPF bytes.
-
-        The provider terminal is a detached shell string, so the program
-        travels as a file plus an fd redirect instead of an inherited fd."""
-        fd = self._seccomp_program_fd(
-            [str(item) for item in seccomp_policy.get("denied_syscalls") or []]
-        )
-        try:
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(fd, 65536)
-                if not chunk:
-                    return b"".join(chunks)
-                chunks.append(chunk)
-        finally:
-            os.close(fd)
 
     def _seccomp_program_fd(self, denied_syscalls: Sequence[str]) -> int:
         library = ctypes.CDLL(self.seccomp_library, use_errno=True)
@@ -1420,160 +1120,6 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
         finally:
             os.close(seccomp_fd)
 
-    def launch_control(
-        self,
-        descriptor: Mapping[str, Any],
-        request: Mapping[str, Any],
-        *,
-        timeout_seconds: float,
-    ) -> subprocess.CompletedProcess[str]:
-        """One structured Orca control-plane RPC, outside the sandbox.
-
-        orca.exe cannot start under ``--unshare-all`` (Windows interop plus a
-        daemon socket), so a control launch runs on the host -- but only a
-        closed request schema, against binaries pinned by digest at
-        ``prepare()``, within the descriptor-signed budget, audited per call."""
-        self._validate_backend()
-        normalized = self._validate_descriptor(
-            descriptor,
-            require_prepared=True,
-        )
-        if timeout_seconds <= 0:
-            raise ExecutionFenceUnavailable("launch_timeout_invalid")
-        classes = normalized.get("launch_classes") or {}
-        budget = int(classes.get("control", 0))
-        if budget < 1:
-            raise ExecutionFenceUnavailable("launch_class_not_authorized")
-        digest = normalized["launch_descriptor_digest"]
-        used = self._control_counts.get(digest, 0)
-        if used >= budget:
-            raise ExecutionFenceUnavailable("descriptor_exhausted")
-        plane = normalized.get("control_plane") or {}
-        orca = plane.get("orca_cli") or {}
-        orca_path = orca.get("path")
-        if _sha256_file(orca_path) != orca.get("sha256"):
-            raise ExecutionFenceUnavailable("control_orca_cli_drifted")
-        requested_cli = request.get("orca_cli")
-        if requested_cli is not None and str(requested_cli) != str(orca_path):
-            raise ExecutionFenceUnavailable("control_orca_cli_mismatch")
-        binding = normalized["binding"]
-        clone_root = str(binding["clone_root"])
-        op = request.get("op")
-        if op not in CONTROL_OPS:
-            raise ExecutionFenceUnavailable("control_op_unknown")
-        audit_extra: dict[str, Any] = {}
-        if op == "terminal_create":
-            provider = plane.get("provider") or {}
-            provider_argv = [str(item) for item in request.get("provider_argv") or []]
-            if not provider_argv:
-                raise ExecutionFenceUnavailable("control_provider_argv_empty")
-            if provider_argv[0] != provider.get("path") or _sha256_file(
-                provider_argv[0]
-            ) != provider.get("sha256"):
-                raise ExecutionFenceUnavailable("control_provider_binary_unpinned")
-            egress_policy = plane.get("egress_policy")
-            if not isinstance(egress_policy, dict):
-                raise ExecutionFenceUnavailable("egress_policy_unbound")
-            _validate_provider_argv_against_policy(provider_argv, egress_policy)
-            if not _selector_matches_clone(
-                str(request.get("worktree_selector")), clone_root
-            ):
-                raise ExecutionFenceUnavailable("control_selector_invalid")
-            output_path = request.get("output_path")
-            if output_path is not None and not str(output_path).startswith(
-                clone_root + os.sep
-            ):
-                raise ExecutionFenceUnavailable("control_output_path_invalid")
-            # lh-provider-sandbox: the profile signed at prepare() is
-            # the only runtime basis -- the policy artefact is deliberately
-            # not re-read here (codex amend 4d).
-            sandbox = plane.get("provider_sandbox")
-            if not isinstance(sandbox, dict) or not isinstance(
-                sandbox.get("profile"), dict
-            ):
-                raise ExecutionFenceUnavailable("provider_sandbox_unbound")
-            profile = sandbox["profile"]
-            declared_runtime = provider.get("runtime")
-            _validate_provider_runtime_binding(
-                provider_argv[0], profile, declared_runtime
-            )
-            if digest_json(profile) != sandbox.get("profile_digest"):
-                raise ExecutionFenceUnavailable(
-                    "provider_sandbox_profile_digest_invalid"
-                )
-            pinned_bwrap = profile.get("bubblewrap") or {}
-            if _sha256_file(pinned_bwrap.get("path")) != pinned_bwrap.get(
-                "sha256"
-            ):
-                raise ExecutionFenceUnavailable("provider_sandbox_bwrap_drifted")
-            program = self._provider_seccomp_program(profile.get("seccomp") or {})
-            program_path = self._write_provider_seccomp_program(program, digest)
-            request = {
-                **request,
-                "provider_sandbox_profile": profile,
-                "provider_seccomp_program_path": program_path,
-                "clone_root": clone_root,
-            }
-            expected_command = compose_terminal_command(
-                provider_argv,
-                output_path=output_path,
-                env_overlay=request.get("env_overlay"),
-                sandbox=profile,
-                seccomp_program_path=program_path,
-                clone_root=clone_root,
-            )
-            audit_extra = {
-                "command_digest": "sha256:"
-                + hashlib.sha256(expected_command.encode()).hexdigest(),
-                "provider_sandbox_profile_digest": sandbox["profile_digest"],
-                "seccomp_program_sha256": "sha256:"
-                + hashlib.sha256(program).hexdigest(),
-                "seccomp_program_path": program_path,
-                "seccomp_program_scope": "task_temp_outside_clone",
-            }
-            if isinstance(declared_runtime, dict):
-                audit_extra["provider_runtime"] = dict(declared_runtime)
-        elif op == "repo_add" and str(request.get("path")) != clone_root:
-            raise ExecutionFenceUnavailable("control_repo_path_invalid")
-        elif op == "terminal_stop" and not _selector_matches_clone(
-            str(request.get("worktree_selector")), clone_root
-        ):
-            raise ExecutionFenceUnavailable("control_selector_invalid")
-        argv = [str(orca_path), *compose_control_argv(request)]
-        if op == "terminal_create":
-            sent_command = argv[argv.index("--command") + 1]
-            if (
-                "sha256:" + hashlib.sha256(sent_command.encode()).hexdigest()
-                != audit_extra["command_digest"]
-            ):
-                raise ExecutionFenceUnavailable("control_command_digest_mismatch")
-        self._control_counts[digest] = used + 1
-        self.control_audit.setdefault(digest, []).append(
-            {
-                "op": op,
-                "argv_digest": digest_json(argv),
-                "sequence": used + 1,
-                "at": self.clock(),
-                **audit_extra,
-            }
-        )
-        try:
-            return subprocess.run(
-                argv,
-                cwd=clone_root,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            raise
-        except OSError as exc:
-            raise ExecutionFenceUnavailable("control_launch_failed") from exc
-        finally:
-            if op == "terminal_close":
-                self._cleanup_provider_seccomp(digest)
-
     def launch_provider(
         self,
         descriptor: Mapping[str, Any],
@@ -1589,8 +1135,8 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
         bubblewrap bind set and namespaces, the provider seccomp table, and a
         cleared environment with a fence-owned PATH.  Its network stays the
         host's -- it needs its API -- which the descriptor already states as
-        ``host_network_policy_preflight``.  No Orca process or control RPC is
-        involved; LH owns the process group and its termination."""
+        ``host_network_policy_preflight``.  LH owns the process group and its
+        termination."""
         self._validate_backend()
         normalized = self._validate_descriptor(descriptor, require_prepared=True)
         classes = normalized.get("launch_classes") or {}
@@ -1715,38 +1261,13 @@ class LinuxBubblewrapExecutionFence(ExecutionFencePort):
             "provider_control_channel": normalized["binding"][
                 "provider_control_channel"
             ],
-            "launch_classes": normalized.get("launch_classes")
-            or {"control": 0, "mutation": 1},
-            "control_plane": (
-                {
-                    "egress_policy": (normalized.get("control_plane") or {}).get("egress_policy"),
-                    "orca_cli_sha256": ((normalized.get("control_plane") or {}).get("orca_cli") or {}).get("sha256"),
-                    "provider_sha256": ((normalized.get("control_plane") or {}).get("provider") or {}).get("sha256"),
-                    "provider_runtime": ((normalized.get("control_plane") or {}).get("provider") or {}).get("runtime"),
-                    # Digest and enforcer only: the profile enumerates trust-
-                    # surface paths, and a receipt must not restate the bind
-                    # set contents (packet §7: ~/.codex scope named, not leaked).
-                    "provider_sandbox": (
-                        {
-                            "profile_digest": ((normalized.get("control_plane") or {}).get("provider_sandbox") or {}).get("profile_digest"),
-                            "enforced_by": PROVIDER_SANDBOX_ENFORCED_BY,
-                        }
-                        if isinstance((normalized.get("control_plane") or {}).get("provider_sandbox"), dict)
-                        else None
-                    ),
-                }
-                if isinstance(normalized.get("control_plane"), dict)
-                else None
-            ),
-            "control_launches": list(
-                self.control_audit.get(normalized["launch_descriptor_digest"], ())
-            ),
+            "launch_classes": normalized.get("launch_classes") or {"mutation": 1},
             "mutation_dispatch": normalized["mutation_dispatch"],
         }
         plane = normalized.get("local_provider")
         if isinstance(plane, dict):
-            # Same projection rule as the hosted plane: digests and enforcer,
-            # never the bind-set contents.
+            # Digests and enforcer only: the profile enumerates trust-surface
+            # paths, and a receipt must not restate the bind-set contents.
             projection["local_provider"] = {
                 "egress_policy": plane.get("egress_policy"),
                 "provider_sha256": (plane.get("provider") or {}).get("sha256"),

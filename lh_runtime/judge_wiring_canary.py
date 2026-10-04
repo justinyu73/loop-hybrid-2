@@ -78,15 +78,9 @@ def main() -> int:
     # posture is read-only; the executor posture lives in provider_argv and is
     # asserted separately below. Retired adapters must fail closed.
     claude_rejected, _ = _ok(lambda: executors.judge_argv("claude", "P"))
-    kimi_rejected, kimi_detail = _ok(lambda: executors.judge_argv("kimi", "P"))
-    kimi_pinned_rejected, kimi_pinned_detail = _ok(
-        lambda: executors.judge_argv("kimi", "P", "kimi-code/k3")
-    )
     shapes_ok = (
         executors.judge_argv("codex", "P") == ["codex", "exec", "--sandbox", "read-only", "--ephemeral", "P"]
         and executors.judge_argv("codex", "P", "gpt-5.6-sol") == ["codex", "exec", "-m", "gpt-5.6-sol", "--sandbox", "read-only", "--ephemeral", "P"]
-        and kimi_rejected and "kimi_retired" in kimi_detail
-        and kimi_pinned_rejected and "kimi_retired" in kimi_pinned_detail
         and executors.judge_argv("agy", "P", "gemini-3.1-pro-high") == [
             "agy", "--model", "gemini-3.1-pro-high", "--mode", "plan",
             "--disable-slash-commands", "--output-format", "json",
@@ -240,7 +234,7 @@ def main() -> int:
             "base_revision": base,
             "runtime": {"goal_store": "runtime/goals", "run_store": "runtime/runs", "workspace_root": "runtime/ws"},
             "models": {
-                "execute": "orca",
+                "execute": "local",
                 "execute_binding": {"runner": "codex", "base_url": "https://mock.example/v1", "model": "fixture-codex"},
                 "judge": "codex",
                 "judge_model": "fixture-judge",
@@ -251,7 +245,7 @@ def main() -> int:
         contract_path.write_text(json.dumps(contract), encoding="utf-8")
         kw = project_binding.resolve_project(contract_path)["run_kwargs"]
         mapping_ok = (
-            kw.get("executor") == "orca"
+            kw.get("executor") == "local"
             and kw.get("executor_binding") == {"runner": "codex", "base_url": "https://mock.example/v1", "model": "fixture-codex"}
             and kw.get("judge_executor") == "codex"
             and kw.get("judge_model") == "fixture-judge"

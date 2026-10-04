@@ -55,10 +55,8 @@ def main() -> int:
         root = Path(raw)
         home = root / "clean user" / "使用者"
         fake_bin = root / "fake bin"
-        fake_orca = _fake_executable(fake_bin / "orca")
         fake_codex = _fake_executable(fake_bin / "codex")
         fake_claude = _fake_executable(fake_bin / "claude")
-        fake_kimi = _fake_executable(fake_bin / "kimi")
         fake_synthetic = _fake_executable(fake_bin / "synthetic")
         env = {
             "HOME": str(home),
@@ -98,7 +96,6 @@ def main() -> int:
             overrides={
                 "paths": configured_paths,
                 "cli": {
-                    "orca": str(fake_orca),
                     "providers": {
                         "codex": str(fake_codex),
                         "claude": str(fake_claude),
@@ -118,24 +115,13 @@ def main() -> int:
             and readback["egress_policy"]["binding_status"] == "ok"
             and policy["schema"] == "host-execution-host-egress-policy/v1"
             and policy["instance_binding"]["config_digest"] == readback["config_digest"]
-            and policy["orca_cli"]["sha256"] is not None
             and policy["providers"]["codex"]["sha256"] is not None
         )
         cli_discovery = (
-            config.data["cli"]["orca"]["path"] == str(fake_orca.resolve())
-            and config.data["cli"]["providers"]["codex"]["path"] == str(fake_codex.resolve())
+            config.data["cli"]["providers"]["codex"]["path"] == str(fake_codex.resolve())
             and config.data["cli"]["providers"]["claude"]["path"] == str(fake_claude.resolve())
             and config.data["cli"]["providers"]["synthetic"]["path"] == str(fake_synthetic.resolve())
         )
-        retired_path = root / "retired" / "instance.json"
-        try:
-            initialize_instance(
-                retired_path, system="Linux", environ=env, home=home, cwd=root,
-                overrides={"cli": {"providers": {"kimi": str(fake_kimi)}}},
-            )
-            kimi_retired = False
-        except InstanceConfigError as exc:
-            kimi_retired = "kimi_retired" in str(exc) and not retired_path.exists()
         secret_name_only = (
             set(config.data["secret_store"]) == {"backend", "namespace"}
             and not _contains_credential_key(config.data["secret_store"])
@@ -199,7 +185,6 @@ def main() -> int:
         rollback_ok = rolled_back.data["paths"]["state"] == old_state
 
         cases = [
-            case("kimi-binding-is-retired-before-config-write", kimi_retired, str(retired_path)),
             case("platform-defaults-are-native-and-derived", platform_defaults, str({"linux": linux_path, "windows": windows_path, "macos": macos_path})),
             case("paths-cli-and-policy-are-instance-owned", config_and_policy, json.dumps(readback, ensure_ascii=False)),
             case("cli-discovery-records-absolute-digests", cli_discovery, json.dumps(config.data["cli"], ensure_ascii=False)),

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -16,11 +15,6 @@ sys.path.insert(0, str(HERE))
 import capability_resolver as cr
 import cli_agent_executor as executors
 from _fixture import make_campaign, make_source_repo
-from capability_live_acceptance import (
-    _parse_evaluation,
-    _preserve_failure_evidence,
-    _workspace_is_disposed_at,
-)
 from goal_loop_run import _evaluation_payload
 from project_binding import CONTRACT_SCHEMA, resolve_project
 
@@ -271,28 +265,6 @@ def main() -> int:
                 "escape_rejected": escape_rejected,
             }),
         })
-        failed_run = root / "failed-run"
-        failed_evidence = failed_run / "runs" / "routing-evidence" / "evaluation-1"
-        failed_evidence.mkdir(parents=True)
-        (failed_evidence / "stdout.txt").write_text(
-            "malformed provider output",
-            encoding="utf-8",
-        )
-        durable = _preserve_failure_evidence(failed_run)
-        durable_stdout = (
-            durable / "routing-evidence" / "evaluation-1" / "stdout.txt"
-        )
-        failure_preserved = (
-            durable_stdout.is_file()
-            and durable_stdout.read_text(encoding="utf-8")
-            == "malformed provider output"
-        )
-        shutil.rmtree(durable)
-        cases.append({
-            "id": "failed-evaluator-wire-evidence-outlives-disposable-root",
-            "ok": failure_preserved,
-            "detail": "stdout copied to a durable failure evidence root",
-        })
 
     schema = {
         "type": "object",
@@ -352,20 +324,6 @@ def main() -> int:
         }),
         json.dumps({"verdict": "accept", "rationale": "naked bypass"}),
     ]
-    rejected_payloads = [
-        '{"verdict":"maybe","rationale":"fixture"}',
-        '{"verdict":"accept","rationale":""}',
-        '{"verdict":"accept","rationale":"fixture","extra":true}',
-        'prose {"verdict":"accept","rationale":"fixture"}',
-    ]
-    good_workspace_receipt = {
-        "workspace": {
-            "ref": "workspace://fixture/1",
-            "disposable": True,
-            "disposed": True,
-            "base_revision": "base",
-        },
-    }
     cases.append({
         "id": "provider-neutral-evaluation-wire-is-schema-bound-before-parser",
         "ok": (
@@ -377,7 +335,6 @@ def main() -> int:
                 "verdict": "accept",
                 "rationale": "fixture",
             }
-            and _parse_evaluation(envelope_payload)["verdict"] == "accept"
             and all(
                 _rejects(
                     lambda wire=wire: _evaluation_payload(
@@ -388,21 +345,6 @@ def main() -> int:
                 )
                 for wire in rejected_wires
             )
-            and all(
-                _rejects(lambda payload=payload: _parse_evaluation(payload))
-                for payload in rejected_payloads
-            )
-            and _workspace_is_disposed_at(good_workspace_receipt, "base")
-            and not _workspace_is_disposed_at(
-                {
-                    "workspace": {
-                        **good_workspace_receipt["workspace"],
-                        "disposed": False,
-                    },
-                },
-                "base",
-            )
-            and not _workspace_is_disposed_at(good_workspace_receipt, "other")
         ),
         "detail": json.dumps({
             "argv_flags": [

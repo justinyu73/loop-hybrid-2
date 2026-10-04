@@ -67,11 +67,11 @@ def _plan(argv: list[str]) -> dict:
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         contract = _contract(Path(raw))
-        both = _plan(["--contract", str(contract), "--executor", "orca", "--judge-executor", "codex", "--judge-model", "fixture-codex"])
+        both = _plan(["--contract", str(contract), "--executor", "local", "--judge-executor", "codex", "--judge-model", "fixture-codex"])
         contract_only = _plan(["--contract", str(contract)])
         cases = [
             case("flag-and-contract-coexist-flag-wins",
-                 both["executor"] == "orca" and both["judge_executor"] == "codex" and both["judge_model"] == "fixture-codex",
+                 both["executor"] == "local" and both["judge_executor"] == "codex" and both["judge_model"] == "fixture-codex",
                  json.dumps({"executor": both["executor"], "judge": both["judge_executor"]})),
             case("contract-models-applies-without-flags",
                  contract_only["executor"] == "codex" and contract_only["judge_executor"] == "agy" and contract_only["judge_model"] == "fixture-agy",

@@ -274,9 +274,8 @@ def _systemd_calendar_cadence_case() -> dict[str, Any]:
         "calendar_owns_one_minute_cadence": "OnCalendar=*:0/1" in timer,
         "timer_targets_supervisor_service": "Unit=loop-hybrid-supervisor.service" in timer,
         "persistent_calendar_rearms": "Persistent=true" in timer,
-        "headless_core_has_no_orca_requirement": all(
-            not line.startswith("Requires=external-orca-runtime.service")
-            and not line.startswith("After=external-orca-runtime.service")
+        "headless_core_has_no_host_runtime_requirement": all(
+            not (line.startswith(("Requires=", "After=")) and "-runtime.service" in line)
             for line in service.splitlines()
         ),
         "execstart_wires_post_merge_watch": (

@@ -26,26 +26,6 @@ BINDING_SCHEMA_V2 = "lh-execution-fence-binding/v2"
 PROOF_SCHEMA = "lh-execution-fence-proof/v1"
 ERROR_CODE = "execution_fence_unavailable"
 
-# Launch classes (sandbox egress mediation, decision packet
-# docs/active/lh-auto-runner-gap-review-plan.md#lh-egress-mediation-decision-packet):
-# `control` launches are LH's own RPCs to the Orca control plane -- they run
-# OUTSIDE the kernel sandbox (orca.exe cannot start under --unshare-all) but
-# only through the structured request schema below, against binaries pinned
-# by digest in the descriptor at prepare() time, within a signed budget.
-# `mutation` keeps the original single-use kernel-fenced semantics.
-EXECUTION_HOST_ADAPTER_PREFIX = "execution-host-port-"
-CONTROL_LAUNCH_BUDGET = 12
-CONTROL_OPS = (
-    "capability_probe",
-    "repo_list",
-    "repo_add",
-    "project_setup_delete",
-    "terminal_create",
-    "terminal_wait",
-    "terminal_read",
-    "terminal_stop",
-    "terminal_close",
-)
 # Backend identifiers belong to the portable descriptor contract; concrete
 # platform implementations are imported only by the selector below.
 LINUX_BACKEND_ID = "linux-bubblewrap-seccomp"
@@ -61,7 +41,7 @@ PROVIDER_SANDBOX_ENFORCED_BY = "lh-client-composed"
 
 # lh-egress-endpoint: the host-side egress policy is an HOST-owned,
 # registry-bound artefact; the fence reads it at prepare() and refuses a
-# control plane the policy does not declare. This is client-side preflight
+# provider the policy does not declare. This is client-side preflight
 # and provenance -- the policy names its own `enforced_by` so a receipt can
 # never be read as host mediation (agy vote: false attestation).
 EGRESS_POLICY_SCHEMA = "host-execution-host-egress-policy/v1"
@@ -69,7 +49,7 @@ EGRESS_POLICY_ENFORCED_BY = "lh-client-preflight"
 _EGRESS_VALUE_RE = r"[A-Za-z0-9._:/-]{1,64}"
 
 # Local execution host: LH itself starts the provider under the signed
-# provider-sandbox profile, so no control plane (and no Orca) is involved.
+# provider-sandbox profile.
 # The descriptor admits exactly one provider launch.
 LOCAL_PROVIDER_ADAPTER_PREFIX = "local-provider-"
 LOCAL_PROVIDER_LAUNCH_BUDGET = 1
@@ -95,34 +75,10 @@ def _egress_policy_path() -> Path:
     return Path(__file__).resolve().parents[1] / "governance" / "execution-host-egress-policy.json"
 
 
-def load_egress_policy() -> tuple[dict[str, Any], str]:
-    """The policy bytes and their digest, fail-closed on any defect."""
-    path = _egress_policy_path()
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise ExecutionFenceUnavailable("egress_policy_unreadable") from exc
-    try:
-        policy = json.loads(raw)
-    except ValueError as exc:
-        raise ExecutionFenceUnavailable("egress_policy_invalid") from exc
-    if (
-        not isinstance(policy, dict)
-        or policy.get("schema") != EGRESS_POLICY_SCHEMA
-        or policy.get("enforced_by") != EGRESS_POLICY_ENFORCED_BY
-        or not isinstance(policy.get("providers"), dict)
-        or not isinstance(policy.get("orca_cli"), dict)
-    ):
-        raise ExecutionFenceUnavailable("egress_policy_invalid")
-    return policy, "sha256:" + hashlib.sha256(raw).hexdigest()
-
-
 def load_local_provider_policy() -> tuple[dict[str, Any], str]:
     """The policy for a local provider launch; any defect refuses the launch.
 
-    Same artefact and schema as ``load_egress_policy`` but without the Orca
-    control-plane section: a local launch has no control plane to pin.  The
-    provider-sandbox profile, on the other hand, is mandatory here."""
+    The provider-sandbox profile is mandatory here."""
     path = _egress_policy_path()
     try:
         raw = path.read_bytes()
@@ -160,35 +116,6 @@ def validate_local_provider(
         or provider_policy.get("sha256") != provider_digest
     ):
         raise ExecutionFenceUnavailable("egress_policy_provider_mismatch")
-    return provider_policy
-
-
-def validate_egress_provider(
-    policy: Mapping[str, Any],
-    agent: str,
-    *,
-    provider_path: str,
-    provider_digest: str | None,
-    orca_path: str,
-    orca_digest: str | None,
-) -> dict[str, Any]:
-    """Validate the shared policy bindings before a backend prepares control."""
-    provider_policy = (policy.get("providers") or {}).get(agent)
-    if not isinstance(provider_policy, dict):
-        raise ExecutionFenceUnavailable("egress_policy_provider_not_listed")
-    if (
-        provider_policy.get("path") != provider_path
-        or provider_policy.get("sha256") != provider_digest
-    ):
-        raise ExecutionFenceUnavailable("egress_policy_provider_mismatch")
-    policy_orca = policy.get("orca_cli") or {}
-    if (
-        policy_orca.get("path") != orca_path
-        or policy_orca.get("sha256") != orca_digest
-    ):
-        raise ExecutionFenceUnavailable("egress_policy_orca_mismatch")
-    if CONTROL_LAUNCH_BUDGET > int(policy.get("control_launch_budget_max", 0)):
-        raise ExecutionFenceUnavailable("egress_policy_budget_exceeded")
     return provider_policy
 
 
@@ -255,30 +182,6 @@ def _platform_backend(name: str):
     return importlib.import_module("." + name, __package__) if __package__ else importlib.import_module(name)
 
 
-def compose_terminal_command(
-    provider_argv: Sequence[str],
-    *,
-    output_path: str | None = None,
-    env_overlay: Mapping[str, str] | None = None,
-    sandbox: Mapping[str, Any] | None = None,
-    seccomp_program_path: str | None = None,
-    clone_root: str | None = None,
-) -> str:
-    """Compatibility façade for the Linux terminal command composer."""
-    return _platform_backend("execution_fence_linux").compose_terminal_command(
-        provider_argv,
-        output_path=output_path,
-        env_overlay=env_overlay,
-        sandbox=sandbox,
-        seccomp_program_path=seccomp_program_path,
-        clone_root=clone_root,
-    )
-
-
-def compose_control_argv(request: Mapping[str, Any]) -> list[str]:
-    """Compatibility façade for the backend-owned closed control schema."""
-    return _platform_backend("execution_fence_linux").compose_control_argv(request)
-
 class ExecutionFencePort(ABC):
     """Backend-neutral controller/adapter seam."""
 
@@ -321,22 +224,6 @@ class ExecutionFencePort(ABC):
     @abstractmethod
     def receipt_projection(self, descriptor: Mapping[str, Any]) -> dict[str, Any]:
         """Return the bounded evidence projection stored on the Attempt receipt."""
-
-    def launch_control(
-        self,
-        descriptor: Mapping[str, Any],
-        request: Mapping[str, Any],
-        *,
-        timeout_seconds: float,
-    ) -> subprocess.CompletedProcess[str]:
-        """Run one structured Orca control-plane request.
-
-        Default: compose the closed argv and delegate to ``launch`` -- fixture
-        and disabled ports keep their existing behavior. Kernel backends
-        override this to run OUTSIDE the sandbox under descriptor-pinned
-        binaries and a signed budget (decision packet, sandbox)."""
-        argv = [str(request.get("orca_cli") or "orca"), *compose_control_argv(request)]
-        return self.launch(descriptor, argv, timeout_seconds=timeout_seconds)
 
     def launch_provider(
         self,
@@ -567,7 +454,6 @@ def __getattr__(name: str) -> Any:
         "DENIED_SYSCALLS",
         "EXPECTED_BWRAP_VERSION",
         "LinuxBubblewrapExecutionFence",
-        "PROVIDER_SECCOMP_PROGRAM_BASENAME",
     }:
         return getattr(_platform_backend("execution_fence_linux"), name)
     raise AttributeError(name)

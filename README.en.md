@@ -91,13 +91,14 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 74–75 of 90 gates pass (set `PYTHONUTF8=1`). 15 always fail because they rely on POSIX-only behavior: executable-bit fake CLIs (4), the bubblewrap fences including the local provider sandbox, the live-smoke rehearsal and the delivery runner's Linux cases (6), POSIX signals and process-holder semantics (2), and POSIX path or platform defaults (3). 1 more (run verdict) is timing-dependent: its fixed 0.25 s budget is exceeded when Windows process start-up is slow, and the outcome also depends on the checkout directory. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 73–74 of 87 gates pass (set `PYTHONUTF8=1`). 13 always fail because they rely on POSIX-only behavior: executable-bit fake CLIs (2), the bubblewrap fences including the local provider sandbox, the live-smoke rehearsal and the delivery runner's Linux cases (6), POSIX signals and process-holder semantics (2), and POSIX path or platform defaults (3). 1 more (run verdict) is timing-dependent: its fixed 0.25 s budget is exceeded when Windows process start-up is slow, and the outcome also depends on the checkout directory. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
-No Orca app, VS Code, or WSL is required. Orca is one optional execution-host
-adapter; the default executors are local coding CLIs in disposable clones.
+The engine depends on no IDE, terminal host, or platform bridge. Executors are
+local coding CLIs (`codex`) in disposable clones, or a provider the engine
+starts itself inside the Linux sandbox (`local`).
 
-## Sandboxed provider runs without Orca (Linux)
+## Sandboxed provider runs (Linux)
 
 The `local` executor starts the provider CLI (Codex today) itself, inside a
 bubblewrap sandbox signed into each attempt's launch descriptor:
@@ -131,7 +132,7 @@ Providers are declared explicitly: a provider not named in `LH_PROVIDER_NAMES`
 (or `LH_CODEX_CLI`) gets no policy entry, and the fence refuses at prepare (the
 run stops at `human_required` without calling the provider). On Linux, `init`
 pins bubblewrap and writes a `provider_sandbox_profile` into the generated
-policy; it pins Orca only when an Orca binary exists. The Codex provider home
+policy. The Codex provider home
 needs only `auth.json`; `config.toml` is bound read-only when present. A
 `provider_binding` (runner, base_url, model) is supported for Codex; its
 per-invocation config flags must be allowed by the provider's policy rules.
