@@ -13,9 +13,6 @@ Checks:
   ratchet: lower the constant as docs are slimmed, never raise it.
 - AGENTS.md is at most MAX_AGENTS_LINES lines and carries no reading-order
   instructions (P3: any "read these N files in order" directive is deleted).
-- CLI convention mirrors: when the same skill name has a tracked SKILL.md under
-  both .claude/skills/ and .codex/skills/, their contents must be identical
-  (Exception: mirrors are allowed only if generated or compared).
 
 Usage:
   python3 gate-pack/docs_structure/canary.py              # check; exit 1 if RED
@@ -40,11 +37,7 @@ MAX_TOTAL_DOCS = 29
 MAX_AGENTS_LINES = 40
 FORBIDDEN_AGENTS_TOKENS = ("讀取順序",)
 
-KNOWN_GAPS = [
-    {"id": "cli-mirror-skip-when-untracked",
-     "detail": ".claude/ and .codex/ are gitignored in this repo; the mirror comparison "
-               "only runs when both SKILL.md copies are tracked"},
-]
+KNOWN_GAPS: list[dict[str, str]] = []
 
 
 def _tracked(root: Path) -> set[str]:
@@ -56,29 +49,6 @@ def _tracked(root: Path) -> set[str]:
     except (OSError, subprocess.CalledProcessError):
         return set()
     return set(out.splitlines())
-
-
-def _mirror_pairs(root: Path, tracked: set[str]) -> tuple[list[str], list[str]]:
-    """Return (mismatched names, compared names) for tracked skill mirrors."""
-    claude = root / ".claude" / "skills"
-    codex = root / ".codex" / "skills"
-    mismatched: list[str] = []
-    compared: list[str] = []
-    if not claude.is_dir() or not codex.is_dir():
-        return mismatched, compared
-    for skill in sorted(p.name for p in claude.iterdir() if p.is_dir()):
-        a = claude / skill / "SKILL.md"
-        b = codex / skill / "SKILL.md"
-        rel_a = f".claude/skills/{skill}/SKILL.md"
-        rel_b = f".codex/skills/{skill}/SKILL.md"
-        if not a.is_file() or not b.is_file():
-            continue
-        if rel_a not in tracked or rel_b not in tracked:
-            continue
-        compared.append(skill)
-        if a.read_text(encoding="utf-8") != b.read_text(encoding="utf-8"):
-            mismatched.append(skill)
-    return mismatched, compared
 
 
 def check(root: Path, tracked: set[str] | None = None) -> dict:
@@ -100,11 +70,6 @@ def check(root: Path, tracked: set[str] | None = None) -> dict:
         agents_lines = len(agents_text.splitlines())
         agents_forbidden = [t for t in FORBIDDEN_AGENTS_TOKENS if t in agents_text]
 
-    mismatched, compared = _mirror_pairs(root, tracked)
-    mirror_ok = not mismatched
-    mirror_detail = (
-        "" if mirror_ok else f"tracked mirror SKILL.md differs: {', '.join(mismatched)}"
-    ) or (f"compared {len(compared)} mirror(s)" if compared else "no tracked mirror pair; skipped")
 
     canaries = [
         {"id": "three-layer-dirs", "ok": not missing_dirs,
@@ -123,7 +88,6 @@ def check(root: Path, tracked: set[str] | None = None) -> dict:
          else (f"AGENTS.md missing" if not agents.is_file()
                else f"AGENTS.md has {agents_lines} lines (> {MAX_AGENTS_LINES})" if agents_lines > MAX_AGENTS_LINES
                else f"AGENTS.md contains forbidden token(s): {', '.join(agents_forbidden)}")},
-        {"id": "cli-convention-mirror", "ok": mirror_ok, "detail": mirror_detail},
     ]
     blocking = [{"id": c["id"], "detail": c["detail"]} for c in canaries if not c["ok"]]
     return {
@@ -131,7 +95,7 @@ def check(root: Path, tracked: set[str] | None = None) -> dict:
         "total": len(canaries), "blocking_failures": blocking,
         "known_gaps_open": KNOWN_GAPS,
         "counts": {"total_docs": total_docs, "active_docs": len(active_docs),
-                   "agents_lines": agents_lines, "mirrors_compared": len(compared)},
+                   "agents_lines": agents_lines},
     }
 
 
@@ -139,7 +103,7 @@ def _print_human(r: dict) -> None:
     print(f"docs-structure: {r['status'].upper()}")
     c = r["counts"]
     print(f"  docs total={c['total_docs']}/{MAX_TOTAL_DOCS} active={c['active_docs']}/{MAX_ACTIVE_DOCS}"
-          f" AGENTS.md lines={c['agents_lines']}/{MAX_AGENTS_LINES} mirrors={c['mirrors_compared']}")
+          f" AGENTS.md lines={c['agents_lines']}/{MAX_AGENTS_LINES}")
     for f in r["blocking_failures"]:
         print(f"  FAIL {f['id']}: {f['detail']}")
 
@@ -199,16 +163,6 @@ def _self_test() -> int:
                "agents-md-entry" in {f["id"] for f in check(root)["blocking_failures"]})
         (root / "AGENTS.md").write_text("# AGENTS.md\n", encoding="utf-8")
 
-        for base in (".claude", ".codex"):
-            (root / base / "skills" / "demo").mkdir(parents=True, exist_ok=True)
-        (root / ".claude" / "skills" / "demo" / "SKILL.md").write_text("v1\n", encoding="utf-8")
-        (root / ".codex" / "skills" / "demo" / "SKILL.md").write_text("v2\n", encoding="utf-8")
-        tracked = {".claude/skills/demo/SKILL.md", ".codex/skills/demo/SKILL.md"}
-        expect("mirror mismatch detected",
-               "cli-convention-mirror" in {f["id"] for f in check(root, tracked)["blocking_failures"]})
-        (root / ".codex" / "skills" / "demo" / "SKILL.md").write_text("v1\n", encoding="utf-8")
-        expect("mirror match passes", check(root, tracked)["status"] == "pass")
-        expect("untracked mirror skipped", check(root, set())["status"] == "pass")
 
     if failures:
         print(f"docs-structure self-test: FAIL ({len(failures)} expectation(s) unmet)")

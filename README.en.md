@@ -213,7 +213,7 @@ End-to-end, offline-verifiable up to step C:
 3. **Run the driver** — `python3 -B lh_runtime/goal_loop_run.py --contract
    project_runtime_contract.json --execute --max-cycles 12 --idle-limit 2`.
    Chain: intent → admission → disposable-clone execution → lamp + value gate →
-   receipt → next stage. A cron/systemd timer calling the same bounded command
+   receipt → next stage. Any external scheduler calling the same bounded command
    makes it resident; every invocation is restart-safe.
 4. **Read results** — `platform_status.json` (state, cost, heartbeat/staleness),
    `runs/artifacts/<run_id>/<attempt>/` (receipt, diff, verifier output, usage),

@@ -8,10 +8,9 @@ a reason for the status snapshot:
   At or above the soft cap the tick idles (nothing new is dispatched); at or
   above the hard cap the driver session stops. An attempt already running is
   never touched — the gate only ever decides before a dispatch.
-- quota pressure: an injected reader reports ``used_percent``; the thresholds
-  mirror the notify/soft/hard shape of the platform quota policy (gate-pack
-  code is NOT imported into the runtime). A configured reader that cannot
-  produce a reading stops dispatch — unknown quota is not dispatchable.
+- quota pressure: an injected reader reports ``used_percent`` against
+  notify/soft/hard thresholds. A configured reader that cannot produce a
+  reading stops dispatch — unknown quota is not dispatchable.
 - executor credential failure: detected after a tick from the attempt's
   durable provider record, matched conservatively (clear auth markers only).
   The driver then ends the session instead of retrying until attempts run

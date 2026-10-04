@@ -105,7 +105,7 @@ def main() -> int:
             "lh_runtime/diff_grader.py",
             "lh_runtime/merge_gate.py",
             "lh_runtime/project_binding.py",
-            "deploy/systemd/lh-driver.service",
+            "deploy/lh-driver.service",
             "docs/promotion-policy.md",
         )
         protected_verdicts = {path: _verdict(path) for path in protected}

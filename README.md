@@ -225,7 +225,7 @@ python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json 
 
 鏈路：intent → admission → disposable clone 執行 → 燈 + value gate → receipt →
 （多 stage 時）自動派生下一 stage。前提是 stage 已啟用 delivery，而且有可用的 execution fence，見「使用」第 3 節。`--status-snapshot-out` 給即時狀態投影；
-cron/systemd timer 定期呼叫同一指令即成常駐（每次都是有界 session，重啟可續）。
+任何外部排程器定期呼叫同一指令即成常駐（每次都是有界 session，重啟可續）。
 
 ### D. 讀結果
 
