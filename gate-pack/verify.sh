@@ -69,7 +69,6 @@ run_gate lh-run-liveness python3 -B lh_runtime/run_liveness_canary.py || exit $?
 run_gate lh-durable-budget python3 -B lh_runtime/durable_budget_canary.py || exit $?
 run_gate lh-b12-live-smoke python3 -B lh_runtime/b12_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-executor-wiring python3 -B lh_runtime/executor_wiring_canary.py || exit $?
-run_gate lh-pure-loop-boundary python3 -B lh_runtime/pure_loop_boundary_canary.py || exit $?
 run_gate lh-platform-ports-p1 python3 -B lh_runtime/platform_ports_canary.py || exit $?
 run_gate lh-token-accounting python3 -B lh_runtime/token_accounting_canary.py || exit $?
 run_gate lh-project-status python3 -B lh_runtime/project_status_canary.py || exit $?
@@ -103,5 +102,6 @@ run_gate lh-value-gate python3 -B lh_runtime/value_gate_canary.py || exit $?
 run_gate design-grill python3 gate-pack/design_grill/canary.py || exit $?
 run_gate independent-falsifier python3 gate-pack/independent_falsifier/canary.py || exit $?
 run_gate provider-egress python3 gate-pack/provider_egress/canary.py || exit $?
+run_gate lh-pure-loop-boundary python3 -B lh_runtime/pure_loop_boundary_canary.py || exit $?
 
 printf '[PASS] all gate-pack checks\n'
