@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -559,13 +558,13 @@ def _resolve_task_area_execution_binding(manifest: Mapping[str, Any]):
         if (descriptor["identity"] != capability["identity"]
                 or descriptor["adapter_id"] != capability["adapter_id"]):
             raise CapabilityError("execution_binding_provider_identity_mismatch")
-        if descriptor["adapter_id"] != ("codex-exec-jsonl-v1" if trusted else "bounded-command-v1"):
+        if descriptor["adapter_id"] != ("provider-jsonl-v1" if trusted else "bounded-command-v1"):
             raise CapabilityError("execution_binding_adapter_unsupported:" + descriptor["adapter_id"])
         if trusted:
             selected = operator["providers"][role]
             if (selected["provider_id"] != provider_id or selected["adapter_id"] != descriptor["adapter_id"]
                     or selected["model"] != descriptor["identity"].get("model")
-                    or descriptor["command"] != [selected["executable"], "exec"]):
+                    or descriptor["command"] != [selected["executable"], *selected["arguments"]]):
                 raise CapabilityError("trusted_operator_provider_mismatch")
         providers[role] = {"provider_id": provider_id, **descriptor}
     if (providers["coding"]["identity"] == providers["verifier"]["identity"]
@@ -578,12 +577,6 @@ def _resolve_task_area_execution_binding(manifest: Mapping[str, Any]):
     bootstrap = build_execution_host_binding(execution_host, dict(raw["bootstrap_authority"]))
     fence = raw["fence"]
     fence_fields = {"backend_id", "egress_policy_ref"}
-    if isinstance(fence, Mapping) and "null_device_check" in fence:
-        fence_fields.add("null_device_check")
-        if (trusted or fence["null_device_check"] != "git-diff-cached-check-v1"
-            or fence.get("backend_id") != "linux-bubblewrap-seccomp"
-            or fence.get("egress_policy_ref") is not None):
-            raise CapabilityError("null_device_check_profile_invalid")
     if not isinstance(fence, Mapping) or set(fence) != fence_fields:
         raise CapabilityError("execution_binding_fence_fields_invalid")
     _text("execution_binding.fence.backend_id", fence["backend_id"])
@@ -849,8 +842,8 @@ class ResolvedExecutionBinding:
         if phase in {"planner", "plan_verifier"}:
             raise CapabilityError("trusted_planning_unsupported")
         from . import execution_fence as fences, provider_input_binding as inputs
-        from .cli_agent_executor import (compose_trusted_codex_argv, trusted_codex_output_schema,
-            normalize_trusted_codex_jsonl, unknown_trusted_usage, resolve_cli)
+        from .cli_agent_executor import (OUTPUT_SCHEMA_ENV, compose_trusted_provider_argv,
+            normalize_trusted_provider_output, trusted_output_schema, unknown_trusted_usage, resolve_cli)
         from .platform_ports import ManagedProcessTimeout, ManagedProcessUnknown
         if self.store is None:
             raise CapabilityError("trusted_store_binding_missing")
@@ -875,7 +868,7 @@ class ResolvedExecutionBinding:
         if role is not None:
             if argv != self.providers[role]["command"]:
                 raise CapabilityError("trusted_provider_command_mismatch")
-            schema = trusted_codex_output_schema(role)
+            schema = trusted_output_schema(role)
             schema_path = scratch / "output-schema.json"
             schema_bytes = inputs.canonical_json(schema).encode()
             if schema_path.exists() and schema_path.read_bytes() != schema_bytes:
@@ -885,12 +878,13 @@ class ResolvedExecutionBinding:
                     stream.write(schema_bytes)
                 schema_path.chmod(0o600)
             schema_digest = digest_json(schema)
-            argv = compose_trusted_codex_argv(self.operator["providers"][role], role=role,
-                                             output_schema_path=str(schema_path))
+            argv = compose_trusted_provider_argv(self.operator["providers"][role])
         else:
             argv = [resolve_cli(argv[0]), *argv[1:]]
         prompt = inputs.canonical_json(dict(input_request)) if input_request is not None else ""
         environment = self.port.environment(role, scratch, env or {})
+        if schema_digest is not None:
+            environment[OUTPUT_SCHEMA_ENV] = str(schema_path)
         reservation = self.store.reserve_trusted_launch(goal_id=request["goal_id"],
             goal_revision=request["goal_revision"], policy=self.policy, phase_key=phase_key,
             run_id=request["run_id"], attempt=request["attempt"], fence=request["fence"],
@@ -949,7 +943,7 @@ class ResolvedExecutionBinding:
             if role == "verifier":
                 expected["candidate_digest"] = request["candidate_digest"]
                 expected["checks_digest"] = request["checks_digest"]
-            normalized = normalize_trusted_codex_jsonl(result.stdout, stderr=result.stderr,
+            normalized = normalize_trusted_provider_output(result.stdout, stderr=result.stderr,
                 returncode=result.returncode, role=role, model=self.operator["providers"][role]["model"],
                 expected=expected, diagnostics=diagnostics)
             evidence["provider_execution"] = normalized
@@ -997,27 +991,6 @@ class ResolvedExecutionBinding:
                 result.returncode = 1
         return result, evidence, descriptor
 
-    def _null_device_check(self, *, phase, argv, capability, writable, input_request):
-        profile = self.raw["fence"].get("null_device_check")
-        if profile is None:
-            return None
-        if profile != "git-diff-cached-check-v1" or self.policy is not None:
-            raise CapabilityError("null_device_check_profile_invalid")
-        if phase != "delivery_checks":
-            return None
-        if (not self.native_runtime or self.native_runtime.get("identity_profile") != "native-run-v1"
-            or capability.get("adapter_id") != "deterministic-command-v1"
-            or capability.get("permissions") != "read_only" or writable or input_request is not None):
-            raise CapabilityError("null_device_check_scope_invalid")
-        try:
-            git_path = Path(shutil.which("git", path=os.defpath) or "").resolve(strict=True)
-            if list(argv) != [str(git_path), "diff", "--cached", "--check"]:
-                raise CapabilityError("null_device_check_command_invalid")
-            digest = "sha256:" + hashlib.sha256(git_path.read_bytes()).hexdigest()
-        except (OSError, RuntimeError) as exc:
-            raise CapabilityError("null_device_check_executable_unavailable") from exc
-        return {"profile": profile, "phase": phase, "argv": list(argv), "executable_sha256": digest}
-
     def command(self, request: Mapping[str, Any], *, phase: str, argv: list[str],
                 worktree: str, timeout_seconds: float, input_request: Mapping[str, Any] | None = None,
                 writable: bool = False, on_started=None, env: Mapping[str, str] | None = None):
@@ -1028,8 +1001,6 @@ class ResolvedExecutionBinding:
                 raise CapabilityError("phase_job_deadline_expired")
             timeout_seconds = min(timeout_seconds, remaining)
         if self.policy is not None:
-            if "null_device_check" in self.raw["fence"]:
-                raise CapabilityError("null_device_check_profile_invalid")
             return self._trusted_command(request, phase=phase, argv=argv, worktree=worktree,
                 timeout_seconds=timeout_seconds, input_request=input_request, writable=writable,
                 on_started=on_started, env=env)
@@ -1073,8 +1044,6 @@ class ResolvedExecutionBinding:
             if argv != config[phase + "_argv"]:
                 raise CapabilityError("native_recovery_command_mismatch")
         argv = [resolve_cli(argv[0]), *argv[1:]]
-        null_device_check = self._null_device_check(phase=phase, argv=argv, capability=capability,
-            writable=writable, input_request=input_request)
         read_roots = []
         if input_request is not None and input_request.get("packet_path"):
             packet_path = Path(input_request["packet_path"]).resolve(strict=True)
@@ -1094,7 +1063,7 @@ class ResolvedExecutionBinding:
             timeout_seconds=timeout_seconds, allowed_read_roots=read_roots,
             allowed_write_roots=[worktree] if writable else [],
             allowed_local_effects=["workspace_write", "scratch_write"] if writable else ["scratch_write"],
-            execution_context_digest=digest_json(context), null_device_check=null_device_check)
+            execution_context_digest=digest_json(context))
         descriptor = self.port.prepare(binding)
         if descriptor.get("binding") != binding:
             raise fences.ExecutionFenceUnavailable("binding_mismatch")

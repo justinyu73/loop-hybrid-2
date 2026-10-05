@@ -8,9 +8,8 @@ configured execution fence.  Nothing here imports a ``tests/`` fixture: the
 point of the exam is that a README-style contract reaches ``verified`` on the
 production path alone.
 
-E1/E2/E3/E6 are platform-neutral.  E4/E5 need Linux with bubblewrap and
-libseccomp; elsewhere they fail with a named reason -- a missing platform is a
-failed exam, never a skipped one.
+Every case is platform-neutral.  E4/E5 run real children through the explicit
+local-process fence, which contains nothing and says so in the evidence.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,22 +33,15 @@ CHECK_ID = "lh-delivery-runner"
 CAMPAIGN_ID = "delivery-runner-canary"
 STAGE_ID = "hello"
 TARGET_FILE = "src/hello.txt"
-TARGET_TEXT = "hello from the lh local provider"
-# Inside the fence a bare name resolves against the sandbox PATH (/usr/bin:/bin);
-# the lamp also runs on the host, so on Linux it names the system interpreter.
-LAMP = ["python3" if sys.platform.startswith("linux") else sys.executable, "-B", "-c",
+TARGET_TEXT = "hello from a declared executor"
+LAMP = [sys.executable, "-B", "-c",
         "import pathlib, sys; path = pathlib.Path('src/hello.txt'); "
         f"sys.exit(0 if path.is_file() and path.read_text(encoding='utf-8').strip() == {TARGET_TEXT!r} else 1)"]
 FIXTURE_MODULES = frozenset({"native_delivery_fixture", "p7_fence_fixture", "p7_native_runstore_fixture"})
-SOCKET_PROBE = (
-    "import errno, socket\n"
-    "try:\n"
-    "    socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
-    "    print('ALLOWED')\n"
-    "except OSError as exc:\n"
-    "    print(errno.errorcode.get(exc.errno, exc.errno))\n"
-)
-NEEDS_LINUX = "delivery_runner_fence_requires_linux_bubblewrap"
+# The declared executor writes the stage's target; the lamp then verifies it.
+WRITER = ("import pathlib, sys; target = pathlib.Path('src/hello.txt'); "
+          "target.parent.mkdir(parents=True, exist_ok=True); "
+          f"target.write_text({TARGET_TEXT!r} + chr(10), encoding='utf-8')")
 
 
 def case(case_id: str, ok: bool, detail: Any) -> dict[str, Any]:
@@ -236,27 +227,14 @@ def e6_disabled_fence_reports() -> dict[str, Any]:
                 {"delivery_command_runner": runner, "attempts": states, "fixtures_loaded": leaked})
 
 
-# -- Linux cases ---------------------------------------------------------------
+# -- E4: delivery checks run through the configured fence port ----------------
 
-def _linux_root() -> Path | None:
-    if not sys.platform.startswith("linux") or shutil.which("bwrap") is None:
-        return None
-    # bubblewrap mounts a fresh tmpfs on /tmp; keep fixtures outside it.
-    base = Path.home() / ".cache" / "lh-delivery-runner-canary"
-    base.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix="run-", dir=base)).resolve()
+def e4_check_through_fence() -> dict[str, Any]:
+    from fence_command_runner import FenceCommandRunner
 
-
-def e4_check_inside_fence() -> dict[str, Any]:
-    root = _linux_root()
-    if root is None:
-        return case("delivery-check-runs-inside-fence", False, NEEDS_LINUX)
-    try:
-        from fence_command_runner import FenceCommandRunner
-
-        port = fences.configured_execution_fence({"LH_EXECUTION_FENCE_BACKEND": fences.LINUX_BACKEND_ID})
-        if isinstance(port, fences.DisabledExecutionFencePort):
-            return case("delivery-check-runs-inside-fence", False, f"linux_backend_unavailable:{port.reason}")
+    with tempfile.TemporaryDirectory(prefix="lh-delivery-runner-") as raw:
+        root = Path(raw).resolve()
+        port = fences.configured_execution_fence({"LH_EXECUTION_FENCE_BACKEND": "local-process"})
         source, base = _source_repo(root)
         (source / "staged.txt").write_text("staged\n", encoding="utf-8")
         _git("add", "staged.txt", cwd=source)
@@ -268,36 +246,30 @@ def e4_check_inside_fence() -> dict[str, Any]:
         diff_check, _, _ = runner(dict(context), phase="delivery_checks",
                                   argv=["git", "diff", "--cached", "--check"],
                                   worktree=str(source), timeout_seconds=60)
-        probe, evidence, _ = runner(dict(context, command_id="e4-socket"), phase="delivery_checks",
-                                    argv=["python3", "-B", "-c", SOCKET_PROBE],
+        probe, evidence, _ = runner(dict(context, command_id="e4-cwd"), phase="delivery_checks",
+                                    argv=[sys.executable, "-B", "-c", "import os; print(os.getcwd())"],
                                     worktree=str(source), timeout_seconds=60)
-        rendered = json.dumps(evidence, sort_keys=True, default=str)
-        ok = (diff_check.returncode == 0 and probe.returncode == 0 and probe.stdout.strip() == "EPERM"
-              and fences.LINUX_BACKEND_ID in rendered and "non-kernel" not in rendered)
-        return case("delivery-check-runs-inside-fence", ok, {
+        fence_evidence = evidence.get("execution_fence") or {}
+        ok = (diff_check.returncode == 0 and probe.returncode == 0
+              and Path(probe.stdout.strip()).resolve() == source.resolve()
+              and (fence_evidence.get("backend") or {}).get("backend_id") == "local-process"
+              and fence_evidence.get("kernel_containment") is False)
+        return case("delivery-check-runs-through-the-fence-port", ok, {
             "diff_check": [diff_check.returncode, (diff_check.stderr or "")[-200:]],
-            "socket_probe": [probe.returncode, probe.stdout.strip(), (probe.stderr or "")[-200:]],
-            "evidence_backend": fences.LINUX_BACKEND_ID in rendered})
-    except Exception as exc:  # A crash is a failed exam, never a skipped one.
-        return case("delivery-check-runs-inside-fence", False, f"{type(exc).__name__}: {exc}")
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+            "cwd": probe.stdout.strip(), "backend": (fence_evidence.get("backend") or {}).get("backend_id"),
+            "kernel_containment": fence_evidence.get("kernel_containment")})
 
+
+# -- E5: the README contract path reaches verified with production code only ---
 
 def e5_child(root: Path) -> int:
     """Run the README contract path in a fresh process and report what it loaded."""
     import goal_loop_run
-    import local_provider_live_smoke as smoke
     from command_ingress import submit_command
     from goal_store import GoalStore
     from run_store import RunStore
 
     source, base = _source_repo(root)
-    smoke.write_stand_in(root / "bin")
-    codex_home = root / "codex-home"
-    codex_home.mkdir()
-    (codex_home / "auth.json").write_text("{}\n", encoding="utf-8")
-    instance, environ, _pin = smoke.prepare_instance(root, codex_home=codex_home, path_prefix=str(root / "bin"))
     contract = {
         "schema": "lh-project-runtime-contract/v1",
         "project_id": "delivery-runner-canary",
@@ -306,16 +278,17 @@ def e5_child(root: Path) -> int:
         "base_revision": base,
         "runtime": {"goal_store": str(root / "goals"), "run_store": str(root / "runs"),
                     "workspace_root": str(root / "workspaces")},
+        "executors": {"coder": {"argv": [sys.executable, "-B", "-c", WRITER, "{prompt}"]}},
+        "models": {"execute": "coder"},
     }
     contract_path = root / "project_runtime_contract.json"
     contract_path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
     submit_command(GoalStore(root / "goals"), source="delivery-runner-canary", event_type="manual_intent",
                    event_id="e5", payload={"campaign_id": CAMPAIGN_ID, "stage_id": STAGE_ID})
-    os.environ.update({**instance.environment_overlay(environ), "CODEX_HOME": str(codex_home),
-                       "LH_EXECUTION_FENCE_BACKEND": fences.LINUX_BACKEND_ID, "LH_LOCAL_PROVIDER_AGENT": "codex"})
+    os.environ["LH_EXECUTION_FENCE_BACKEND"] = "local-process"
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        code = goal_loop_run.main(["--contract", str(contract_path), "--execute", "--executor", "local",
+        code = goal_loop_run.main(["--contract", str(contract_path), "--execute",
                                    "--max-cycles", "3", "--idle-limit", "1"])
     runs = RunStore(root / "runs")
     with runs._connect() as conn:
@@ -328,29 +301,22 @@ def e5_child(root: Path) -> int:
         "exit": code,
         "attempts": states,
         "fixtures_loaded": sorted(FIXTURE_MODULES & set(sys.modules)),
-        "delivery_fenced": fences.LINUX_BACKEND_ID in evidence and "non-kernel" not in evidence,
-        "delivery": smoke.delivery_summary(rows),
+        "delivery_through_local_process": "local-process" in evidence,
         "tail": output.getvalue()[-300:],
     }))
     return 0
 
 
 def e5_contract_path() -> dict[str, Any]:
-    root = _linux_root()
-    if root is None:
-        return case("contract-path-verifies-without-test-fixtures", False, NEEDS_LINUX)
-    try:
+    with tempfile.TemporaryDirectory(prefix="lh-delivery-runner-") as raw:
+        root = Path(raw).resolve()
         child = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), "--e5-child", str(root)],
                                capture_output=True, text=True, timeout=600)
         lines = [line for line in child.stdout.splitlines() if line.strip().startswith("{")]
         report = json.loads(lines[-1]) if lines else {"stderr": child.stderr[-600:]}
-        ok = (child.returncode == 0 and report.get("attempts") == ["verified"]
-              and report.get("fixtures_loaded") == [] and report.get("delivery_fenced") is True)
-        return case("contract-path-verifies-without-test-fixtures", ok, report)
-    except Exception as exc:
-        return case("contract-path-verifies-without-test-fixtures", False, f"{type(exc).__name__}: {exc}")
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    ok = (child.returncode == 0 and report.get("attempts") == ["verified"]
+          and report.get("fixtures_loaded") == [] and report.get("delivery_through_local_process") is True)
+    return case("contract-path-verifies-without-test-fixtures", ok, report)
 
 
 def _guarded(name: str, action) -> dict[str, Any]:
@@ -365,8 +331,8 @@ def main() -> int:
         _guarded("lamp-derived-binding-seals", e1_binding_seals),
         _guarded("verifier-in-write-scope-is-refused", e2_write_scope_refused),
         _guarded("stage-without-opt-in-is-unchanged", e3_no_opt_in_unchanged),
-        e4_check_inside_fence(),
-        e5_contract_path(),
+        _guarded("delivery-check-runs-through-the-fence-port", e4_check_through_fence),
+        _guarded("contract-path-verifies-without-test-fixtures", e5_contract_path),
         _guarded("disabled-fence-reports-runner-unavailable", e6_disabled_fence_reports),
     ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
@@ -377,7 +343,7 @@ def main() -> int:
         "results": [{"id": item["id"], "passed": item["ok"]} for item in cases],
         "blocking_failures": failures,
         "known_gaps_open": [
-            "kernel-contained delivery checks are Linux-only; elsewhere the runner is not installed and the plan says why",
+            "local-process delivery checks are not contained; a containment backend is an operator-supplied port",
         ],
     }, ensure_ascii=False, indent=2, default=str))
     return 0 if not failures else 1

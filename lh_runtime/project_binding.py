@@ -18,6 +18,7 @@ from typing import Any
 
 import assignment_packet
 import capability_resolver as cr
+import cli_agent_executor as executors
 import delivery_binding
 import instance_config as ic
 
@@ -29,6 +30,21 @@ ROUTING_PROFILE_DIR = (
     / "model-routing"
     / "profiles"
 )
+
+
+def _validate_pricing(raw: Any) -> dict[str, dict[str, float]]:
+    """``{model_id: {"input", "output", "cache_read"}}`` in USD per million tokens."""
+    if not isinstance(raw, dict):
+        raise SystemExit("contract.pricing must map model ids to rates")
+    pricing: dict[str, dict[str, float]] = {}
+    for model, rates in raw.items():
+        if (not isinstance(model, str) or not model.strip() or not isinstance(rates, dict)
+                or not {"input", "output"} <= set(rates) or set(rates) - {"input", "output", "cache_read"}
+                or any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+                       for value in rates.values())):
+            raise SystemExit(f"contract.pricing.{model} must hold non-negative input/output[/cache_read] rates")
+        pricing[model] = {key: float(value) for key, value in rates.items()}
+    return pricing
 
 
 def resolve_project(
@@ -163,6 +179,13 @@ def resolve_project(
         if not isinstance(knowledge_repos, list) or not all(isinstance(item, str) and item.strip() for item in knowledge_repos):
             raise SystemExit("contract.runtime.knowledge_repos must be an array of non-empty strings")
         run_kwargs["knowledge_repo_roots"] = tuple(resolve(item, "repo") for item in knowledge_repos)
+    if contract.get("executors") is not None:
+        try:
+            run_kwargs["executor_declarations"] = executors.validate_executor_declarations(contract["executors"])
+        except ValueError as exc:
+            raise SystemExit(f"contract.executors invalid: {exc}") from exc
+    if contract.get("pricing") is not None:
+        run_kwargs["pricing"] = _validate_pricing(contract["pricing"])
     models = contract.get("models")
     execution_graph = contract.get("execution_graph")
     work_graph = contract.get("work_graph")

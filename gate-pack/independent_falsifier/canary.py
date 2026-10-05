@@ -81,7 +81,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as raw, tempfile.TemporaryDirectory() as external:
         prepared = iff.prepare(subject, context_root=Path(external) / "bounded-context", session_dir=Path(raw) / "falsifier-session")
         policy = dg.load_json(HERE.parent / "provider_egress" / "policy.example.json")
-        requested = iff.request(Path(raw) / "falsifier-session", bindings=bindings, provider_profiles=["codex_p3"] * 3,
+        requested = iff.request(Path(raw) / "falsifier-session", bindings=bindings, provider_profiles=["profile_a"] * 3,
                                 requested_at="2026-07-16T10:00:00Z", expires_at="2026-07-16T12:00:00Z", policy=policy)
     cases = [
         case("green-regression-two-witnesses-flips", majority["verdict"] == "human_required" and majority["witnessed_refutes"] == 2 and majority["route"] == "human_required", majority.get("status", "")),

@@ -13,8 +13,6 @@ from pathlib import PurePath
 from typing import Any
 
 PROVIDER_REGISTRY_SCHEMA = "host-provider-registry/v1"
-_RETIRED_PROVIDER = "cl" + "aude"
-_DANGEROUS_PERMISSION_SUFFIX = "bypass" + "Permissions"
 
 
 class ProviderRegistryError(ValueError):
@@ -52,14 +50,6 @@ def _command(name: str, value: Any) -> list[str]:
         raise ProviderRegistryError(f"{name}_invalid")
     if any(any(char in item for char in "\r\n\x00") for item in value):
         raise ProviderRegistryError(f"{name}_invalid")
-    executable = PurePath(value[0]).name
-    lowered = [item.strip().lower() for item in value]
-    if executable.lower() == _RETIRED_PROVIDER:
-        raise ProviderRegistryError("retired_provider_command")
-    if _RETIRED_PROVIDER in lowered and "-p" in lowered:
-        raise ProviderRegistryError("retired_provider_command")
-    if any(item == _DANGEROUS_PERMISSION_SUFFIX.lower() for item in lowered):
-        raise ProviderRegistryError("dangerous_permission_route")
     return [item.strip() for item in value]
 
 
@@ -78,20 +68,18 @@ def validate_provider_registry(raw: Any) -> dict[str, Any]:
     normalized: dict[str, dict[str, Any]] = {}
     for provider_id, descriptor in providers.items():
         provider_id = _text("provider_id", provider_id)
-        if provider_id.lower() == _RETIRED_PROVIDER:
-            raise ProviderRegistryError("retired_provider")
         if not isinstance(descriptor, Mapping):
             raise ProviderRegistryError("provider_descriptor_invalid:" + provider_id)
         adapter_id = _text("adapter_id", descriptor.get("adapter_id"))
-        if adapter_id == "codex-exec-jsonl-v1":
+        if adapter_id == "provider-jsonl-v1":
             command = descriptor.get("command")
             identity = descriptor.get("identity")
-            if (not isinstance(command, list) or len(command) != 2 or command[1] != "exec"
+            if (not isinstance(command, list) or not command
                     or not isinstance(command[0], str) or not PurePath(command[0]).is_absolute()
                     or not isinstance(identity, Mapping)):
-                raise ProviderRegistryError("trusted_codex_registry_command_invalid")
-            _text("trusted_codex_principal", identity.get("principal"))
-            _text("trusted_codex_model", identity.get("model"))
+                raise ProviderRegistryError("trusted_registry_command_invalid")
+            _text("trusted_principal", identity.get("principal"))
+            _text("trusted_model", identity.get("model"))
         normalized[provider_id] = {
             "adapter_id": adapter_id,
             "identity": _identity("provider_identity", descriptor.get("identity")),

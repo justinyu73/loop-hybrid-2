@@ -3,7 +3,7 @@
 
 Proves selection, the dry-run gate, fail-closed on unknown executors, and that
 --execute actually threads the chosen model into the driver — all without
-invoking codex/claude. Actually running a real coding-agent CLI is a separate
+invoking a provider. Actually running a real coding-agent CLI is a separate
 human live smoke (see docs/contracts/autonomous-driver-v1.md).
 """
 from __future__ import annotations
@@ -19,7 +19,8 @@ ROOT = HERE.parent
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import cli_agent_executor as executors
 from _fixture import make_campaign, make_source_repo
-from goal_loop_run import EXECUTORS, resolve_executor, run
+import goal_loop_run
+from goal_loop_run import resolve_executor, run
 from goal_store import GoalStore
 from native_delivery_fixture import make_native_bundle
 from p7_native_runstore_fixture import explicit_runstore_factory
@@ -110,16 +111,17 @@ def main() -> int:
         source, base = _source_repo(root)
         camp = campaign()
 
-        presets_ok = set(EXECUTORS) == {"codex"} \
-            and executors.codex_argv("P") == ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "P"]
+        builtin = [name for name in ("EXECUTORS", "HOST_EXECUTORS", "JUDGE_EXECUTORS")
+                   if getattr(goal_loop_run, name, None)]
+        declared = executors.validate_executor_declarations(
+            {"fixture-coder": {"argv": [sys.executable, "-c", "pass", "{prompt}"]}})
 
         spy = _Spy()
-        dry = run(executor="codex", execute=False, goal_store_root=root / "d-goals", run_store_root=root / "d-runs",
+        dry = run(executor="fixture-coder", execute=False, goal_store_root=root / "d-goals", run_store_root=root / "d-runs",
                   workspace_root=root / "d-ws", campaign=camp, source_repo=source, base_revision=base,
-                  factory_overrides={"codex": spy})
+                  executor_declarations=declared, factory_overrides={"fixture-spy": spy})
 
-        unknown_rejected, unknown_detail = _rejects(lambda: resolve_executor("gpt-nope", execute=False))
-        retired_rejected, retired_detail = _rejects(lambda: executors.provider_argv("claude", "P"))
+        unknown_rejected, unknown_detail = _rejects(lambda: resolve_executor("undeclared-nope", execute=False))
 
         _seed(root / "x-goals", camp, source=source, base=base)
         with explicit_runstore_factory(fixture_glr):
@@ -136,9 +138,8 @@ def main() -> int:
                     pause_flag=flag, max_cycles=30, factory_overrides={"fake": fake_executor_factory}, sleep_fn=_noop_sleep)
 
         cases = [
-            case("registry-presets-are-model-agnostic-bypass-argv", presets_ok, f"executors={sorted(EXECUTORS)}"),
-            case("retired-provider-has-no-core-argv", retired_rejected, retired_detail),
-            case("dry-run-is-default-and-never-invokes-executor", dry["mode"] == "dry_run" and dry["invoked"] is False and spy.called is False, str(dry)),
+            case("no-built-in-executor-preset", not builtin, f"builtin={builtin}"),
+            case("dry-run-is-default-and-never-invokes-executor", dry["mode"] == "dry_run" and dry["invoked"] is False and spy.called is False and dry["plan"]["executors"] == ["fixture-coder"], str(dry)),
             case("unknown-executor-fails-closed", unknown_rejected, unknown_detail),
             case("execute-threads-real-model-into-driver", executed["invoked"] is True and executed["driver"]["runs_dispatched"] == 1 and executed_done, str(executed)),
             case("kill-switch-honored-through-run-entry", gated["invoked"] is True and gated["driver"]["stop_reason"] == "paused" and gated["driver"]["runs_dispatched"] == 0, str(gated)),

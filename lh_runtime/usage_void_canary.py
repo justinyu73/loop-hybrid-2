@@ -29,10 +29,11 @@ from dispatch_gate import DispatchGate
 from native_delivery_fixture import make_native_run
 from run_store import RunStore
 
-# gpt-5.6-luna is priced in token_cost.DEFAULT_PRICING; these counts price at
-# tens of dollars — the phantom shape from the live incident.
-PHANTOM_USAGE = {"state": "measured", "model": "gpt-5.6-luna", "input_tokens": 214_800_000, "output_tokens": 900_000, "cache_read_tokens": 214_769_152}
-SMALL_USAGE = {"state": "measured", "model": "gpt-5.6-luna", "input_tokens": 100, "output_tokens": 10, "cache_read_tokens": 0}
+# The fixture model is declared below; these counts price at tens of
+# dollars — the phantom shape from the live incident.
+PRICING = {"fixture-model": {"input": 1.0, "output": 6.0, "cache_read": 0.1}}
+PHANTOM_USAGE = {"state": "measured", "model": "fixture-model", "input_tokens": 214_800_000, "output_tokens": 900_000, "cache_read_tokens": 214_769_152}
+SMALL_USAGE = {"state": "measured", "model": "fixture-model", "input_tokens": 100, "output_tokens": 10, "cache_read_tokens": 0}
 VOID_REASON = "phantom cache_read from pre-W7 cumulative attribution (live incident)"
 
 
@@ -69,8 +70,8 @@ def main() -> int:
         _seed(store, "run-w9e-honest", SMALL_USAGE)
 
         before_records = store.usage_records()
-        before_cost = token_cost.aggregate(before_records)["estimated_cost_usd"]
-        gate_before = DispatchGate(store).evaluate()
+        before_cost = token_cost.aggregate(before_records, pricing=PRICING)["estimated_cost_usd"]
+        gate_before = DispatchGate(store, pricing=PRICING).evaluate()
         receipt_before = _receipt_bytes(store, "run-w9e-phantom")
 
         # The human void goes through the CLI entry point (the only caller).
@@ -82,8 +83,8 @@ def main() -> int:
         correction = json.loads(cli.stdout) if cli.returncode == 0 and cli.stdout.strip() else {}
 
         after_records = store.usage_records()
-        after_cost = token_cost.aggregate(after_records)["estimated_cost_usd"]
-        gate_after = DispatchGate(store).evaluate()
+        after_cost = token_cost.aggregate(after_records, pricing=PRICING)["estimated_cost_usd"]
+        gate_after = DispatchGate(store, pricing=PRICING).evaluate()
         receipt_after = _receipt_bytes(store, "run-w9e-phantom")
         digest_meta = store.latest_receipt("run-w9e-phantom")
         digest_actual = "sha256:" + hashlib.sha256(receipt_after).hexdigest()

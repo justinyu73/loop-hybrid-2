@@ -176,6 +176,12 @@ def _fake_factory(*, timeout_seconds: float = 900):
     return model
 
 
+def _declarations(root: Path) -> dict[str, Any] | None:
+    """The executor declarations an execute-mode harness wrote for its sessions."""
+    path = root / "executors.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
 def _session(root: Path, *, phase: str, executor: str, offline: bool, hold_after: bool) -> int:
     campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
     factory_overrides = {"fake": _fake_factory} if offline else None
@@ -185,6 +191,7 @@ def _session(root: Path, *, phase: str, executor: str, offline: bool, hold_after
             result = goal_loop_run(
                 executor=selected_executor,
                 execute=True,
+                executor_declarations=None if offline else _declarations(root),
                 goal_store_root=root / "goals",
                 run_store_root=root / "runs",
                 workspace_root=root / "workspaces",
@@ -316,6 +323,7 @@ def _budget_case(root: Path, source: Path, base: str, campaign: dict[str, Any], 
     result = goal_loop_run(
         executor=selected_executor,
         execute=True,
+        executor_declarations=None if offline else _declarations(root),
         goal_store_root=goals.root,
         run_store_root=store.root,
         workspace_root=run_root / "workspaces",
@@ -350,12 +358,18 @@ def _run_existing_canary(name: str) -> dict[str, Any]:
     return {"exit": completed.returncode, "result": payload, "ok": completed.returncode == 0}
 
 
-def _harness(root: Path, *, execute: bool, executor: str) -> dict[str, Any]:
+def _harness(root: Path, *, execute: bool, executor: str | None,
+             declarations: dict[str, Any] | None = None) -> dict[str, Any]:
     prepared = _prepare(root)
     (root / "base.txt").write_text(prepared["base"], encoding="utf-8")
+    if execute:
+        (root / "executors.json").write_text(json.dumps(declarations), encoding="utf-8")
+    executor = executor if execute else "fake"
     dry_plan = goal_loop_run(
         executor=executor,
         execute=False,
+        executor_declarations=declarations if execute else None,
+        factory_overrides=None if execute else {"fake": _fake_factory},
         goal_store_root=root / "goals",
         run_store_root=root / "runs",
         workspace_root=root / "workspaces",
@@ -436,25 +450,31 @@ def _harness(root: Path, *, execute: bool, executor: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run B12's provider-free comprehensive LH live-smoke harness")
-    parser.add_argument("--execute", action="store_true", help="use a real codex/claude executor; human-only")
+    parser.add_argument("--execute", action="store_true", help="use a real declared executor; human-only")
     parser.add_argument("--dry-run", action="store_true", help="explicitly select the provider-free harness mode")
-    parser.add_argument("--executor", choices=["codex", "claude"], default="codex")
+    parser.add_argument("--executor", default=None, help="declared executor name for --execute")
+    parser.add_argument("--executors", default=None, help="executor declaration file for --execute")
     parser.add_argument("--work-root", default=None)
     args = parser.parse_args(argv)
     if args.execute and args.dry_run:
         parser.error("choose either --execute or --dry-run")
-    if args.execute and not args.executor:
-        parser.error("--execute requires --executor codex or claude")
+    declarations = None
+    if args.execute:
+        if not args.executor or not args.executors:
+            parser.error("--execute requires --executor and --executors")
+        import cli_agent_executor as executors
+        declarations = executors.validate_executor_declarations(
+            json.loads(Path(args.executors).read_text(encoding="utf-8")))
 
     if args.work_root:
         root = Path(args.work_root).resolve()
         root.mkdir(parents=True, exist_ok=True)
-        report = _harness(root, execute=args.execute, executor=args.executor)
+        report = _harness(root, execute=args.execute, executor=args.executor, declarations=declarations)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "pass" else 1
 
     with tempfile.TemporaryDirectory(prefix="lh-b12-live-smoke-") as raw:
-        report = _harness(Path(raw), execute=args.execute, executor=args.executor)
+        report = _harness(Path(raw), execute=args.execute, executor=args.executor, declarations=declarations)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "pass" else 1
 

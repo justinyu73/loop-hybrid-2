@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Committed M1/M2 smoke: model routing — judge argv, CLI judge wrapper, run()/contract wiring."""
+"""Committed M1/M2 smoke: model routing — declared judge command, CLI judge wrapper, run()/contract wiring."""
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -36,109 +35,49 @@ def main() -> int:
     # parse_decision: clean JSON, prose-wrapped JSON, and garbage.
     clean = tp.parse_decision('{"decision": "select:g1"}')
     noisy = tp.parse_decision('Here is my choice:\n{"decision": "human_required"}\nThanks.')
-    agy_envelope = tp.parse_decision(json.dumps({
-        "status": "SUCCESS",
-        "response": '{"decision": "select:g1"}',
-    }))
-    agy_grade_envelope = diff_grader.parse_grade(json.dumps({
-        "status": "SUCCESS",
-        "response": '{"grade": "sensitive", "rationale": "fixture"}',
-    }))
-    agy_failure_raises, _ = _ok(lambda: tp.parse_decision(json.dumps({
-        "status": "ERROR",
-        "response": '{"decision": "human_required"}',
-    })))
-    agy_grade_failure_raises, _ = _ok(lambda: diff_grader.parse_grade(json.dumps({
-        "status": "ERROR",
-        "response": '{"grade": "routine", "rationale": "fixture"}',
-    })))
+    grade = diff_grader.parse_grade('verdict: {"grade": "sensitive", "rationale": "fixture"}')
     garbage_raises, _ = _ok(lambda: tp.parse_decision("no json at all"))
     nodec_raises, _ = _ok(lambda: tp.parse_decision('{"other": 1}'))
     cases.append(case(
         "parse-decision-clean-noisy-garbage",
         clean == {"decision": "select:g1"}
         and noisy == {"decision": "human_required"}
-        and agy_envelope == {"decision": "select:g1"}
-        and agy_grade_envelope == {"grade": "sensitive", "rationale": "fixture"}
-        and agy_failure_raises
-        and agy_grade_failure_raises
+        and grade == {"grade": "sensitive", "rationale": "fixture"}
         and garbage_raises
         and nodec_raises,
         json.dumps({
             "clean": clean,
             "noisy": noisy,
-            "agy_envelope": agy_envelope,
-            "agy_grade_envelope": agy_grade_envelope,
-            "agy_failure_raises": agy_failure_raises,
-            "agy_grade_failure_raises": agy_grade_failure_raises,
+            "grade": grade,
         }),
     ))
 
-    # judge_argv: per-CLI shape, with and without a pinned model. D3: the judge
-    # posture is read-only; the executor posture lives in provider_argv and is
-    # asserted separately below. Retired adapters must fail closed.
-    claude_rejected, _ = _ok(lambda: executors.judge_argv("claude", "P"))
-    shapes_ok = (
-        executors.judge_argv("codex", "P") == ["codex", "exec", "--sandbox", "read-only", "--ephemeral", "P"]
-        and executors.judge_argv("codex", "P", "gpt-5.6-sol") == ["codex", "exec", "-m", "gpt-5.6-sol", "--sandbox", "read-only", "--ephemeral", "P"]
-        and executors.judge_argv("agy", "P", "gemini-3.1-pro-high") == [
-            "agy", "--model", "gemini-3.1-pro-high", "--mode", "plan",
-            "--disable-slash-commands", "--output-format", "json",
-            "--print-timeout", "300s", "--print", "P",
-        ]
-    )
-    unknown_raises, _ = _ok(lambda: executors.judge_argv("nope", "P"))
-    agy_model_required, _ = _ok(lambda: executors.judge_argv("agy", "P"))
+    # A judge is a declared command: the prompt fills its {prompt} slot and a
+    # pinned model its {model} slot.  No judge name is built in.
+    declarations = executors.validate_executor_declarations({
+        "reviewer": {"argv": [sys.executable, "-c", "pass", "{model}", "{prompt}"]},
+        "plain-reviewer": {"argv": [sys.executable, "-c", "pass", "{prompt}"]},
+    })
+    pinned = executors.declared_command(declarations, "reviewer", "P", "m1")
+    undeclared_raises, _ = _ok(lambda: executors.declared_command(declarations, "nope", "P"))
+    unslotted_raises, _ = _ok(lambda: executors.declared_command(declarations, "plain-reviewer", "P", "m1"))
     cases.append(case(
-        "judge-argv-shapes-with-model-pin",
-        shapes_ok and claude_rejected and unknown_raises and agy_model_required,
-        f"shapes_ok={shapes_ok} claude_rejected={claude_rejected} agy_model_required={agy_model_required}",
+        "judge-is-a-declared-command-with-slots",
+        pinned == [sys.executable, "-c", "pass", "m1", "P"] and undeclared_raises and unslotted_raises,
+        json.dumps({"pinned": pinned, "undeclared": undeclared_raises, "unslotted": unslotted_raises}),
     ))
 
-    # D3 mutation guard: no judge argv for any executor, with or without a
-    # model pin, carries a bypass token -- and the executor posture still does,
-    # so the split did not quietly make mutation runs read-only. Revert
-    # judge_argv to the old shape and the first half goes red; point
-    # hosted_provider_argv back at judge_argv and the second half goes red.
-    judge_shapes = [
-        executors.judge_argv(name, "P", model)
-        for name, model in (("codex", None), ("codex", "m"),
-                            ("agy", "gemini-3.1-pro-high"))
-    ]
-    judge_carries_bypass = [
-        argv for argv in judge_shapes if any(token in argv for token in executors.BYPASS_TOKENS)
-    ]
-    executor_keeps_bypass = (
-        any(token in executors.provider_argv("codex", "P", "m") for token in executors.BYPASS_TOKENS)
-        and any(token in executors.hosted_provider_argv("codex", "P", "m") for token in executors.BYPASS_TOKENS)
-    )
-    cases.append(case(
-        "judge-argv-never-carries-a-bypass-token-and-executor-argv-still-does",
-        not judge_carries_bypass and executor_keeps_bypass,
-        f"judge_carries_bypass={judge_carries_bypass} executor_keeps_bypass={executor_keeps_bypass}",
-    ))
-
-    # The shared process seam must detach IDE bridge state and never use the
-    # caller's repository as the judge cwd.
-    previous_ide_port = os.environ.get("GEMINI_CLI_IDE_SERVER_PORT")
-    os.environ["GEMINI_CLI_IDE_SERVER_PORT"] = "fixture-ide-port"
-    try:
-        bounded_stdout = executors.run_bounded_judge([
-            sys.executable,
-            "-c",
-            "import json, os; print(json.dumps({'status':'SUCCESS','response':'{\\\"decision\\\":\\\"select:g1\\\"}', 'cwd':os.getcwd(), 'ide_keys':sorted(k for k in os.environ if k.startswith('GEMINI_CLI_IDE_'))}))",
-        ], name="fixture")
-    finally:
-        if previous_ide_port is None:
-            os.environ.pop("GEMINI_CLI_IDE_SERVER_PORT", None)
-        else:
-            os.environ["GEMINI_CLI_IDE_SERVER_PORT"] = previous_ide_port
+    # The shared process seam never uses the caller's repository as the judge cwd.
+    bounded_stdout = executors.run_bounded_judge([
+        sys.executable,
+        "-c",
+        "import json, os; print(json.dumps({'decision': 'select:g1', 'cwd': os.getcwd()}))",
+    ], name="fixture")
     bounded_payload = json.loads(bounded_stdout)
     cases.append(case(
-        "bounded-judge-detaches-ide-and-target-cwd",
-        bounded_payload.get("ide_keys") == []
-        and Path(str(bounded_payload.get("cwd", ""))).name.startswith("lh-judge-"),
-        json.dumps({"cwd": bounded_payload.get("cwd"), "ide_keys": bounded_payload.get("ide_keys")}),
+        "bounded-judge-runs-outside-the-target-cwd",
+        Path(str(bounded_payload.get("cwd", ""))).name.startswith("lh-judge-"),
+        json.dumps({"cwd": bounded_payload.get("cwd")}),
     ))
 
     # make_cli_judge roundtrip via a fake CLI; failure and garbage raise.
@@ -221,7 +160,8 @@ def main() -> int:
         both_raises, _ = _ok(lambda: run(
             executor="fake", execute=True, goal_store_root=root / "b-goals", run_store_root=root / "b-runs",
             workspace_root=root / "b-ws", campaign=camp, source_repo=source, base_revision=base,
-            factory_overrides={"fake": fake_executor_factory}, judge_executor="codex", turning_point=JudgeSpy(),
+            factory_overrides={"fake": fake_executor_factory}, judge_executor="reviewer", turning_point=JudgeSpy(),
+            executor_declarations={"reviewer": {"argv": [sys.executable, "-c", "pass", "{prompt}"]}},
         ))
         cases.append(case("judge-executor-validation-rejected", unknown_raises and both_raises, f"unknown={unknown_raises} both={both_raises}"))
 
@@ -233,10 +173,14 @@ def main() -> int:
             "source_repo": str(source),
             "base_revision": base,
             "runtime": {"goal_store": "runtime/goals", "run_store": "runtime/runs", "workspace_root": "runtime/ws"},
+            "executors": {
+                "coder": {"argv": [sys.executable, "-c", "pass", "{base_url}", "{model}", "{prompt}"]},
+                "reviewer": {"argv": [sys.executable, "-c", "pass", "{model}", "{prompt}"]},
+            },
             "models": {
-                "execute": "local",
-                "execute_binding": {"runner": "codex", "base_url": "https://mock.example/v1", "model": "fixture-codex"},
-                "judge": "codex",
+                "execute": "coder",
+                "execute_binding": {"runner": "coder", "base_url": "https://mock.example/v1", "model": "fixture-model"},
+                "judge": "reviewer",
                 "judge_model": "fixture-judge",
             },
         }
@@ -245,10 +189,11 @@ def main() -> int:
         contract_path.write_text(json.dumps(contract), encoding="utf-8")
         kw = project_binding.resolve_project(contract_path)["run_kwargs"]
         mapping_ok = (
-            kw.get("executor") == "local"
-            and kw.get("executor_binding") == {"runner": "codex", "base_url": "https://mock.example/v1", "model": "fixture-codex"}
-            and kw.get("judge_executor") == "codex"
+            kw.get("executor") == "coder"
+            and kw.get("executor_binding") == {"runner": "coder", "base_url": "https://mock.example/v1", "model": "fixture-model"}
+            and kw.get("judge_executor") == "reviewer"
             and kw.get("judge_model") == "fixture-judge"
+            and sorted(kw.get("executor_declarations") or {}) == ["coder", "reviewer"]
         )
 
         def _bad_models(mutate) -> bool:
@@ -262,16 +207,18 @@ def main() -> int:
             except SystemExit:
                 return True
 
-        bad_missing = _bad_models(lambda c: c.__setitem__("models", {"judge": "codex"}))
+        bad_missing = _bad_models(lambda c: c.__setitem__("models", {"judge": "reviewer"}))
         bad_type = _bad_models(lambda c: c.__setitem__("models", {"execute": 42}))
-        bad_binding = _bad_models(lambda c: c["models"].__setitem__("execute_binding", {"runner": "codex", "model": "fixture-codex"}))
+        bad_binding = _bad_models(lambda c: c["models"].__setitem__("execute_binding", {"runner": "coder", "model": "fixture-model"}))
+        bad_executor = _bad_models(lambda c: c["executors"].__setitem__("relative", {"argv": ["agent", "{prompt}"]}))
         cases.append(case(
             "contract-models-resolve-and-validated",
-            mapping_ok and bad_missing and bad_type and bad_binding,
+            mapping_ok and bad_missing and bad_type and bad_binding and bad_executor,
             json.dumps({"executor": kw.get("executor"), "binding": kw.get("executor_binding"), "judge": kw.get("judge_executor")}),
         ))
 
-    # resolve_cli: PATH 外的標準安裝位置可解（systemd/cron 環境沒有 login PATH）。
+    # resolve_cli resolves an explicit path or a PATH entry; it never guesses a
+    # per-user install location.
     fake_home = Path(tempfile.mkdtemp())
     fake_bin = fake_home / ".local" / "bin"
     fake_bin.mkdir(parents=True)
@@ -284,7 +231,12 @@ def main() -> int:
     old_home = os.environ.get("HOME")
     os.environ["HOME"] = str(fake_home)
     try:
-        resolved = executors.resolve_cli("fake-cli-x1")
+        guessed = None
+        try:
+            guessed = executors.resolve_cli("fake-cli-x1")
+        except FileNotFoundError:
+            guessed = None
+        resolved = executors.resolve_cli(str(fake_cli))
         non_executable_rejected = []
         for requested in (non_executable_cli.name, str(non_executable_cli)):
             try:
@@ -314,12 +266,14 @@ def main() -> int:
     finally:
         os.environ["PATH"] = old_path
     cases.append(case(
-        "resolve-cli-falls-back-to-standard-locations",
-        resolved == str(fake_cli.resolve())
+        "resolve-cli-uses-explicit-paths-and-path-only",
+        guessed is None
+        and resolved == str(fake_cli.resolve())
         and missing_raises
         and resolved_on_path == str(path_cli.resolve())
         and resolved_on_path_alias == str(path_cli.resolve()),
         json.dumps({
+            "guessed": guessed,
             "resolved": resolved,
             "missing_raises": missing_raises,
             "on_path": resolved_on_path,

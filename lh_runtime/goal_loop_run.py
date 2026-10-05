@@ -48,19 +48,8 @@ from knowledge_store import KnowledgeStore
 from run_store import RunStore
 from status_snapshot import DEFAULT_EXECUTOR_TIMEOUT_SECONDS
 
-# Model-agnostic executor registry. Add a CLI preset here, not a hardcoded model.
-EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
-    "codex": executors.CODEX,
-}
-# Execution hosts that start the provider themselves (no CLI preset of their
-# own).  Kept apart so EXECUTORS stays the closed set of CLI presets.
-HOST_EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
-    "local": executors.LOCAL,
-}
-# Judge-only adapters are intentionally separate from the producer registry;
-# AGY never becomes a mutation executor or capability-resource runner here.
-JUDGE_EXECUTORS = {"agy", "codex"}
-CAPABILITY_EVALUATION_EXECUTORS = {"codex"}
+# No executor, judge, or evaluator is built in: every one is a declaration
+# (cli_agent_executor.validate_executor_declarations) or a caller's factory.
 EXECUTION_HOST_SCHEMA = "lh-execution-host-binding/v1"
 BOOTSTRAP_AUTHORITY_SCHEMA = "lh-bootstrap-authority/v1"
 EXECUTION_HOSTS = {"headless_cli"}
@@ -172,31 +161,34 @@ def resolve_executor(
     name: str,
     *,
     execute: bool,
+    declarations: dict[str, dict[str, Any]] | None = None,
     timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     provider_binding: dict[str, str] | None = None,
     factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
     execution_fence_port: execution_fences.ExecutionFencePort | None = None,
 ) -> ModelRunner | None:
-    """Fail closed on an unknown executor (even in dry-run). Return the real
-    model only when ``execute`` is true; dry-run returns None so nothing runs."""
-    factories = {**EXECUTORS, **HOST_EXECUTORS, **(factory_overrides or {})}
-    if name not in factories:
-        raise ValueError(f"unknown executor: {name!r}; choose one of {sorted(factories)}")
+    """Refuse an undeclared executor (even in dry-run). Return the real model
+    only when ``execute`` is true; dry-run returns None so nothing runs."""
+    declared = dict(declarations or {})
+    factories = dict(factory_overrides or {})
+    if name not in factories and name not in declared:
+        raise ValueError(f"unknown executor: {name!r}; declared: {sorted({*declared, *factories})}")
     if provider_binding is not None:
-        if name != "local":
-            raise ValueError("provider_binding is currently supported only with executor='local'")
-        runner = provider_binding.get("runner") if isinstance(provider_binding, dict) else None
-        if not isinstance(runner, str) or not runner.strip():
-            raise ValueError("provider_binding.runner is required; no provider default is allowed")
-        executors._validate_provider_binding(provider_binding, agent=runner)
+        executors._validate_provider_binding(provider_binding, agent=name)
     if not execute:
         return None
-    kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
-    if provider_binding is not None:
-        kwargs["provider_binding"] = provider_binding
-    if name not in (factory_overrides or {}):
-        kwargs["execution_fence_port"] = execution_fence_port
-    return factories[name](**kwargs)
+    if name in factories:
+        kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
+        if provider_binding is not None:
+            kwargs["provider_binding"] = provider_binding
+        return factories[name](**kwargs)
+    return executors.make_declared_agent(
+        name,
+        declared,
+        provider_binding=provider_binding,
+        timeout_seconds=timeout_seconds,
+        execution_fence_port=execution_fence_port,
+    )
 
 
 def _invoke_bound_model(
@@ -279,10 +271,12 @@ class CapabilityRoutingSession:
         execution_host_binding: dict[str, Any] | None = None,
         factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
         execution_fence_port: execution_fences.ExecutionFencePort | None = None,
+        executor_declarations: dict[str, dict[str, Any]] | None = None,
     ):
         self.timeout_seconds = timeout_seconds
         self.run_store_root = Path(run_store_root)
         self.factories = dict(factory_overrides or {})
+        self.executor_declarations = dict(executor_declarations or {})
         self.execution_host_binding = execution_host_binding
         self.execution_fence_port = (
             execution_fence_port
@@ -296,8 +290,8 @@ class CapabilityRoutingSession:
             if resource["executor_kind"] != "model":
                 continue
             runner = resource["runner"]
-            if runner not in EXECUTORS and runner not in HOST_EXECUTORS and runner not in self.factories:
-                raise ValueError(f"no runtime adapter registered for resource runner {runner!r}")
+            if runner not in self.executor_declarations and runner not in self.factories:
+                raise ValueError(f"no declared executor for resource runner {runner!r}")
             if runner in self.factories and (
                 resource.get("model") is not None
                 or resource.get("provider_binding") is not None
@@ -333,12 +327,11 @@ class CapabilityRoutingSession:
                 "workspace_write/external/external execution envelope"
             )
 
-    @staticmethod
-    def _validate_evaluation_resource(resource: dict[str, Any]) -> None:
-        if resource["runner"] not in CAPABILITY_EVALUATION_EXECUTORS:
+    def _validate_evaluation_resource(self, resource: dict[str, Any]) -> None:
+        if resource["runner"] not in self.executor_declarations:
             raise ValueError(
-                "evaluate_transition requires a no-write adapter; choose one of "
-                f"{sorted(CAPABILITY_EVALUATION_EXECUTORS)}, got {resource['runner']!r}"
+                "evaluate_transition requires a declared executor; declared: "
+                f"{sorted(self.executor_declarations)}, got {resource['runner']!r}"
             )
         if resource.get("provider_binding") is not None:
             raise ValueError("evaluate_transition does not support a provider binding")
@@ -367,8 +360,9 @@ class CapabilityRoutingSession:
             raise ValueError(
                 "capability production model requires execution_host='headless_cli'"
             )
-        return executors.make_named_cli_agent(
+        return executors.make_declared_agent(
             runner,
+            self.executor_declarations,
             model=resource.get("model"),
             provider_binding=resource.get("provider_binding"),
             timeout_seconds=timeout_seconds,
@@ -704,16 +698,19 @@ def _make_capability_evaluator(
         error: Exception | None = None
         try:
             prompt = prompt_builder(snapshot)
-            argv = executors.evaluation_argv(
+            argv = executors.declared_command(
+                routing.executor_declarations,
                 resource["runner"],
                 prompt,
                 resource["model"],
-                json_schema=output_schema,
             )
-            argv[0] = executors.resolve_cli(argv[0])
             env = dict(os.environ)
-            env["PATH"] = f"{Path(argv[0]).parent}:{env.get('PATH', '')}"
             routing.run_store_root.mkdir(parents=True, exist_ok=True)
+            if output_schema is not None:
+                schema_path = routing.run_store_root / "evaluation-schemas" / f"{kind}.json"
+                schema_path.parent.mkdir(parents=True, exist_ok=True)
+                schema_path.write_text(json.dumps(output_schema, sort_keys=True), encoding="utf-8")
+                env[executors.OUTPUT_SCHEMA_ENV] = str(schema_path)
             proc = subprocess.run(
                 argv,
                 capture_output=True,
@@ -794,21 +791,20 @@ def _evaluation_payload(
     *,
     require_structured: bool = False,
 ) -> str:
-    """Return the payload emitted by the explicitly configured adapter."""
+    """Return the payload a declared evaluator emitted on its last stdout line."""
     del runner
-    if require_structured:
-        try:
-            envelope = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            raise ValueError("schema-bound evaluation output is not JSON") from exc
-        if not isinstance(envelope, dict):
-            raise ValueError("schema-bound evaluation output is not an object")
-        if envelope.get("is_error") is True or envelope.get("subtype") == "error" or envelope.get("status") in {"ERROR", "error"}:
-            raise ValueError("schema-bound evaluation envelope reports an error")
-        if isinstance(envelope.get("structured_output"), dict):
-            return json.dumps(envelope["structured_output"], ensure_ascii=False, sort_keys=True)
-        raise ValueError("schema-bound evaluation has no structured_output")
-    return stdout
+    if not require_structured:
+        return stdout
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("schema-bound evaluation output is empty")
+    try:
+        value = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise ValueError("schema-bound evaluation output is not JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("schema-bound evaluation output is not an object")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _compatibility_model(
@@ -922,6 +918,7 @@ def run(
     judge_executor: str | None = None,
     judge_model: str | None = None,
     executor_binding: dict[str, str] | None = None,
+    executor_declarations: dict[str, dict[str, Any]] | None = None,
     execution_graph: dict[str, Any] | None = None,
     execution_host: str | None = None,
     bootstrap_authority: dict[str, str] | None = None,
@@ -930,6 +927,7 @@ def run(
     quota_reader: Callable[[], dict[str, Any] | None] | None = None,
     daily_soft_cap_usd: float | None = 2.0,
     daily_hard_cap_usd: float | None = 5.0,
+    pricing: dict[str, dict[str, float]] | None = None,
     knowledge_store_root: str | Path | None = None,
     knowledge_repo_roots: tuple[str | Path, ...] = (),
     dispatch_envelope: dict[str, Any] | None = None,
@@ -961,6 +959,7 @@ def run(
         execution_host,
         bootstrap_authority,
     )
+    declarations = executors.validate_executor_declarations(executor_declarations)
     routing: CapabilityRoutingSession | None = None
     preview_bindings: list[dict[str, Any]] = []
     has_evaluate_node = False
@@ -982,6 +981,7 @@ def run(
             execution_host_binding=execution_host_binding,
             factory_overrides=factory_overrides,
             execution_fence_port=fence_port,
+            executor_declarations=declarations,
         )
         preview_bindings = routing.preview()
         if (
@@ -1012,15 +1012,14 @@ def run(
             raise ValueError("executor is required when execution_graph is absent")
         if judge_executor is not None and turning_point is not None:
             raise ValueError("judge_executor and turning_point are mutually exclusive")
-        if judge_executor == "agy" and (
-            not isinstance(judge_model, str) or not judge_model.strip()
-        ):
-            raise ValueError("judge_executor='agy' requires judge_model for process-bound routing")
+        if judge_executor is not None and judge_executor not in declarations:
+            raise ValueError(f"unknown judge_executor: {judge_executor!r}; declared: {sorted(declarations)}")
         resolved_executor = executor
         resolved_judge = judge_executor
         routing_mode = "compatibility"
     plan = {
         "executor": resolved_executor,
+        "executors": sorted(declarations),
         "execute": execute,
         "campaign_id": campaign["campaign_id"],
         "goal_store": str(goal_store_root),
@@ -1078,6 +1077,7 @@ def run(
         raw_model = resolve_executor(
             resolved_executor,
             execute=execute,
+            declarations=declarations,
             timeout_seconds=executor_timeout_seconds,
             provider_binding=executor_binding,
             factory_overrides=factory_overrides,
@@ -1135,11 +1135,8 @@ def run(
             },
         )
     elif judge_executor is not None:
-        factories = {**EXECUTORS, **(factory_overrides or {})}
-        if judge_executor not in JUDGE_EXECUTORS:
-            raise ValueError(f"unknown judge_executor: {judge_executor!r}; choose one of {sorted(JUDGE_EXECUTORS)}")
         turning_point = tp.make_cli_judge(
-            lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
+            lambda prompt: executors.declared_command(declarations, judge_executor, prompt, judge_model),
             name=judge_executor,
         )
         # W6a: the same judge CLI layering carries the challenger grill before
@@ -1147,7 +1144,7 @@ def run(
         # original max_attempts behavior), so a missing models.judge config
         # never blocks the loop.
         grill_runner = grill_loop.make_cli_judge(
-            lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
+            lambda prompt: executors.declared_command(declarations, judge_executor, prompt, judge_model),
             name=judge_executor,
         )
     worker = build_worker(
@@ -1203,6 +1200,7 @@ def run(
         quota_reader=quota_reader,
         daily_soft_cap_usd=daily_soft_cap_usd,
         daily_hard_cap_usd=daily_hard_cap_usd,
+        pricing=pricing,
         sleep_fn=sleep_fn,
         turning_point=turning_point,
     )
@@ -1211,10 +1209,12 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the autonomous driver with a real coding-agent executor (opt-in)")
-    parser.add_argument("--executor", default=None, choices=sorted({**EXECUTORS, **HOST_EXECUTORS}),
-                        help="coding executor; defaults to the contract's models.execute when --contract is used")
-    parser.add_argument("--judge-executor", default=None, choices=sorted(JUDGE_EXECUTORS),
-                        help="optional turning-point judge executor (M1 model routing); defaults to the contract's models.judge")
+    parser.add_argument("--executor", default=None,
+                        help="declared coding executor; defaults to the contract's models.execute when --contract is used")
+    parser.add_argument("--executors", default=None,
+                        help="JSON file of executor declarations, for runs without a contract")
+    parser.add_argument("--judge-executor", default=None,
+                        help="optional declared turning-point judge executor; defaults to the contract's models.judge")
     parser.add_argument("--judge-model", default=None, help="optional model id pinned for the judge (e.g. a reasoning-tier model)")
     parser.add_argument(
         "--execution-host",
@@ -1286,6 +1286,10 @@ def main(argv: list[str] | None = None) -> int:
             "run_store_root": args.run_store,
             "workspace_root": args.workspace_root,
         }
+    if args.executors:
+        if args.contract:
+            parser.error("--executors is for runs without a contract; declare executors in the contract")
+        binding["executor_declarations"] = json.loads(Path(args.executors).read_text(encoding="utf-8"))
     # explicit flags still override / supply the optional gates the contract does not carry
     binding.setdefault("pause_flag", args.pause_flag)
     if args.status_snapshot_out:

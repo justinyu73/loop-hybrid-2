@@ -148,13 +148,13 @@ def graph(*, first_quality: float = 9, second_quality: float = 8, evaluate: bool
                     ["repo_edit", "test_reasoning"], quality=second_quality,
                 ),
                 _resource(
-                    "evaluate-c", "codex", "provider-c",
+                    "evaluate-c", "evaluator", "provider-c",
                     ["bounded_judgment"], quality=7, model="ambient:fake-b",
                     permission="read_only", network="external",
                     data_boundary="external", tools=[],
                 ),
                 _resource(
-                    "evaluate-d", "codex", "provider-d",
+                    "evaluate-d", "evaluator", "provider-d",
                     ["bounded_judgment"], quality=6, model="judge-independent",
                     permission="read_only", network="external",
                     data_boundary="external", tools=[],
@@ -170,12 +170,22 @@ def graph(*, first_quality: float = 9, second_quality: float = 8, evaluate: bool
     }
 
 
+# The evaluator prints one closed JSON object on its last line; the coder is a
+# placeholder that capability routing never launches in this canary.
+EVALUATOR_CODE = ("import json; print(json.dumps({'decision': 'runner-fixable', "
+                  "'diagnosis': 'fixture diagnosis'}))")
+DECLARATIONS = {
+    "evaluator": {"argv": [sys.executable, "-c", EVALUATOR_CODE, "{model}", "{prompt}"]},
+    "coder": {"argv": [sys.executable, "-c", "pass", "{model}", "{prompt}"]},
+}
+
+
 def _bound_graph(base_url: str) -> dict[str, Any]:
     candidate = graph(evaluate=False)
     resource = candidate["registry"]["resources"][0]
-    resource["runner"] = "codex"
+    resource["runner"] = "coder"
     resource["provider_binding"] = {
-        "runner": "codex",
+        "runner": "coder",
         "base_url": base_url,
         "model": "bound-edit-a",
     }
@@ -466,28 +476,22 @@ def main() -> int:
         "evaluate_transition",
         selected_nodes=selected_second,
     )
-    retired_evaluation_rejected, retired_evaluation_detail = _rejects(
-        lambda: executors.evaluation_argv("claude", "PROMPT", "ambient:fake-b")
+    undeclared_evaluation_rejected, undeclared_evaluation_detail = _rejects(
+        lambda: executors.declared_command(DECLARATIONS, "undeclared", "PROMPT", "ambient:fake-b")
     )
-    codex_argv = executors.evaluation_argv(
-        "codex",
-        "PROMPT",
-        "judge-independent",
-    )
+    evaluator_argv = executors.declared_command(DECLARATIONS, "evaluator", "PROMPT", "judge-independent")
     cases.append(case(
-        "mm5-evaluation-resolves-after-actual-attempt-with-no-write-adapter",
+        "mm5-evaluation-resolves-after-actual-attempt-with-a-declared-evaluator",
         evaluation_first is not None
         and evaluation_second is not None
         and evaluation_first["binding"]["binding_id"] == "evaluate-c"
         and evaluation_second["binding"]["binding_id"] == "evaluate-d"
-        and retired_evaluation_rejected
-        and "--sandbox" in codex_argv
-        and "read-only" in codex_argv
-        and "--dangerously-bypass-approvals-and-sandbox" not in codex_argv,
+        and undeclared_evaluation_rejected
+        and evaluator_argv[-2:] == ["judge-independent", "PROMPT"],
         (
             f"first={evaluation_first and evaluation_first['binding']} "
             f"second={evaluation_second and evaluation_second['binding']} "
-            f"retired={retired_evaluation_detail} codex={codex_argv}"
+            f"undeclared={undeclared_evaluation_detail} evaluator={evaluator_argv[-2:]}"
         ),
     ))
 
@@ -497,6 +501,7 @@ def main() -> int:
         campaign = make_campaign("campaign-capability")
         dry_spy = FactorySpy()
         dry = run(
+            executor_declarations=DECLARATIONS,
             execution_graph=graph(evaluate=False),
             execute=False,
             goal_store_root=root / "dry-goals",
@@ -521,6 +526,7 @@ def main() -> int:
         _seed(root / "goals", campaign, source, base)
         with explicit_runstore_factory(fixture_glr):
             result = run(
+                executor_declarations=DECLARATIONS,
                 execution_graph=graph(evaluate=False),
                 execute=True,
                 goal_store_root=root / "goals",
@@ -550,6 +556,7 @@ def main() -> int:
         evaluation_graph = graph()
         evaluation_session = CapabilityRoutingSession(
             evaluation_graph,
+            executor_declarations=DECLARATIONS,
             timeout_seconds=30,
             run_store_root=root / "evaluation-runs",
             factory_overrides={"fake-a": FactorySpy(), "fake-b": FactorySpy()},
@@ -568,6 +575,7 @@ def main() -> int:
         )
         restarted_session = CapabilityRoutingSession(
             evaluation_graph,
+            executor_declarations=DECLARATIONS,
             timeout_seconds=30,
             run_store_root=root / "runs",
             factory_overrides={"fake-a": FactorySpy(), "fake-b": FactorySpy()},
@@ -575,20 +583,6 @@ def main() -> int:
         persisted_resolution = restarted_session.resolve_evaluation(
             {"run_id": receipt["run_id"]}
         )
-        fake_bin = root / "fake-bin"
-        fake_bin.mkdir()
-        fake_codex = fake_bin / "codex"
-        fake_codex.write_text(
-            "#!/bin/sh\n"
-            "printf '%s\\n' "
-            "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
-            "\"result\":\"\",\"structured_output\":"
-            "{\"decision\":\"runner-fixable\",\"diagnosis\":\"fixture diagnosis\"}}'\n",
-            encoding="utf-8",
-        )
-        fake_codex.chmod(0o755)
-        original_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{fake_bin}:{original_path}"
         evaluator = _make_capability_evaluator(
             restarted_session,
             kind="grill",
@@ -604,13 +598,10 @@ def main() -> int:
                 "additionalProperties": False,
             },
         )
-        try:
-            evaluator_result = evaluator({
-                "run_id": receipt["run_id"],
-                "next_attempt": 2,
-            })
-        finally:
-            os.environ["PATH"] = original_path
+        evaluator_result = evaluator({
+            "run_id": receipt["run_id"],
+            "next_attempt": 2,
+        })
         evaluation_receipts = sorted(
             (root / "runs" / "routing-evidence").glob(
                 "evaluation-*/receipt.json"
@@ -669,6 +660,7 @@ def main() -> int:
         persisted_path.write_text(original_receipt, encoding="utf-8")
         volatile_session = CapabilityRoutingSession(
             evaluation_graph,
+            executor_declarations=DECLARATIONS,
             timeout_seconds=30,
             run_store_root=root / "volatile-runs",
             factory_overrides={"fake-a": FactorySpy(), "fake-b": FactorySpy()},
@@ -743,6 +735,7 @@ def main() -> int:
             raise AssertionError("ordinal fixture Attempt 2 finish was fenced")
         ordinal_session = CapabilityRoutingSession(
             evaluation_graph,
+            executor_declarations=DECLARATIONS,
             timeout_seconds=30,
             run_store_root=ordinal_root,
             factory_overrides={"fake-a": FactorySpy(), "fake-b": FactorySpy()},
@@ -767,6 +760,7 @@ def main() -> int:
                 resource["health"] = "unavailable"
         no_evaluator_session = CapabilityRoutingSession(
             no_evaluator_graph,
+            executor_declarations=DECLARATIONS,
             timeout_seconds=30,
             run_store_root=root / "no-evaluator-runs",
             factory_overrides={"fake-a": FactorySpy(), "fake-b": FactorySpy()},
@@ -859,6 +853,7 @@ def main() -> int:
         unavailable_run_root = root / "unavailable-runs"
         unavailable_session = CapabilityRoutingSession(
             unavailable_graph,
+            executor_declarations=DECLARATIONS,
             timeout_seconds=30,
             run_store_root=unavailable_run_root,
             factory_overrides={
@@ -910,7 +905,8 @@ def main() -> int:
                 "workspace_root": "contract/ws",
             },
             "execution_graph": graph(evaluate=False),
-            "models": {"execute": "codex"},
+            "executors": DECLARATIONS,
+            "models": {"execute": "coder"},
         }
         contract_path = root / "conflict.json"
         contract_path.write_text(json.dumps(contract), encoding="utf-8")
@@ -934,17 +930,17 @@ def main() -> int:
             json.dumps(invalid_project_url_results, sort_keys=True),
         ))
         cli_graph = graph(evaluate=False)
-        cli_graph["registry"]["resources"][0]["runner"] = "codex"
+        cli_graph["registry"]["resources"][0]["runner"] = "coder"
         cli_graph["registry"]["resources"][0]["model"] = "deployment-a"
         cli_graph["registry"]["resources"][0]["model_family"] = "deployment-a"
-        cli_graph["registry"]["resources"][0]["endpoint_ref"] = "ambient:codex"
+        cli_graph["registry"]["resources"][0]["endpoint_ref"] = "ambient:coder"
         cli_graph["registry"]["resources"][0]["trust_tier"] = "process_bound"
         cli_graph["registry"]["resources"][0]["network_access"] = "external"
         cli_graph["registry"]["resources"][0]["data_boundary"] = "external"
-        cli_graph["registry"]["resources"][1]["runner"] = "codex"
+        cli_graph["registry"]["resources"][1]["runner"] = "coder"
         cli_graph["registry"]["resources"][1]["model"] = "deployment-b"
         cli_graph["registry"]["resources"][1]["model_family"] = "deployment-b"
-        cli_graph["registry"]["resources"][1]["endpoint_ref"] = "ambient:codex"
+        cli_graph["registry"]["resources"][1]["endpoint_ref"] = "ambient:coder"
         cli_graph["registry"]["resources"][1]["trust_tier"] = "process_bound"
         cli_graph["registry"]["resources"][1]["network_access"] = "external"
         cli_graph["registry"]["resources"][1]["data_boundary"] = "external"
@@ -1010,7 +1006,7 @@ def main() -> int:
             override_rejected, override_detail = _rejects(
                 lambda: run_main([
                     "--contract", str(contract_path),
-                    "--executor", "codex",
+                    "--executor", "coder",
                 ])
             )
         cases.append(case(
@@ -1026,7 +1022,7 @@ def main() -> int:
             "mm11-execution-host-is-separate-and-bootstrap-bound",
             hosted_exit == 0
             and hosted_result["plan"]["execution_host"]["host_id"] == "headless_cli"
-            and hosted_binding["runner"] == "codex"
+            and hosted_binding["runner"] == "coder"
             and hosted_binding["execution_host"]["host_id"] == "headless_cli"
             and hosted_binding["execution_host"]["bootstrap_authority"]["decision_id"]
             == "LH-EXTERNAL-BOOTSTRAP-001"
@@ -1047,7 +1043,7 @@ def main() -> int:
         ))
 
         contract.pop("execution_graph")
-        contract["models"] = {"execute": "codex"}
+        contract["models"] = {"execute": "coder"}
         contract_path.write_text(json.dumps(contract), encoding="utf-8")
         legacy = resolve_project(contract_path)["run_kwargs"]
         legacy_plan = run(
@@ -1059,6 +1055,7 @@ def main() -> int:
             source_repo=legacy["source_repo"],
             base_revision=legacy["base_revision"],
             executor=legacy["executor"],
+            executor_declarations=legacy["executor_declarations"],
             compatibility_authority=legacy["compatibility_authority"],
         )
         cases.append(case(

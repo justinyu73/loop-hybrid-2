@@ -118,6 +118,7 @@ def _write_contract(root: Path, source: Path, base: str, *, source_ref: str | No
             "workspace_root": "runtime/ws",
             "status_snapshot_out": "runtime/platform_status.json",
         },
+        "executors": {"coder": {"argv": [sys.executable, "-c", "pass", "{prompt}"]}},
     }
     path = root / "project_runtime_contract.json"
     path.write_text(json.dumps(contract), encoding="utf-8")
@@ -226,7 +227,7 @@ def main() -> int:
             cli_status = goal_loop_main([
                 "--contract", str(configured_contract),
                 "--instance-config", str(instance.path),
-                "--executor", "codex",
+                "--executor", "coder",
             ])
         config_consumed = (
             cli_status == 0

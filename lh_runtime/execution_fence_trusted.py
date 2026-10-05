@@ -29,12 +29,17 @@ else:
 POLICY_SCHEMA = "lh-trusted-project-policy/v1"
 OPERATOR_SCHEMA = "lh-trusted-project-operator-binding/v1"
 BACKEND_ID = "trusted-project-local"
-ADAPTER_ID = "codex-exec-jsonl-v1"
+ADAPTER_ID = "provider-jsonl-v1"
 POLICY_FIELDS = {"schema", "mode", "project_id", "goal_id", "goal_revision",
     "operator_binding_ref", "max_cli_launches", "max_wall_seconds", "max_observed_tokens",
     "unknown_usage", "expires_at"}
 PROVIDER_FIELDS = {"provider_id", "adapter_id", "executable", "executable_digest", "model",
-    "endpoint", "auth_locator", "tool_path"}
+    "arguments", "environment", "tool_path"}
+OUTPUT_SCHEMA_ENV = "LH_PROVIDER_OUTPUT_SCHEMA"
+# The fence owns these; an operator-declared provider environment cannot set them.
+RESERVED_ENVIRONMENT = frozenset({"PATH", "HOME", "TMPDIR", "PYTHONDONTWRITEBYTECODE",
+    "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "LANG", "LC_ALL", OUTPUT_SCHEMA_ENV})
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 CONTEXT_FIELDS = {"schema", "project_id", "goal_id", "goal_revision", "execution_binding_digest",
     "policy_digest", "operator_binding_digest", "phase", "provider_role", "budget_reservation_key",
     "deadline_at", "command_digest", "input_digest", "environment_digest", "output_schema_digest"}
@@ -113,12 +118,15 @@ def validate_trusted_operator_binding(raw):
         if (not _digest(provider["executable_digest"]) or not os.access(executable, os.X_OK)
                 or "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest() != provider["executable_digest"]):
             _reject("trusted_executable_mismatch")
-        if provider["endpoint"] != {"kind": "codex_chatgpt", "base_url": None}:
-            _reject("trusted_endpoint_unsupported")
-        _shape(provider["auth_locator"], {"kind", "path"}, "trusted_auth_locator_invalid")
-        if provider["auth_locator"]["kind"] != "codex_home":
-            _reject("trusted_auth_locator_invalid")
-        _path(provider["auth_locator"]["path"], directory=True)
+        arguments = provider["arguments"]
+        if not isinstance(arguments, list) or any(not _text(item) for item in arguments):
+            _reject("trusted_arguments_invalid")
+        environment = provider["environment"]
+        if (not isinstance(environment, Mapping)
+                or any(not isinstance(name, str) or _ENV_NAME_RE.fullmatch(name) is None
+                       or name in RESERVED_ENVIRONMENT or not isinstance(value, str) or "\x00" in value
+                       for name, value in environment.items())):
+            _reject("trusted_environment_invalid")
         paths = provider["tool_path"]
         if not isinstance(paths, list) or not paths:
             _reject("trusted_tool_path_invalid")
@@ -344,7 +352,7 @@ class TrustedProjectExecutionFence(ExecutionFencePort):
             if key in supplied:
                 result[key] = supplied[key]
         if role is not None:
-            result["CODEX_HOME"] = provider["auth_locator"]["path"]
+            result.update(provider["environment"])
         else:
             for key in ("LH_HOST_TMP_ROOT", "LH_HOST_STATE_ROOT", "LH_STATE_ROOT", "GIT_OPTIONAL_LOCKS"):
                 if key in supplied:
@@ -421,9 +429,10 @@ class TrustedProjectExecutionFence(ExecutionFencePort):
                 _reject("trusted_executable_mismatch")
             validate_trusted_operator_binding(self.operator)
             if context["output_schema_digest"] is not None:
-                if argv.count("--output-schema") != 1:
+                schema_value = (env_projection or {}).get(OUTPUT_SCHEMA_ENV)
+                if not isinstance(schema_value, str):
                     _reject("trusted_output_schema_mismatch")
-                schema_path = _path(argv[argv.index("--output-schema") + 1])
+                schema_path = _path(schema_value)
                 if "sha256:" + hashlib.sha256(schema_path.read_bytes()).hexdigest() != context["output_schema_digest"]:
                     _reject("trusted_output_schema_mismatch")
             del self._prepared[key]

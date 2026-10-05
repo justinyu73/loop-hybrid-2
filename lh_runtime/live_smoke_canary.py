@@ -8,9 +8,10 @@ Two modes:
   command event -> admission -> dispatch -> executor -> lamp + value gate ->
   completed. No provider binary is touched, not even ``--version``.
 - ``--live`` (opt-in, never in verify.sh): the same chain with a REAL coding
-  CLI (default codex, ``--executor`` to switch). Preflight-skips (exit 0,
-  status "skip") when the CLI is missing or unauthenticated — a live smoke
-  must never go red on an absent provider. When it runs, it asserts the run
+  CLI, named by ``--executor`` from the ``--executors`` declaration file.
+  Preflight-skips (exit 0, status "skip") when the executor is not declared or
+  its executable is missing — a live smoke must never go red on an absent
+  provider. When it runs, it asserts the run
   verified through the real model path (lamp is red-on-base, so no precheck),
   the goal completed, and the billed usage is a sane measured delta (W7
   phantom guard: total tokens well under 2M, cost under $1).
@@ -19,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -33,7 +33,7 @@ import goal_loop_run as glr
 import token_cost
 from _fixture import make_source_repo
 from campaign_compiler import CAMPAIGN_SCHEMA
-from cli_agent_executor import resolve_cli
+import cli_agent_executor as executors
 from goal_store import GoalStore
 from run_store import RunStore
 from p7_native_runstore_fixture import explicit_runstore_factory
@@ -46,6 +46,8 @@ GOAL_ID = f"{CAMPAIGN_ID}:{STAGE_ID}"
 MARKER_LINE = "lh-live-ok"
 MAX_LIVE_TOTAL_TOKENS = 2_000_000
 MAX_LIVE_COST_USD = 1.0
+# The offline fixture prices its own model; the engine ships no prices.
+FIXTURE_PRICING = {"fixture-model": {"input": 1.0, "output": 1.0, "cache_read": 0.1}}
 
 
 def _campaign() -> dict:
@@ -109,7 +111,8 @@ def _receipt(run_store: RunStore, run_id: str) -> dict[str, Any]:
     return json.loads((run_store.root / meta["receipt_ref"]).read_text(encoding="utf-8"))
 
 
-def _drive(root: Path, source: Path, base: str, *, executor: str, factory_overrides=None) -> dict[str, Any]:
+def _drive(root: Path, source: Path, base: str, *, executor: str, factory_overrides=None,
+           executor_declarations=None) -> dict[str, Any]:
     goal_store = GoalStore(root / "goals")
     _seed_goal(goal_store, source, base)
     return glr.run(
@@ -125,6 +128,7 @@ def _drive(root: Path, source: Path, base: str, *, executor: str, factory_overri
         idle_limit=1,
         sleep_fn=lambda _seconds: None,
         factory_overrides=factory_overrides,
+        executor_declarations=executor_declarations,
     )
 
 
@@ -137,7 +141,7 @@ def _fake_factory(calls: list[dict]):
             (src / "live-marker.txt").write_text(MARKER_LINE + "\n", encoding="utf-8")
             return {
                 "summary": "w9d offline fixture executor",
-                "usage": token_cost.measured_usage(model="codex", input_tokens=2, output_tokens=1),
+                "usage": token_cost.measured_usage(model="fixture-model", input_tokens=2, output_tokens=1),
             }
         return model
     return factory
@@ -165,6 +169,7 @@ def _dry() -> int:
                 "fake",
                 persistent=True,
                 factory_overrides={"fake": _fake_factory(persistent_calls)},
+                pricing=FIXTURE_PRICING,
             )
         cases = [
             {"id": "production-entry-executes-the-chain",
@@ -211,25 +216,12 @@ def _dry() -> int:
     return 0 if not failures else 1
 
 
-def _preflight(executor: str) -> str | None:
-    """Cheap conservative probe; a skip reason, or None when the CLI looks usable."""
-    try:
-        binary = resolve_cli(executor)
-    except (FileNotFoundError, ValueError) as exc:
-        return f"executor CLI unavailable: {exc}"
-    try:
-        version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"executor CLI probe failed: {exc}"
-    if version.returncode != 0:
-        return f"executor CLI --version exited {version.returncode}"
-    if executor == "codex":
-        try:
-            login = subprocess.run([binary, "login", "status"], capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return f"codex auth probe failed: {exc}"
-        if login.returncode != 0:
-            return "codex is not authenticated"
+def _preflight(executor: str, declarations: dict[str, Any]) -> str | None:
+    """A skip reason, or None when the declared executable is present."""
+    if executor not in declarations:
+        return f"executor {executor!r} is not declared"
+    if not Path(declarations[executor]["argv"][0]).is_file():
+        return "declared executable is missing"
     return None
 
 
@@ -239,9 +231,12 @@ def _live_at(
     *,
     persistent: bool,
     factory_overrides: dict[str, Any] | None = None,
+    declarations: dict[str, Any] | None = None,
+    pricing: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     source, base = make_source_repo(root)
-    result = _drive(root, source, base, executor=executor, factory_overrides=factory_overrides)
+    result = _drive(root, source, base, executor=executor, factory_overrides=factory_overrides,
+                    executor_declarations=declarations)
     run_store = RunStore(root / "runs")
     run = _only_run(run_store)
     receipt_meta = run_store.latest_receipt(run["run_id"])
@@ -249,7 +244,7 @@ def _live_at(
     verification = receipt["verification"]
     usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
     total_tokens = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)) + int(usage.get("cache_read_tokens", 0))
-    cost = token_cost.compute_cost(usage)
+    cost = token_cost.compute_cost(usage, pricing=pricing)
     goal_state = GoalStore(root / "goals").get_goal(GOAL_ID)["state"]
     provider = receipt.get("provider") if isinstance(receipt.get("provider"), dict) else {}
     provider_artifact = provider.get("artifact") if isinstance(provider.get("artifact"), dict) else {}
@@ -295,19 +290,21 @@ def _live_at(
     return (0 if not failures else 1), report
 
 
-def _live(executor: str, *, work_root: Path | None = None) -> int:
-    reason = _preflight(executor)
+def _live(executor: str, declarations: dict[str, Any], *, pricing: dict[str, Any] | None = None,
+          work_root: Path | None = None) -> int:
+    reason = _preflight(executor, declarations)
     if reason is not None:
         print(json.dumps({"check_id": "lh-live-smoke", "mode": "live", "status": "skip", "reason": reason}, ensure_ascii=False, indent=2))
         return 0
     if work_root is not None:
         root = work_root.resolve()
         root.mkdir(parents=True, exist_ok=False)
-        exit_code, report = _live_at(root, executor, persistent=True)
+        exit_code, report = _live_at(root, executor, persistent=True, declarations=declarations, pricing=pricing)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return exit_code
     with tempfile.TemporaryDirectory() as raw:
-        exit_code, report = _live_at(Path(raw), executor, persistent=False)
+        exit_code, report = _live_at(Path(raw), executor, persistent=False, declarations=declarations,
+                                     pricing=pricing)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return exit_code
 
@@ -315,12 +312,20 @@ def _live(executor: str, *, work_root: Path | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="W9d live smoke gate (dry by default; --live uses a real coding CLI)")
     parser.add_argument("--live", action="store_true", help="run the chain with a real coding CLI (never in verify.sh)")
-    parser.add_argument("--executor", default="codex", choices=sorted(glr.EXECUTORS), help="live-mode executor CLI")
+    parser.add_argument("--executor", default=None, help="live-mode declared executor name")
+    parser.add_argument("--executors", type=Path, help="live-mode executor declaration file")
+    parser.add_argument("--pricing", type=Path, help="optional live-mode pricing table for the cost check")
     parser.add_argument("--work-root", type=Path, help="new durable evidence directory; valid only with --live")
     args = parser.parse_args(argv)
     if args.work_root is not None and not args.live:
         parser.error("--work-root requires --live")
-    return _live(args.executor, work_root=args.work_root) if args.live else _dry()
+    if not args.live:
+        return _dry()
+    if args.executor is None or args.executors is None:
+        parser.error("--live requires --executor and --executors")
+    declarations = executors.validate_executor_declarations(json.loads(args.executors.read_text(encoding="utf-8")))
+    pricing = json.loads(args.pricing.read_text(encoding="utf-8")) if args.pricing else None
+    return _live(args.executor, declarations, pricing=pricing, work_root=args.work_root)
 
 
 if __name__ == "__main__":

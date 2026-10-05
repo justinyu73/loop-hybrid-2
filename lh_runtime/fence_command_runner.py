@@ -1,30 +1,19 @@
 #!/usr/bin/env python3
-"""Run delivery checks and the independent verifier inside the execution fence.
+"""Run delivery checks and the independent verifier through the execution fence port.
 
 ``RunStore`` executes every delivery obligation command and the independent
 verifier through its ``command_runner``.  The native-run path supplies one from
 its execution binding; the compatibility path gets this one.  Each command is
-its own fenced launch: a fresh single-use descriptor from ``port.prepare``, the
-fence-owned environment only, and the backend's own containment (on Linux:
-bubblewrap with no network, read-only clone unless the caller asks for a
-writable one, provider seccomp table).  The receipt carries the backend's real
-fence projection -- never a fixture claim.
+its own launch: a fresh single-use descriptor from ``port.prepare`` and the
+port's own environment projection.  The receipt carries the backend's own
+projection, including what it does not contain -- never a fixture claim.
 
-A bare command name resolves the way the sandbox resolves it: against the
-fence's own PATH (``/usr/bin:/bin`` on Linux), never the host PATH, because a
-pyenv shim or a toolcache interpreter outside the system roots cannot start
-inside the fence.
-
-The fence has no ``/dev``.  ``git diff --cached --check`` -- the default
-delivery check -- needs ``/dev/null``, so it runs under the fence's closed
-``git-diff-cached-check-v1`` grant (the same one the native path uses): only
-``/dev/null`` is exposed, the git binary is pinned by digest, and the command
-must match exactly.  Other commands get no device tree.
+A bare command name resolves on the operator's PATH; a relative path resolves
+inside the worktree.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import sys
@@ -39,25 +28,8 @@ import execution_fence as fences  # noqa: E402
 
 ADAPTER_ID = "lh-delivery-command"
 ADAPTER_VERSION = "v1"
-SANDBOX_PATH = ("/usr/bin", "/bin")
-NULL_DEVICE_PROFILE = "git-diff-cached-check-v1"
-NULL_DEVICE_ADAPTER_ID = "deterministic-command-v1"
-NULL_DEVICE_PHASE = "delivery_checks"
-
-
-def null_device_grant(command: Sequence[str], *, phase: str, writable: bool,
-                      input_request: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """The fence's closed grant for ``git diff --cached --check``, or None."""
-    if (phase != NULL_DEVICE_PHASE or writable or input_request is not None or os.name == "nt"
-            or list(command[1:]) != ["diff", "--cached", "--check"] or Path(command[0]).name != "git"):
-        return None
-    git = Path(command[0]).resolve(strict=True)
-    return {"profile": NULL_DEVICE_PROFILE, "phase": phase, "argv": [str(git), *command[1:]],
-            "executable_sha256": "sha256:" + hashlib.sha256(git.read_bytes()).hexdigest()}
-
-
 def resolve_command(argv: Sequence[str], worktree: str) -> list[str]:
-    """Resolve ``argv[0]`` the way the fence will see it."""
+    """Resolve ``argv[0]`` to the executable the launch will run."""
     if not argv or not isinstance(argv[0], str) or not argv[0]:
         raise fences.ExecutionFenceUnavailable("delivery_command_argv_invalid")
     name = argv[0]
@@ -65,17 +37,11 @@ def resolve_command(argv: Sequence[str], worktree: str) -> list[str]:
         executable = name
     elif "/" in name or "\\" in name:
         executable = str((Path(worktree) / name).resolve())
-    elif os.name == "nt":
+    else:
         found = shutil.which(name)
         if found is None:
             raise fences.ExecutionFenceUnavailable(f"delivery_command_not_found:{name}")
         executable = found
-    else:
-        candidates = [Path(directory) / name for directory in SANDBOX_PATH]
-        found_path = next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
-        if found_path is None:
-            raise fences.ExecutionFenceUnavailable(f"delivery_command_not_in_sandbox_path:{name}")
-        executable = str(found_path)
     return [executable, *[str(item) for item in argv[1:]]]
 
 
@@ -117,9 +83,6 @@ class FenceCommandRunner:
                        for value in (revision, attempt, fence))):
             raise fences.ExecutionFenceUnavailable("delivery_execution_context_identity_missing")
         command = resolve_command(argv, worktree)
-        grant = null_device_grant(command, phase=phase, writable=writable, input_request=input_request)
-        if grant is not None:
-            command = list(grant["argv"])
         context = {"phase": phase, "command": command, "command_id": request.get("command_id"),
                    "unit_id": request.get("unit_id"), "node_id": request.get("node_id"),
                    "input_digest": fences.digest_json(dict(input_request or {}))}
@@ -127,12 +90,12 @@ class FenceCommandRunner:
             goal={"goal_id": goal_id, "goal_revision": revision},
             run_id=run_id, attempt=attempt, attempt_fence=fence, base_revision=base,
             clone_root=str(Path(worktree).resolve()), verifier_argv=command,
-            adapter_id=NULL_DEVICE_ADAPTER_ID if grant is not None else ADAPTER_ID,
+            adapter_id=ADAPTER_ID,
             adapter_version=ADAPTER_VERSION,
             timeout_seconds=timeout_seconds, allowed_read_roots=[],
             allowed_write_roots=[str(Path(worktree).resolve())] if writable else [],
             allowed_local_effects=["workspace_write", "scratch_write"] if writable else ["scratch_write"],
-            execution_context_digest=fences.digest_json(context), null_device_check=grant)
+            execution_context_digest=fences.digest_json(context))
         descriptor = self.port.prepare(binding)
         if descriptor.get("binding") != binding:
             raise fences.ExecutionFenceUnavailable("binding_mismatch")

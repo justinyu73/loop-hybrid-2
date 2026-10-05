@@ -10,6 +10,7 @@ the deterministic verifier, retry, and recovery.
 from __future__ import annotations
 
 import json
+import re
 import hashlib
 import os
 import subprocess
@@ -86,18 +87,6 @@ UsageCollector = Callable[[subprocess.CompletedProcess, dict[str, Any]], dict[st
 SnapshotFn = Callable[[], dict[str, Any]]
 ProviderBinding = dict[str, str]
 
-LOCAL_BINDING_PROVIDER_ID = "lh_local"
-
-
-def _usage_hooks(agent: str) -> tuple[UsageCollector | None, SnapshotFn | None]:
-    """Use the underlying provider collector."""
-    if agent == "codex":
-        return codex_usage.collector, codex_usage.snapshot
-    # A custom adapter may deliberately provide no local usage reader.  The
-    # caller still has to name the provider and supply its argv builder.
-    return None, None
-
-
 def _adapter_descriptor(capsule: dict[str, Any]) -> dict[str, Any]:
     """The controller owns descriptor preparation; an adapter never self-prepares."""
     descriptor = capsule.get("execution_fence")
@@ -130,130 +119,6 @@ def _validate_provider_binding(binding: Any, *, agent: str) -> ProviderBinding:
     if any(character.isspace() for character in model):
         raise ValueError("provider_binding.model must not contain whitespace")
     return {"runner": runner, "base_url": base_url, "model": model}
-
-
-def _bind_provider_argv(
-    agent: str,
-    provider_argv: list[str],
-    binding: Any,
-    *,
-    provider_id: str,
-    provider_name: str,
-    host: str,
-) -> tuple[list[str], dict[str, str], dict[str, str] | None]:
-    """Bind one provider tuple through the provider's own per-invocation flags."""
-    if binding is None:
-        return provider_argv, {}, None
-    normalized = _validate_provider_binding(binding, agent=agent)
-    if agent == "codex":
-        if len(provider_argv) < 2 or provider_argv[1] != "exec":
-            raise ValueError(f"Codex {host} provider argv must begin with 'codex exec'")
-        base_url = json.dumps(normalized["base_url"])
-        provider_config = (
-            f'model_providers.{provider_id}={{name="{provider_name}",'
-            f"base_url={base_url},wire_api=\"responses\"}}"
-        )
-        bound_argv = [
-            *provider_argv[:2],
-            "-c", provider_config,
-            "-c", f'model_provider="{provider_id}"',
-            "-m", normalized["model"],
-            *provider_argv[2:],
-        ]
-        return bound_argv, {}, {"runner": agent, "model": normalized["model"], "mode": "codex_argv"}
-    raise ValueError(f"{host} provider binding needs an explicit adapter for agent {agent!r}")
-
-
-def make_local_provider_agent(
-    agent: str, *, timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
-    usage_parser: UsageParser | None = None,
-    provider_argv_builder: ArgvBuilder | None = None,
-    provider_binding: ProviderBinding | None = None, model: str | None = None,
-    execution_fence_port: execution_fences.ExecutionFencePort | None = None,
-) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
-    """Run one provider directly in the local provider sandbox.
-
-    The fence backend starts the pinned provider under the descriptor-signed
-    provider-sandbox profile (bubblewrap bind set, provider seccomp table,
-    host network).  The provider-binding tuple travels through the
-    provider's own per-invocation flags."""
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive")
-    if provider_binding is not None and model is not None:
-        raise ValueError("model and provider_binding are mutually exclusive")
-    if provider_argv_builder is None:
-        if agent != "codex":
-            raise ValueError(f"unknown local provider agent: {agent!r}")
-        provider_argv_builder = lambda prompt: hosted_provider_argv(agent, prompt, model)  # noqa: E731
-    if agent == "codex" and usage_parser is None:
-        # --ephemeral --json stdout is the per-invocation usage boundary.
-        usage_parser = codex_usage.extract_usage_from_jsonl
-    fence_port = (
-        execution_fence_port
-        if execution_fence_port is not None
-        else execution_fences.DisabledExecutionFencePort()
-    )
-
-    def model_runner(workspace: Path, capsule: dict[str, Any]) -> dict[str, Any]:
-        del workspace  # the clone is the descriptor's; the fence enforces it
-        descriptor = _adapter_descriptor(capsule)
-        prompt_text = build_prompt(capsule)
-        provider_argv = list(provider_argv_builder(prompt_text))
-        provider_argv, provider_env, binding_projection = _bind_provider_argv(
-            agent,
-            provider_argv,
-            provider_binding,
-            provider_id=LOCAL_BINDING_PROVIDER_ID,
-            provider_name="LH local",
-            host="local",
-        )
-        provider_argv[0] = resolve_cli(provider_argv[0])
-        input_binding_records = _input_binding_gate(
-            capsule, prompt_text, provider_argv, provider_env, descriptor)
-        proc = fence_port.launch_provider(
-            descriptor,
-            provider_argv,
-            env_overlay=provider_env,
-            timeout_seconds=timeout_seconds,
-        )
-        stdout = proc.stdout or ""
-        usage: dict[str, Any] | None = None
-        try:
-            if usage_parser is not None:
-                usage = usage_parser(stdout)
-        except Exception:  # A parse failure must not fabricate usage; stay unknown.
-            usage = None
-        if binding_projection is not None and isinstance(usage, dict) and usage.get("state") == token_cost.USAGE_MEASURED:
-            # A bound endpoint may price differently, so token counts do not
-            # imply the default cost table.
-            usage = token_cost.unknown_usage(
-                model=str(usage.get("model") or binding_projection.get("model") or agent),
-                reason="local provider binding has no verified usage/cost attribution",
-            )
-        if not isinstance(usage, dict) or usage.get("state") not in {token_cost.USAGE_MEASURED, token_cost.USAGE_UNKNOWN}:
-            usage = token_cost.unknown_usage(model=agent, reason="local provider usage unavailable")
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"{agent} in the local provider sandbox exited {proc.returncode}: "
-                f"{((proc.stderr or '') or stdout)[-400:]}"
-            )
-        execution: dict[str, Any] = {"backend": "local", "agent": agent, "exit_code": proc.returncode}
-        if binding_projection is not None:
-            execution["provider_binding"] = binding_projection
-        result = {
-            "summary": f"{agent} executor completed in the local provider sandbox",
-            "stdout_tail": stdout[-800:],
-            "usage": usage,
-            "execution": execution,
-        }
-        if input_binding_records is not None:
-            result.update(input_binding_records)
-        return result
-
-    return execution_fences.mark_mutation_adapter(
-        model_runner,
-        adapter_id=f"{execution_fences.LOCAL_PROVIDER_ADAPTER_PREFIX}{agent}",
-    )
 
 
 def build_prompt(capsule: dict[str, Any]) -> str:
@@ -343,9 +208,8 @@ def run_bounded_judge(
     Judge input is already a bounded snapshot, so the provider gets a fresh
     empty cwd rather than the LH checkout or a target clone.  This prevents a
     judge adapter from turning a read-only advisory call into a workspace
-    mutation path.  IDE bridge variables are removed so a headless call cannot
-    silently attach to a VS Code session.  Providers still retain their normal
-    user configuration and network egress for authentication/inference.
+    mutation path.  Providers still retain their normal user configuration and
+    network egress for authentication/inference.
     """
     if not argv:
         raise ValueError("judge argv must not be empty")
@@ -353,9 +217,6 @@ def run_bounded_judge(
     resolved[0] = resolve_cli(resolved[0])
     env = dict(os.environ)
     env["PATH"] = f"{Path(resolved[0]).parent}:{env.get('PATH', '')}"
-    for key in tuple(env):
-        if key.startswith("GEMINI_CLI_IDE_"):
-            env.pop(key, None)
     with tempfile.TemporaryDirectory(prefix="lh-judge-") as raw_cwd:
         proc = subprocess.run(
             resolved,
@@ -370,48 +231,46 @@ def run_bounded_judge(
     return proc.stdout
 
 
-# Model-agnostic presets.  Their broad provider flags remain inside the
-# controller-issued kernel descriptor; a clone path alone grants nothing.
-CODEX_RESULT_SCHEMA = "lh-codex-normalized-result/v1"
+# Trusted provider protocol.  The operator declares the provider command; the
+# engine owns the result schema, the usage shape, and the normalization.  A
+# provider reads its role input on stdin, finds the closed result schema at the
+# path named by OUTPUT_SCHEMA_ENV, and ends its stdout with one result line.
+PROVIDER_ADAPTER_ID = "provider-jsonl-v1"
+PROVIDER_RESULT_LINE_SCHEMA = "lh-provider-result/v1"
+TRUSTED_RESULT_SCHEMA = "lh-provider-normalized-result/v1"
+OUTPUT_SCHEMA_ENV = "LH_PROVIDER_OUTPUT_SCHEMA"
 TRUSTED_USAGE_FIELDS = {"state", "input_tokens", "cached_input_tokens", "fresh_input_tokens",
                         "output_tokens", "reasoning_output_tokens", "total_tokens"}
+_REPORTED_USAGE_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
 
 
-def trusted_codex_output_schema(role):
+def trusted_output_schema(role):
     if role == "coding":
-        properties = {"schema": {"type": "string", "enum": ["lh-codex-worker-result/v1"]},
+        properties = {"schema": {"type": "string", "enum": ["lh-worker-result/v1"]},
             "status": {"type": "string", "enum": ["completed", "failed"]},
             "packet_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "reason_code": {"type": "string", "enum": ["completed", "task_failed", "blocked"]}}
     elif role == "verifier":
-        properties = {"schema": {"type": "string", "enum": ["lh-codex-verifier-result/v1"]},
+        properties = {"schema": {"type": "string", "enum": ["lh-verifier-result/v1"]},
             "verdict": {"type": "string", "enum": ["GREEN", "RED"]},
             "candidate_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "checks_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "reason_code": {"type": "string", "enum": ["verified", "check_failed", "scope_failed"]}}
     else:
-        raise ValueError("trusted_codex_role_invalid")
+        raise ValueError("trusted_role_invalid")
     return {"type": "object", "properties": properties, "required": list(properties),
             "additionalProperties": False}
 
 
-def compose_trusted_codex_argv(provider, *, role, output_schema_path):
+def compose_trusted_provider_argv(provider):
+    """The operator-declared provider command, validated in its closed shape."""
     if __package__:
         from .execution_fence_trusted import validate_trusted_operator_binding
     else:
         from execution_fence_trusted import validate_trusted_operator_binding
-    # Validate the same closed provider shape without discovering credentials.
     validate_trusted_operator_binding({"schema": "lh-trusted-project-operator-binding/v1",
         "project_id": "argv-validation", "providers": {"coding": provider, "verifier": provider}})
-    trusted_codex_output_schema(role)
-    path = Path(output_schema_path)
-    if not path.is_absolute() or path.resolve(strict=True) != path or not path.is_file():
-        raise ValueError("trusted_output_schema_path_invalid")
-    return [provider["executable"], "exec", "--json", "--ephemeral", "--ignore-user-config",
-        "--model", provider["model"], "--sandbox", "workspace-write" if role == "coding" else "read-only",
-        "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"',
-        "-c", 'approval_policy="never"', "-c", 'features.hooks=false',
-        "--output-schema", str(path), "-"]
+    return [provider["executable"], *provider["arguments"]]
 
 
 def unknown_trusted_usage():
@@ -437,34 +296,27 @@ def validate_trusted_usage(value):
     return dict(value)
 
 
-def _normalize_trusted_codex_usage(usage, diagnostics):
-    """Accept only the documented legacy and 0.154.0 usage shapes.
-
-    Preserve the existing input-plus-output total without counting cache writes
-    again. Optional wire presence is separate; missing counters stay unknown.
-    """
-    required = {"input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"}
-    extension = "cache_write_input_tokens"
-    known = required | {extension}
+def _normalize_reported_usage(usage, diagnostics):
+    """Accept exactly the four reported counters; anything else stays unknown."""
+    if usage is None:
+        diagnostics["usage_reason"] = "usage_not_reported"
+        return unknown_trusted_usage()
     if not isinstance(usage, dict):
         diagnostics["usage_reason"] = "usage_not_object"
         return unknown_trusted_usage()
-    diagnostics["unknown_usage_field_count"] = min(65535, len(set(usage) - known))
-    for key in known:
+    for key in _REPORTED_USAGE_FIELDS:
         if key in usage:
             value = usage[key]
             valid = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1
             diagnostics["field_status"][key] = "nonnegative_integer" if valid else "invalid"
-    if not required <= set(usage):
-        diagnostics["usage_reason"] = "usage_fields_missing"
-    elif set(usage) - known:
-        diagnostics["usage_reason"] = "usage_fields_unknown"
+    if set(usage) != set(_REPORTED_USAGE_FIELDS):
+        diagnostics["usage_reason"] = "usage_fields_mismatch"
     elif "invalid" in diagnostics["field_status"].values():
         diagnostics["usage_reason"] = "usage_token_invalid"
     else:
         try:
             normalized = validate_trusted_usage({"state": "observed",
-                **{key: usage[key] for key in required},
+                **{key: usage[key] for key in _REPORTED_USAGE_FIELDS},
                 "fresh_input_tokens": usage["input_tokens"] - usage["cached_input_tokens"],
                 "total_tokens": usage["input_tokens"] + usage["output_tokens"]})
         except ValueError:
@@ -475,21 +327,24 @@ def _normalize_trusted_codex_usage(usage, diagnostics):
     return unknown_trusted_usage()
 
 
-def normalize_trusted_codex_jsonl(stdout, *, stderr, returncode, role, model, expected,
-                                max_bytes=1048576, diagnostics=None):
-    """Normalize one bounded stream, without persisting any free-form text."""
+def normalize_trusted_provider_output(stdout, *, stderr, returncode, role, model, expected,
+                                      max_bytes=1048576, diagnostics=None):
+    """Normalize one bounded provider stream, without persisting any free-form text.
+
+    Only the last non-empty stdout line is read.  It must be one JSON object:
+    ``{"schema": "lh-provider-result/v1", "outcome": "completed" | "failed",
+    "result": <role result or null>, "usage": <four counters or null>}``.
+    """
     import re
     if diagnostics is None:
         diagnostics = {}
     elif not isinstance(diagnostics, dict):
         raise ValueError("trusted_diagnostics_target_invalid")
     diagnostics.clear()
-    diagnostics.update(schema="lh-codex-rejection-diagnostics/v1", usage_reason="not_examined",
-        field_status={key: "missing" for key in ("input_tokens", "cached_input_tokens",
-            "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens")},
-        unknown_usage_field_count=0)
+    diagnostics.update(schema="lh-provider-rejection-diagnostics/v1", usage_reason="not_examined",
+        field_status={key: "missing" for key in _REPORTED_USAGE_FIELDS})
     raw, diagnostic = stdout.encode("utf-8"), stderr.encode("utf-8")
-    result = {"schema": CODEX_RESULT_SCHEMA, "normalization_version": 1, "role": role,
+    result = {"schema": TRUSTED_RESULT_SCHEMA, "normalization_version": 1, "role": role,
         "model": model, "outcome": "unknown", "reason_code": "provider_protocol_invalid",
         "result": None, "result_digest": None, "stdout_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
         "stdout_bytes": len(raw), "stderr_digest": "sha256:" + hashlib.sha256(diagnostic).hexdigest(),
@@ -499,6 +354,7 @@ def normalize_trusted_codex_jsonl(stdout, *, stderr, returncode, role, model, ex
             or len(raw) + len(diagnostic) > max_bytes):
         result["reason_code"] = "output_limit_exceeded"
         return result
+
     def closed_object(pairs):
         value = {}
         for key, item in pairs:
@@ -508,35 +364,18 @@ def normalize_trusted_codex_jsonl(stdout, *, stderr, returncode, role, model, ex
         return value
 
     try:
-        schema = trusted_codex_output_schema(role)
-        events = [json.loads(line, object_pairs_hook=closed_object) for line in stdout.splitlines() if line.strip()]
-        terminal, messages, thread_count, turn_count = None, [], 0, 0
-        for event in events:
-            if not isinstance(event, dict) or terminal is not None:
-                raise ValueError("event order")
-            kind = event.get("type")
-            if kind == "thread.started":
-                thread_count += 1
-            elif kind == "turn.started":
-                turn_count += 1
-            elif kind in {"turn.completed", "turn.failed"}:
-                terminal = event
-            elif kind in {"item.started", "item.updated", "item.completed"}:
-                item = event.get("item")
-                if not isinstance(item, dict):
-                    raise ValueError("item")
-                if kind == "item.completed" and item.get("type") == "agent_message":
-                    messages.append(item.get("text"))
-            else:
-                raise ValueError("event")
-        if terminal is None or thread_count != 1 or turn_count != 1:
-            raise ValueError("missing terminal")
-        result["usage"] = _normalize_trusted_codex_usage(terminal.get("usage"), diagnostics)
-        if terminal["type"] == "turn.failed":
+        schema = trusted_output_schema(role)
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        line = json.loads(lines[-1], object_pairs_hook=closed_object) if lines else None
+        if (not isinstance(line, dict) or set(line) != {"schema", "outcome", "result", "usage"}
+                or line["schema"] != PROVIDER_RESULT_LINE_SCHEMA
+                or line["outcome"] not in {"completed", "failed"}):
+            raise ValueError("result line")
+        result["usage"] = _normalize_reported_usage(line["usage"], diagnostics)
+        if line["outcome"] == "failed":
             result.update(outcome="known_failure", reason_code="provider_failed")
             return result
-        value = (json.loads(messages[-1], object_pairs_hook=closed_object)
-                 if messages and isinstance(messages[-1], str) else None)
+        value = line["result"]
         if not isinstance(value, dict) or set(value) != set(schema["properties"]):
             raise ValueError("final shape")
         for key, definition in schema["properties"].items():
@@ -556,171 +395,141 @@ def normalize_trusted_codex_jsonl(stdout, *, stderr, returncode, role, model, ex
         return result
 
 
-def codex_argv(prompt: str) -> list[str]:
-    return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", prompt]
+# Declared executors.  The engine knows no provider by name: every executor,
+# judge, and evaluator is a declaration whose argv[0] is an absolute path and
+# whose argv carries the prompt in the ``{prompt}`` slot.  ``{model}`` and
+# ``{base_url}`` slots receive a pinned model and a provider binding's endpoint;
+# a value without its slot, or a slot without its value, is refused.  Nothing
+# here searches PATH.
+EXECUTOR_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
+USAGE_PROTOCOLS = ("none", "lh-usage-line/v1")
+PROMPT_SLOT, MODEL_SLOT, BASE_URL_SLOT = "{prompt}", "{model}", "{base_url}"
 
 
-def hosted_provider_argv(
-    agent: str,
-    prompt: str,
-    model: str | None = None,
-) -> list[str]:
-    """Build the per-invocation provider argv (ephemeral JSONL stream) for a sandboxed provider."""
-    if agent == "codex":
-        argv = ["codex", "exec"]
-        if model:
-            argv += ["-m", model]
-        return [
-            *argv,
-            "--ephemeral",
-            "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
-            prompt,
-        ]
-    return provider_argv(agent, prompt, model)
+def validate_executor_declarations(raw: Any) -> dict[str, dict[str, Any]]:
+    """Validate ``{name: {"argv": [...], "usage": ...}}``; an absent table declares nothing."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("executors must be an object of named declarations")
+    declarations: dict[str, dict[str, Any]] = {}
+    for name, declaration in raw.items():
+        if not isinstance(name, str) or EXECUTOR_NAME_RE.fullmatch(name) is None:
+            raise ValueError(f"executor name is invalid: {name!r}")
+        if not isinstance(declaration, dict) or "argv" not in declaration or set(declaration) - {"argv", "usage"}:
+            raise ValueError(f"executors.{name} must contain argv and an optional usage protocol")
+        argv = declaration["argv"]
+        if (not isinstance(argv, list) or not argv
+                or any(not isinstance(item, str) or not item or "\x00" in item for item in argv)):
+            raise ValueError(f"executors.{name}.argv must be a non-empty list of strings")
+        if not Path(argv[0]).is_absolute():
+            raise ValueError(f"executors.{name}.argv[0] must be an absolute path")
+        if argv.count(PROMPT_SLOT) != 1:
+            raise ValueError(f"executors.{name}.argv must carry the {PROMPT_SLOT} slot exactly once")
+        if argv.count(MODEL_SLOT) > 1 or argv.count(BASE_URL_SLOT) > 1:
+            raise ValueError(f"executors.{name}.argv may carry each slot at most once")
+        usage = declaration.get("usage", "none")
+        if usage not in USAGE_PROTOCOLS:
+            raise ValueError(f"executors.{name}.usage must be one of {list(USAGE_PROTOCOLS)}")
+        declarations[name] = {"argv": list(argv), "usage": usage}
+    return declarations
 
 
-def provider_argv(executor: str, prompt: str, model: str | None = None) -> list[str]:
-    """Model-pinned argv for an *executing* provider (sandboxed or named CLI agent).
-
-    Carries the provider's broad flags because the kernel fence, not the argv,
-    is what bounds a mutation run. This is the shape `judge_argv` used to have
-    before D3 split the two postures; nothing on the executor side changed.
-    """
-    if executor == "codex":
-        argv = ["codex", "exec"]
-        if model:
-            argv += ["-m", model]
-        argv += ["--dangerously-bypass-approvals-and-sandbox", prompt]
-    elif executor == "agy":
-        return judge_argv(executor, prompt, model)
-    else:
-        raise ValueError(f"no provider argv for executor: {executor!r}")
-    return argv
+def declared_argv(declaration: dict[str, Any], prompt: str, *, model: str | None = None,
+                  base_url: str | None = None) -> list[str]:
+    """Fill a declaration's slots; a value and its slot must come together."""
+    argv = declaration["argv"]
+    for slot, value in ((MODEL_SLOT, model), (BASE_URL_SLOT, base_url)):
+        if value is not None and slot not in argv:
+            raise ValueError(f"executor declaration has no {slot} slot")
+        if value is None and slot in argv:
+            raise ValueError(f"executor declaration needs a value for {slot}")
+    values = {PROMPT_SLOT: prompt, MODEL_SLOT: model, BASE_URL_SLOT: base_url}
+    return [values[item] if item in values else item for item in argv]
 
 
-# Tokens that grant a provider write/approval bypass. A judge argv must never
-# carry one: the judge runs with no fence, on the host network, and its prompt
-# is built from a snapshot that carries provider and external output (D3,
-# decision packet Q3). The canary asserts this set against every executor.
-BYPASS_TOKENS: tuple[str, ...] = (
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--yolo",
-)
+def declared_command(declarations: dict[str, dict[str, Any]], name: str, prompt: str,
+                     model: str | None = None) -> list[str]:
+    """The argv for one judge or evaluator call through a declared executor."""
+    if name not in declarations:
+        raise ValueError(f"unknown executor: {name!r}; declared: {sorted(declarations)}")
+    return declared_argv(declarations[name], prompt, model=model)
 
 
-def judge_argv(executor: str, prompt: str, model: str | None = None) -> list[str]:
-    """Argv for one bounded turning-point judgment call (M1 model routing).
-
-    The judge is advisory and read-only, so configured adapters must provide a
-    no-write argv shape. This core supplies Codex and AGY shapes; an
-    unregistered provider is refused.
-    """
-    if executor == "codex":
-        argv = ["codex", "exec"]
-        if model:
-            argv += ["-m", model]
-        argv += ["--sandbox", "read-only", "--ephemeral", prompt]
-    elif executor == "agy":
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError("agy judge requires an explicit model binding")
-        if any(character.isspace() for character in model.strip()):
-            raise ValueError("agy judge model binding must not contain whitespace")
-        argv = [
-            "agy",
-            "--model", model.strip(),
-            "--mode", "plan",
-            "--disable-slash-commands",
-            "--output-format", "json",
-            "--print-timeout", "300s",
-            "--print", prompt,
-        ]
-    else:
-        raise ValueError(f"no judge argv for executor: {executor!r}")
-    return argv
+def parse_usage_line(stdout: str, *, model: str) -> dict[str, Any]:
+    """Read ``{"usage": {...}}`` from the last non-empty stdout line, else unknown."""
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    try:
+        value = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        value = None
+    usage = value.get("usage") if isinstance(value, dict) else None
+    counters = ("input_tokens", "output_tokens", "cache_read_tokens")
+    if (isinstance(usage, dict) and {"input_tokens", "output_tokens"} <= set(usage)
+            and all(isinstance(usage.get(key, 0), int) and not isinstance(usage.get(key, 0), bool)
+                    and usage.get(key, 0) >= 0 for key in counters)):
+        reported = usage.get("model")
+        return token_cost.measured_usage(model=reported if isinstance(reported, str) and reported else model,
+                                         input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
+                                         cache_read_tokens=usage.get("cache_read_tokens", 0))
+    return token_cost.unknown_usage(model=model, reason="executor reported no usage line")
 
 
-def evaluation_argv(
-    executor: str,
-    prompt: str,
-    model: str,
-    *,
-    json_schema: dict[str, Any] | None = None,
-) -> list[str]:
-    """Build a no-write evaluation invocation for capability routing.
-
-    Provider transport still requires external network access.  Codex gets an
-    explicit read-only sandbox.  Other providers need an explicitly registered
-    evaluation adapter; this core does not infer one.
-    """
-    if executor == "codex":
-        return [
-            "codex", "exec", "-m", model,
-            "--sandbox", "read-only",
-            "--ephemeral",
-            prompt,
-        ]
-    raise ValueError(f"no no-write evaluation adapter for executor: {executor!r}")
-
-
-def make_named_cli_agent(
+def make_declared_agent(
     name: str,
+    declarations: dict[str, dict[str, Any]],
     *,
     model: str | None = None,
     provider_binding: ProviderBinding | None = None,
     timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     execution_fence_port: execution_fences.ExecutionFencePort | None = None,
 ) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
-    """Build one runtime-selected CLI adapter without assigning it a role."""
-    if name == "local":
-        agent = _local_agent_name(provider_binding)
-        return make_local_provider_agent(
-            agent=agent,
-            provider_binding=provider_binding,
-            model=model,
-            timeout_seconds=timeout_seconds,
-            execution_fence_port=execution_fence_port,
-        )
+    """Build the fenced ModelRunner for one declared executor."""
+    if name not in declarations:
+        raise ValueError(f"unknown executor: {name!r}; declared: {sorted(declarations)}")
+    declaration = declarations[name]
+    base_url = None
     if provider_binding is not None:
-        raise ValueError("provider_binding is supported only by the local provider sandbox")
-    builders: dict[str, ArgvBuilder] = {
-        "codex": codex_argv,
-    }
-    if name not in builders:
-        raise ValueError(f"unknown CLI adapter: {name!r}; choose one of {sorted([*builders, 'local'])}")
-    builder = builders[name] if model is None else lambda prompt: provider_argv(name, prompt, model)
-    collector, snapshot = _usage_hooks(name)
-    return make_cli_agent(
-        builder,
-        name=name,
-        timeout_seconds=timeout_seconds,
-        usage_collector=collector,
-        snapshot_fn=snapshot,
-        execution_fence_port=execution_fence_port,
+        if model is not None:
+            raise ValueError("model and provider_binding are mutually exclusive")
+        binding = _validate_provider_binding(provider_binding, agent=name)
+        model, base_url = binding["model"], binding["base_url"]
+    declared_argv(declaration, "", model=model, base_url=base_url)
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    fence_port = (
+        execution_fence_port
+        if execution_fence_port is not None
+        else execution_fences.DisabledExecutionFencePort()
     )
+    usage_model = model or name
 
+    def runner(workspace: Path, capsule: dict[str, Any]) -> dict[str, Any]:
+        del workspace  # the clone is the descriptor's; the fence enforces it
+        descriptor = _adapter_descriptor(capsule)
+        prompt_text = build_prompt(capsule)
+        argv = declared_argv(declaration, prompt_text, model=model, base_url=base_url)
+        input_binding_records = _input_binding_gate(capsule, prompt_text, argv, None, descriptor)
+        proc = fence_port.launch(descriptor, argv, timeout_seconds=timeout_seconds)
+        stdout = proc.stdout or ""
+        if proc.returncode != 0:
+            raise RuntimeError(f"{name} exited {proc.returncode}: {((proc.stderr or '') or stdout).strip()[-400:]}")
+        if declaration["usage"] == "lh-usage-line/v1":
+            usage = parse_usage_line(stdout, model=usage_model)
+        else:
+            usage = token_cost.unknown_usage(model=usage_model, reason="executor declares no usage protocol")
+        if base_url is not None and usage.get("state") == token_cost.USAGE_MEASURED:
+            # A bound endpoint may price differently, so token counts do not
+            # imply the declared cost table.
+            usage = token_cost.unknown_usage(model=usage_model,
+                                             reason="provider binding has no verified usage/cost attribution")
+        execution: dict[str, Any] = {"executor": name, "exit_code": proc.returncode}
+        if base_url is not None:
+            execution["provider_binding"] = {"runner": name, "model": model, "mode": "declared_argv"}
+        result = {"summary": f"{name} executor completed", "stdout_tail": stdout[-800:],
+                  "usage": usage, "execution": execution}
+        if input_binding_records is not None:
+            result.update(input_binding_records)
+        return result
 
-import codex_usage  # noqa: E402
-
-CODEX = lambda **kw: make_cli_agent(codex_argv, name="codex", usage_collector=kw.pop("usage_collector", codex_usage.collector), snapshot_fn=kw.pop("snapshot_fn", codex_usage.snapshot), **kw)  # noqa: E731
-
-
-def _local_agent_name(provider_binding: Any) -> str:
-    """The provider a local run starts: the binding's runner, else explicit config."""
-    agent = (
-        provider_binding["runner"]
-        if isinstance(provider_binding, dict) and isinstance(provider_binding.get("runner"), str)
-        else os.environ.get("LH_LOCAL_PROVIDER_AGENT", "").strip()
-    )
-    if not agent:
-        raise ValueError(
-            "local provider is not configured; set LH_LOCAL_PROVIDER_AGENT or pass provider_binding"
-        )
-    return agent
-
-
-def _configured_local(**kwargs: Any) -> Callable[[Path, dict[str, Any]], dict[str, Any]]:
-    return make_local_provider_agent(agent=_local_agent_name(kwargs.get("provider_binding")), **kwargs)
-
-
-LOCAL = _configured_local
+    return execution_fences.mark_mutation_adapter(runner, adapter_id=f"declared-{name}")

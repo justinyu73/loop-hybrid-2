@@ -191,7 +191,8 @@ def capability_declared_case() -> dict[str, Any]:
     session.factories = {}
     session.execution_fence_port = fences.DisabledExecutionFencePort()
     session.executor_declarations = executors.validate_executor_declarations({
-        "coder": {"argv": [sys.executable, "-c", "pass", "{prompt}"]},
+        # The resource pins a model, so the declaration carries the {model} slot.
+        "coder": {"argv": [sys.executable, "-c", "pass", "{model}", "{prompt}"]},
     })
     resource = {"runner": "coder", "model": "fixture-model", "provider_binding": None}
     node = {"budget": {"max_wall_seconds": 10}}

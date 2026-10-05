@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-"""Fence live activation smoke — the production dispatch chain crosses the
-real kernel backend (council rulings D2=A, D4=b in
-docs/active/lh-auto-runner-gap-review-plan.md).
+"""Fence activation smoke — the production dispatch chain crosses the configured backend.
 
 Cross-process by construction: the original scheduler and goal-loop entry
 functions each run in a fresh child process. The enabled arm explicitly
-injects non-kernel RunStore commands only for post-worker checks/verifier;
-the real worker kernel proof does not cover these later fixture commands.
+injects non-kernel RunStore commands only for post-worker checks/verifier.
 Every assertion reads durable bytes the subprocess chain produced
 (scheduler event log, run-store receipts, provider artifacts).
 
 Arms:
-  enabled   ``LH_EXECUTION_FENCE_BACKEND=linux-bubblewrap-seccomp`` -> the
-            registered codex executor resolves to a single-process stub on
-            PATH and launches inside real bubblewrap.  The stub attests the
-            descriptor-digest env only bwrap sets, reports fork/socket EPERM
-            observed from inside the fence, and its workspace write verifies
-            the run.
+  enabled   ``LH_EXECUTION_FENCE_BACKEND=local-process`` -> the declared stub
+            executor (an absolute path, never a PATH lookup) runs as an owned
+            process group; its workspace write verifies the run, and the
+            receipt states that nothing was contained.
   disabled  env absent -> ``execution_fence_unavailable`` before any child;
             the run parks ``human_required`` with ``provider_invocations`` 0.
 """
@@ -24,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import subprocess
 import sys
 import tempfile
@@ -41,27 +35,12 @@ from goal_store import GoalStore  # noqa: E402
 from run_store import RunStore  # noqa: E402
 from native_delivery_fixture import make_native_bundle  # noqa: E402
 
-BACKEND_ID = "linux-bubblewrap-seccomp"
-STUB_SOURCE = """#!/usr/bin/python3
-import errno, json, os, socket
-report = {
-    "descriptor_digest_env": os.environ.get("LH_EXECUTION_FENCE_DESCRIPTOR_DIGEST"),
-    "provider_control_channel": os.environ.get("LH_PROVIDER_CONTROL_CHANNEL"),
-}
-try:
-    os.fork()
-    report["fork"] = "allowed"
-except OSError as exc:
-    report["fork"] = "denied:" + (errno.errorcode.get(exc.errno) or str(exc.errno))
-try:
-    socket.socket()
-    report["socket"] = "allowed"
-except OSError as exc:
-    report["socket"] = "denied:" + (errno.errorcode.get(exc.errno) or str(exc.errno))
+BACKEND_ID = "local-process"
+STUB_SOURCE = """import json, os
 os.makedirs("src", exist_ok=True)
 with open("src/stub-effect.txt", "w") as fh:
     fh.write("fence-stub-effect\\n")
-print("FENCE-STUB " + json.dumps(report, sort_keys=True))
+print("FENCE-STUB " + json.dumps({"cwd": os.getcwd()}, sort_keys=True))
 """
 
 
@@ -110,13 +89,13 @@ def _campaign_dict() -> dict[str, Any]:
     }
 
 
-def _stub_bin(root: Path) -> Path:
-    stub_dir = root / "stub-bin"
-    stub_dir.mkdir()
-    stub = stub_dir / "codex"
+def _declare_stub(root: Path) -> Path:
+    stub = root / "stub-executor.py"
     stub.write_text(STUB_SOURCE, encoding="utf-8")
-    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
-    return stub_dir
+    declarations = root / "executors.json"
+    declarations.write_text(json.dumps({"stub": {"argv": [sys.executable, "-B", str(stub), "{prompt}"]}}),
+                            encoding="utf-8")
+    return declarations
 
 
 def _fixture_scheduler_argv(original_argv: list[str]) -> list[str]:
@@ -151,7 +130,7 @@ def _tick(root: Path, *, backend: str | None,
     campaign = _campaign_dict()
     campaign_path = root / "campaign.json"
     campaign_path.write_text(json.dumps(campaign), encoding="utf-8")
-    stub_dir = _stub_bin(root)
+    declarations = _declare_stub(root)
     # Seeding is a fixture act outside the mechanism under test (N15 precedent:
     # the injected source sits outside the accepted chain).
     envelope = CampaignCompiler(campaign).compile()["stages"]["stage-1"]
@@ -189,7 +168,6 @@ def _tick(root: Path, *, backend: str | None,
         }},
     )
     env = dict(os.environ)
-    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
     env["LH_SCHEDULER_OWNER_ID"] = "fence-smoke"
     env.pop("LH_EXECUTION_FENCE_BACKEND", None)
     if backend is not None:
@@ -199,7 +177,8 @@ def _tick(root: Path, *, backend: str | None,
         "--owner-id", "fence-smoke",
         "--event-log", str(root / "events.jsonl"),
         "--",
-        "--executor", "codex",
+        "--executor", "stub",
+        "--executors", str(declarations),
         "--execute",
         "--goal-store", str(root / "goals"),
         "--run-store", str(root / "runs"),
@@ -280,32 +259,20 @@ def main() -> int:
              "stderr": enabled.stderr[-400:]},
         ))
         cases.append(_case(
-            "stub-attests-the-descriptor-digest-only-bwrap-injects",
-            isinstance(fence.get("launch_descriptor_digest"), str)
-            and report.get("descriptor_digest_env") == fence.get("launch_descriptor_digest")
-            and report.get("provider_control_channel") == "stdio",
-            {"report": report,
-             "descriptor_digest": fence.get("launch_descriptor_digest")},
+            "stub-ran-in-the-disposable-clone",
+            isinstance(report.get("cwd"), str) and Path(report["cwd"]).name == "1"
+            and str(enabled_root) in report["cwd"],
+            {"report": report},
         ))
         cases.append(_case(
-            "fork-and-socket-are-denied-inside-the-fence",
-            report.get("fork") == "denied:EPERM"
-            and report.get("socket") == "denied:EPERM",
-            {"fork": report.get("fork"), "socket": report.get("socket")},
-        ))
-        cases.append(_case(
-            "both-proof-tracks-are-admissible-on-the-receipt",
-            set(proofs) == {
+            "receipt-states-that-nothing-was-contained",
+            fence.get("kernel_containment") is False
+            and set(proofs) == {
                 "filesystem_effect_containment",
                 "provider_control_egress",
                 "provider_sandbox",
             }
-            and proofs["filesystem_effect_containment"].get("result") == "admissible"
-            and proofs["provider_control_egress"].get("result") == "admissible"
-            # A mutation launch runs under this kernel fence itself; the
-            # provider_sandbox track honestly reports there is nothing hosted
-            # for a composed sandbox to apply to (lh-provider-sandbox).
-            and proofs["provider_sandbox"].get("result") == "not_applicable",
+            and {row.get("result") for row in proofs.values()} == {"not_contained"},
             {track: row.get("result") for track, row in proofs.items()},
         ))
         cases.append(_case(

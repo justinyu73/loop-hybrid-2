@@ -30,7 +30,7 @@ def _observation(
     ordinal: int,
     outcome: str,
     *,
-    binding_id: str = "edit-codex",
+    binding_id: str = "edit-coder",
 ) -> dict[str, Any]:
     return {
         "schema": ar.OBSERVATION_SCHEMA,
@@ -73,11 +73,11 @@ def main() -> int:
     applied = ar.apply_projection(graph, projection, at=NOW)
     original = next(
         item for item in graph["registry"]["resources"]
-        if item["binding_id"] == "edit-codex"
+        if item["binding_id"] == "edit-coder"
     )
     projected = next(
         item for item in applied["registry"]["resources"]
-        if item["binding_id"] == "edit-codex"
+        if item["binding_id"] == "edit-coder"
     )
     projected_binding = cr.resolve_operation(
         applied,
@@ -119,7 +119,7 @@ def main() -> int:
     degraded = ar.apply_projection(graph, degraded_projection, at=NOW)
     degraded_resource = next(
         item for item in degraded["registry"]["resources"]
-        if item["binding_id"] == "edit-codex"
+        if item["binding_id"] == "edit-coder"
     )
     cases.append({
         "id": "minimum-sample-gate-and-health-downgrade-only",

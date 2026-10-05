@@ -97,7 +97,7 @@ def main() -> int:
         "total": len(cases),
         "blocking_failures": failures,
         "known_gaps_open": [
-            "codex/claude usage parsers are pluggable and calibrated against real CLI output (human live smoke)",
+            "a declared executor reports usage through the neutral usage line; real CLI output is a human live smoke",
             "pricing calibrated 2026-07-18 to official provider pages; cost remains an API-equivalent estimate, not a billing export",
         ],
     }, ensure_ascii=False, indent=2))

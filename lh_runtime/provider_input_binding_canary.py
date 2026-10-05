@@ -126,13 +126,13 @@ def main() -> int:
     # Binding and attestation.
     context = {
         "goal_revision": "goal-rev-1", "run_id": "run-1", "attempt": 2,
-        "adapter_id": "cli-claude", "adapter_version": "v1",
+        "adapter_id": "cli-agent", "adapter_version": "v1",
         "capability_digest": pib.digest_json({"cap": 1}),
         "authority_digest": pib.digest_json({"auth": 1}),
     }
     prompt = with_advisory
-    argv_template = ["claude", "-p", "{prompt}", "--permission-mode", "bypassPermissions"]
-    env_projection = {"LH_PROVIDER": pib.digest_text("claude")}
+    argv_template = ["/opt/agent/bin/agent", "--prompt", "{prompt}"]
+    env_projection = {"LH_PROVIDER": pib.digest_text("agent")}
     descriptor_digest = pib.digest_json({"descriptor": "fixture"})
     segments = pib.build_segments(prompt, argv_template, env_projection)
     binding = pib.build_input_binding(

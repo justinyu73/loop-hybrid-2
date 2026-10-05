@@ -47,7 +47,12 @@ def _contract(root: Path) -> Path:
         "source_repo": str(root),
         "base_revision": "main",
         "runtime": {"goal_store": str(root / "goals"), "run_store": str(root / "runs"), "workspace_root": str(root / "ws")},
-        "models": {"execute": "codex", "judge": "agy", "judge_model": "fixture-agy"},
+        "executors": {
+            name: {"argv": [sys.executable, "-c", "pass", *slots, "{prompt}"]}
+            for name, slots in (("coder", ()), ("flag-coder", ()),
+                                ("reviewer", ("{model}",)), ("flag-reviewer", ("{model}",)))
+        },
+        "models": {"execute": "coder", "judge": "reviewer", "judge_model": "fixture-reviewer-model"},
     }
     path = root / "contract.json"
     path.write_text(json.dumps(contract), encoding="utf-8")
@@ -67,14 +72,14 @@ def _plan(argv: list[str]) -> dict:
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         contract = _contract(Path(raw))
-        both = _plan(["--contract", str(contract), "--executor", "local", "--judge-executor", "codex", "--judge-model", "fixture-codex"])
+        both = _plan(["--contract", str(contract), "--executor", "flag-coder", "--judge-executor", "flag-reviewer", "--judge-model", "fixture-flag-model"])
         contract_only = _plan(["--contract", str(contract)])
         cases = [
             case("flag-and-contract-coexist-flag-wins",
-                 both["executor"] == "local" and both["judge_executor"] == "codex" and both["judge_model"] == "fixture-codex",
+                 both["executor"] == "flag-coder" and both["judge_executor"] == "flag-reviewer" and both["judge_model"] == "fixture-flag-model",
                  json.dumps({"executor": both["executor"], "judge": both["judge_executor"]})),
             case("contract-models-applies-without-flags",
-                 contract_only["executor"] == "codex" and contract_only["judge_executor"] == "agy" and contract_only["judge_model"] == "fixture-agy",
+                 contract_only["executor"] == "coder" and contract_only["judge_executor"] == "reviewer" and contract_only["judge_model"] == "fixture-reviewer-model",
                  json.dumps({"executor": contract_only["executor"], "judge": contract_only["judge_executor"]})),
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]

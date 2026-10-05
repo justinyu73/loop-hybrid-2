@@ -32,7 +32,8 @@ def _fixture(root: Path) -> tuple[Path, Path, dict[str, object]]:
             "run_store": "runtime/runs",
             "workspace_root": "runtime/workspaces",
         },
-        "models": {"execute": "codex"},
+        "executors": {"coder": {"argv": [sys.executable, "-c", "pass", "{prompt}"]}},
+        "models": {"execute": "coder"},
     }), encoding="utf-8")
     body = {
         "schema": dispatches.SCHEMA,

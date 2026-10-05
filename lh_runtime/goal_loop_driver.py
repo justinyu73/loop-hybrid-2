@@ -50,6 +50,7 @@ def run_driver(
     quota_reader: dispatch_gate.QuotaReader | None = None,
     daily_soft_cap_usd: float | None = 2.0,
     daily_hard_cap_usd: float | None = 5.0,
+    pricing: dict[str, dict[str, float]] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
     clock_fn: Callable[[], float] | None = None,
     turning_point: TurningPointRunner | None = None,
@@ -113,6 +114,7 @@ def run_driver(
             quota_reader=quota_reader,
             daily_soft_cap_usd=daily_soft_cap_usd,
             daily_hard_cap_usd=daily_hard_cap_usd,
+            pricing=pricing,
             sleep_fn=sleep_fn,
             clock_fn=clock_fn,
             turning_point=turning_point,
@@ -150,6 +152,7 @@ def _run_driver_loop(
     quota_reader: dispatch_gate.QuotaReader | None = None,
     daily_soft_cap_usd: float | None = 2.0,
     daily_hard_cap_usd: float | None = 5.0,
+    pricing: dict[str, dict[str, float]] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
     clock_fn: Callable[[], float] | None = None,
     turning_point: TurningPointRunner | None = None,
@@ -186,6 +189,7 @@ def _run_driver_loop(
         quota_reader=quota_reader,
         soft_daily_usd=daily_soft_cap_usd,
         hard_daily_usd=daily_hard_cap_usd,
+        pricing=pricing,
     )
     gate_state: dict[str, Any] | None = None
     started_at = clock()
@@ -220,7 +224,7 @@ def _run_driver_loop(
             _write_heartbeat(worker, heartbeat_out, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
             _lifecycle_heartbeat(lifecycle, phase="idle", cycles=cycles)
             if snapshot_out is not None:
-                _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
+                _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state, pricing=pricing)
             if idle_streak >= idle_limit:
                 stop_reason = str(gate_state["reason_code"])
                 break
@@ -261,7 +265,7 @@ def _run_driver_loop(
         if result["status"] == "progress":
             idle_streak = 0
             if snapshot_out is not None:
-                _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
+                _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state, pricing=pricing)
             _write_heartbeat(worker, heartbeat_out, holder=holder, phase="progress", cycles=cycles, monotonic_ts=clock())
             _lifecycle_heartbeat(lifecycle, phase="progress", cycles=cycles)
             continue
@@ -275,7 +279,7 @@ def _run_driver_loop(
 
     parked_goals = _parked_goal_ids(worker)
     if snapshot_out is not None:
-        _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state)
+        _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state, pricing=pricing)
     return {
         "stop_reason": stop_reason,
         "cycles": cycles,
@@ -296,7 +300,9 @@ def _lifecycle_heartbeat(lifecycle: LifecycleLease | None, *, phase: str, cycles
         raise LifecycleOwnershipLost("foreground owner lease no longer matches this process")
 
 
-def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_seconds: float = 0.0, gate_state: dict[str, Any] | None = None) -> None:
+def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_seconds: float = 0.0,
+                      gate_state: dict[str, Any] | None = None,
+                      pricing: dict[str, dict[str, float]] | None = None) -> None:
     # LoopController.__init__ always sets timeout_seconds; read it directly.
     timeout_seconds = float(worker.controller.timeout_seconds)
     snapshot = build_snapshot(
@@ -306,6 +312,7 @@ def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_s
         attempt_timeout_seconds=timeout_seconds,
         tick_overhead_seconds=tick_overhead_seconds,
         dispatch_gate=gate_state,
+        pricing=pricing,
     )
     write_snapshot(snapshot, out_path)
 

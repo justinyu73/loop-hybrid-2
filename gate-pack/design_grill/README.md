@@ -14,8 +14,8 @@ unless the caller’s own system has a separate retention policy.
 Any human or model may invoke the framework. The invoker, the subject producer,
 and a reviewer are separate fields, not fixed roles or provider identities. A
 slot may require its binding to differ from the subject or an earlier review
-slot; this requests a real cross-model challenge without hard-coding PEVO/O,
-Claude, Codex, Gemini, or any other pairing.
+slot; this requests a real cross-model challenge without hard-coding any
+model pairing.
 
 1. Prepare a capsule from LH-local documents:
 

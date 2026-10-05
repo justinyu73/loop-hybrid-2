@@ -52,12 +52,9 @@ run_gate lh-supervisor python3 -B lh_runtime/supervisor_canary.py || exit $?
 run_gate lh-scheduler-entrypoint python3 -B lh_runtime/scheduler_entrypoint_canary.py || exit $?
 run_gate lh-dispatch-envelope python3 -B lh_runtime/dispatch_envelope_canary.py || exit $?
 run_gate lh-attempt-fencing python3 -B lh_runtime/attempt_fencing_canary.py || exit $?
-run_gate lh-preventive-execution-fence python3 -B lh_runtime/execution_fence_canary.py || exit $?
-run_gate lh-cross-platform-execution-fence-p4 python3 -B lh_runtime/execution_fence_platform_canary.py || exit $?
+run_gate lh-local-process-fence python3 -B lh_runtime/execution_fence_local_canary.py || exit $?
 run_gate lh-fence-activation-smoke python3 -B lh_runtime/fence_activation_smoke.py || exit $?
-run_gate lh-local-provider-fence python3 -B lh_runtime/local_provider_fence_canary.py || exit $?
 run_gate lh-delivery-runner python3 -B lh_runtime/delivery_runner_canary.py || exit $?
-run_gate lh-local-provider-live-smoke python3 -B lh_runtime/local_provider_live_smoke.py --dry-run || exit $?
 run_gate lh-lifecycle-context-path-n05 python3 -B lh_runtime/lifecycle_context_path_canary.py || exit $?
 run_gate lh-provider-input-binding python3 -B lh_runtime/provider_input_binding_canary.py || exit $?
 run_gate lh-attempt-timeout python3 -B lh_runtime/attempt_timeout_canary.py || exit $?
@@ -67,6 +64,7 @@ run_gate lh-run-liveness python3 -B lh_runtime/run_liveness_canary.py || exit $?
 run_gate lh-durable-budget python3 -B lh_runtime/durable_budget_canary.py || exit $?
 run_gate lh-b12-live-smoke python3 -B lh_runtime/b12_live_smoke_canary.py --dry-run || exit $?
 run_gate lh-executor-wiring python3 -B lh_runtime/executor_wiring_canary.py || exit $?
+run_gate lh-declared-executor python3 -B lh_runtime/declared_executor_canary.py || exit $?
 run_gate lh-platform-ports-p1 python3 -B lh_runtime/platform_ports_canary.py || exit $?
 run_gate lh-token-accounting python3 -B lh_runtime/token_accounting_canary.py || exit $?
 run_gate lh-project-status python3 -B lh_runtime/project_status_canary.py || exit $?
@@ -88,8 +86,6 @@ run_gate lh-run-revival python3 -B lh_runtime/revival_canary.py || exit $?
 run_gate lh-diff-grader python3 -B lh_runtime/diff_grader_canary.py || exit $?
 run_gate lh-authority-surface python3 -B lh_runtime/s1_canary.py || exit $?
 run_gate lh-evidence-integrity python3 -B lh_runtime/evidence_integrity_canary.py || exit $?
-run_gate lh-codex-usage python3 -B lh_runtime/codex_usage_canary.py || exit $?
-run_gate lh-usage-parsers python3 -B lh_runtime/usage_parser_canary.py || exit $?
 run_gate lh-value-reducer python3 -B lh_runtime/value_reducer_canary.py || exit $?
 run_gate lh-value-gate python3 -B lh_runtime/value_gate_canary.py || exit $?
 run_gate design-grill python3 gate-pack/design_grill/canary.py || exit $?
