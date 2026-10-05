@@ -375,6 +375,13 @@ class WorkUnitCompletionController:
         self.command_runner = execution_binding.command if execution_binding is not None else command_runner
         self.binding_receipt = dict(binding_receipt) if binding_receipt is not None else None
         self.delivery_contract = dict(delivery_contract) if delivery_contract is not None else None
+        # A review policy is part of both sealed contracts or of neither.
+        self.review_policy = None
+        if "candidate_review" in contract or (self.delivery_contract is not None
+                                              and "candidate_review" in self.delivery_contract):
+            if self.delivery_contract is None or contract.get("candidate_review") != self.delivery_contract.get("candidate_review"):
+                raise ValueError("completion_candidate_review_policy_conflict")
+            self.review_policy = delivery_unit_contract.validate_candidate_review_policy(contract["candidate_review"])
         self.candidate_recovery_admission = (dict(candidate_recovery_admission)
                                              if candidate_recovery_admission is not None else None)
         self.candidate_recovery_authority_context = (
@@ -679,7 +686,10 @@ class WorkUnitCompletionController:
                     raise ValueError("completion_check_cwd_escape")
                 if self.command_runner is None:
                     raise ValueError("execution_fence_unavailable: completion_command_port_missing")
-                result, fence_evidence, _descriptor = self.command_runner({**request, "command_id": command["id"]},
+                command_request = {**request, "command_id": command["id"]}
+                if request.get("candidate_review_check_mode") is True:
+                    command_request["candidate_review_check"] = copy.deepcopy(command)
+                result, fence_evidence, _descriptor = self.command_runner(command_request,
                     phase=request.get("execution_phase", "checks"),
                     argv=argv, worktree=str(cwd), timeout_seconds=float(command.get("timeout_seconds", 300)), env=env)
                 result.stdout = result.stdout.encode() if isinstance(result.stdout, str) else result.stdout
@@ -708,6 +718,30 @@ class WorkUnitCompletionController:
                     "verdict": "GREEN" if all(row["exit_code"] == row["expect_exit"] for row in rows) else "RED"}
 
     def _verify(self, request: dict) -> dict:
+        related = None
+        if self.review_policy is not None and "review_related_commands" in request:
+            # The packet's targeted commands run first; a red one costs no review.
+            related = self._checks({**request, "execution_phase": "verifier", "candidate_review_check_mode": True},
+                                   request["review_related_commands"])
+            related.update(schema="lh-candidate-review-related-checks/v2",
+                           commands_digest=digest_json(request["review_related_commands"]),
+                           contract_digest=self.delivery_contract["contract_digest"],
+                           **{key: request[key] for key in ("run_id", "attempt", "fence", "base_sha")})
+            related["receipt_digest"] = digest_json(related)
+            request = {**request, "checks_digest": related["receipt_digest"], "candidate_commit": related["candidate_commit"]}
+            if related["verdict"] != "GREEN":
+                return {"verdict": "RED", "reason_code": "check_failed", "reason": "candidate_review_related_checks_red",
+                        "candidate_digest": request["candidate_digest"], "checks_digest": request["checks_digest"],
+                        "related_checks": related, "checks": related["checks"]}
+        review_context = None
+        if self.review_policy is not None:
+            identity = {key: request[key] for key in ("goal_id", "goal_revision", "node_id", "dispatch_key",
+                                                      "run_id", "attempt", "fence", "base_sha", "diff_digest")}
+            identity.update(unit_id=self.delivery_contract["unit_id"], contract_digest=self.delivery_contract["contract_digest"])
+            review_context = delivery_unit_contract.candidate_review_context(
+                self.review_policy, candidate_digest=request["candidate_digest"], base_sha=request["base_sha"],
+                checks_digest=request["checks_digest"], scope=self.delivery_contract["scope"], identity=identity)
+            request = {**request, "candidate_review_context": review_context}
         source = Path(request["worktree"])
         snapshot_root = self.store.root / "completion-snapshots"
         snapshot_root.mkdir(exist_ok=True)
@@ -752,7 +786,48 @@ class WorkUnitCompletionController:
                     raise ValueError("completion_verifier_mutated_candidate")
                 if candidate_digest(str(snapshot), env=snapshot_env) != request["candidate_digest"]:
                     raise ValueError("completion_verifier_mutated_snapshot")
+                if review_context is not None:
+                    # The reviewer's verdict must be the one its own findings support.
+                    verdict = delivery_unit_contract.validate_candidate_review_result(evidence.get("review"), review_context)
+                    if verdict != evidence["verdict"]:
+                        raise ValueError("completion_candidate_review_verdict_mismatch")
+                    evidence = {**evidence, **delivery_unit_contract.seal_candidate_review_proof(
+                        evidence["review"], review_context, self.store.root)}
+                    if related is not None:
+                        evidence["related_checks"] = related
+                    self._publish_review_suggestions(evidence, request)
                 return evidence
+
+    def _publish_review_suggestions(self, evidence: dict, request: dict) -> None:
+        """Record non-blocking findings as discovery candidates; never approve or dispatch one."""
+        from .discovery_cursor import BATCH_SCHEMA, CANDIDATE_SCHEMA, candidate_id
+        goal = request["goal_id"]
+        records = []
+        for finding in evidence["review"]["findings"]:
+            if finding["blocking"]:
+                continue
+            obj = finding["location"] + "::" + finding["id"]
+            records.append({"schema": CANDIDATE_SCHEMA,
+                            "candidate_id": candidate_id(goal, "review_optimization", obj),
+                            "object": obj, "problem_type": "review_optimization", "finding": copy.deepcopy(finding),
+                            "review_ref": copy.deepcopy(evidence["review_ref"]),
+                            "context_digest": evidence["candidate_review_context"]["context_digest"],
+                            "first_event_id": "candidate-review:" + evidence["review_ref"]["content_digest"]})
+        if not records:
+            return
+        known = self.store.discovery_known_candidates(goal, [row["candidate_id"] for row in records])
+        fresh = [row for row in records if row["candidate_id"] not in known]
+        if not fresh:
+            return
+        position = self.store.discovery_position(goal)
+        for row in fresh:
+            row["first_rowid"] = position["after_rowid"]
+        names = [row["candidate_id"] for row in fresh]
+        batch = {"schema": BATCH_SCHEMA, "seq": position["seq"] + 1,
+                 "from_rowid": position["after_rowid"], "to_rowid": position["after_rowid"], "events_read": 0,
+                 "new_candidates": names, "handoff": [], "pending": position["pending"] + names,
+                 "coverage": position["coverage"]}
+        self.store.record_discovery_batch(goal, batch=batch, candidates=fresh)
 
     def _retry_or_incomplete(self, envelope: dict, result: dict, evidence: dict,
                              *, allow_retry: bool) -> dict:
@@ -1177,6 +1252,11 @@ class WorkUnitCompletionController:
             if not commands or not integration_commands:
                 raise ValueError("completion_full_checks_missing")
             validate_full_validation_binding(contract, packet)
+            if self.review_policy is not None and any(value is not None for value in
+                                                      (checks_repair_binding, verifier_reconciliation, delivery_recovery)):
+                # A v2 review cannot re-seal an immutable historical repair chain
+                # by reading its old checks as related checks.
+                raise ValueError("candidate_review_historical_repair_contract_unsupported")
             if contract.get("integration_inputs") and any(value is not None for value in (
                 checks_repair_binding, verifier_reconciliation, delivery_recovery)):
                 raise ValueError("completion_fanin_recovery_unsupported")
@@ -1321,6 +1401,18 @@ class WorkUnitCompletionController:
                             "changed_paths": sorted(set(changed)),
                         },
                     )
+                    if self.review_policy is not None:
+                        # Review the candidate right after its related checks and
+                        # before the full checks, so a requirement defect is found
+                        # before the most expensive validation runs.
+                        review_request = {**context, "candidate_digest": candidate,
+                                          "candidate_commit": candidate_receipt["candidate_commit"],
+                                          "checks_digest": digest_json(packet["targeted_commands"]),
+                                          "review_related_commands": packet["targeted_commands"]}
+                        verification = self._effect(review_request, "verifier",
+                            digest_json([candidate, packet["targeted_commands"], self.review_policy]), self._verify)
+                        if verification["verdict"] == "RED":
+                            return self._retry_or_incomplete(envelope, result, verification, allow_retry=allow_retry)
                     if contract.get("recovery_environment_ref") is not None:
                         resumed = self.store.recovery_environment_resume(
                             context["run_id"], context["attempt"], context["fence"])
@@ -1340,10 +1432,11 @@ class WorkUnitCompletionController:
                         "fence": attempt["fence"]}
             request = {**context, "candidate_digest": candidate, "candidate_commit": checks["candidate_commit"],
                        "checks_digest": checks["receipt_digest"]}
-            verification = self._effect(
-                request, "verifier", digest_json([candidate, checks["receipt_digest"]]), self._verify,
-                verifier_reconciliation=verifier_reconciliation,
-            )
+            if self.review_policy is None:
+                verification = self._effect(
+                    request, "verifier", digest_json([candidate, checks["receipt_digest"]]), self._verify,
+                    verifier_reconciliation=verifier_reconciliation,
+                )
             if verification["verdict"] == "RED":
                 return self._retry_or_incomplete(envelope, result, verification, allow_retry=allow_retry)
             pending_delivery = self.store.pending_delivery_dependencies(

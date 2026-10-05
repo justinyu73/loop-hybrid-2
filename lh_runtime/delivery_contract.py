@@ -985,13 +985,31 @@ def verify_delivery(
             if any(verifier.get(key) != verifier_receipt.get(key) for key in
                    ("review", "review_ref", "candidate_review_context", "candidate_digest", "checks_digest")):
                 raise DeliveryUnitError("candidate_review_wrapper_mismatch")
-            if not isinstance(verifier.get("snapshot"), Mapping):
-                # The work-unit completion path seals its review on a different
-                # receipt chain; until that chain is wired it must not pass here.
-                raise DeliveryUnitError("candidate_review_work_unit_path_unsupported")
-            if (verifier["candidate_digest"] != verifier["snapshot"].get("source_before")
-                    or verifier["checks_digest"] != digest_json(evidence.get("obligations"))):
-                raise DeliveryUnitError("candidate_review_snapshot_binding_invalid")
+            if isinstance(verifier.get("snapshot"), Mapping):
+                if (verifier["candidate_digest"] != verifier["snapshot"].get("source_before")
+                        or verifier["checks_digest"] != digest_json(evidence.get("obligations"))):
+                    raise DeliveryUnitError("candidate_review_snapshot_binding_invalid")
+            else:
+                # Work-unit path: the early review, the related checks it read,
+                # and the full checks that followed must describe one candidate.
+                stages = _mapping("candidate_review.receipts", evidence.get("receipts"))
+                early = _mapping("candidate_review.early", stages.get("verifier"))
+                verify_candidate_review_proof(resolved, early)
+                related = _mapping("candidate_review.related_checks", early.get("related_checks"))
+                full = _mapping("candidate_review.full_checks", stages.get("checks"))
+                packet = _mapping("candidate_review.packet", evidence.get("packet"))
+                completion = _mapping("candidate_review.completion", packet.get("completion_contract"))
+                if (not verify_receipt(early) or not verify_receipt(related) or not verify_receipt(full)
+                        or related.get("schema") != "lh-candidate-review-related-checks/v2"
+                        or related.get("verdict") != "GREEN" or full.get("verdict") != "GREEN"
+                        or related.get("candidate_digest") != early["candidate_digest"]
+                        or full.get("candidate_digest") != early["candidate_digest"]
+                        or early["checks_digest"] != related["receipt_digest"]
+                        or related.get("commands_digest") != digest_json(packet.get("targeted_commands"))
+                        or full.get("phase") != "checks"
+                        or [row.get("id") for row in full.get("checks", [])]
+                        != [row.get("id") for row in completion.get("checks", [])]):
+                    raise DeliveryUnitError("candidate_review_full_validation_link_invalid")
         plan = evidence.get("plan_verdict")
         if verify_plan_verdict(plan, resolved).get("verdict") != "GREEN":
             raise DeliveryUnitError("delivery_plan_verdict_missing")

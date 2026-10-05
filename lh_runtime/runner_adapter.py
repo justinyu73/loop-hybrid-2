@@ -104,6 +104,21 @@ def _trusted_role_input(request, *, role, phase, store, authority_digest):
     rubric = {"packet_digest": request["packet_digest"], "completion_contract_digest": digest_json(contract),
         "checks": copy.deepcopy(contract["checks"]), "integration_checks": copy.deepcopy(contract["integration_checks"]),
         "required_test_delta": packet.get("required_test_delta", False)}
+    review_policy = contract.get("candidate_review")
+    if review_policy is not None:
+        from .delivery_contract import validate_candidate_review_policy
+        rubric["candidate_review"] = validate_candidate_review_policy(review_policy)
+    review_context = request.get("candidate_review_context")
+    if review_context is not None:
+        if (review_policy is None or not isinstance(review_context, dict)
+                or review_context.get("schema") != "lh-candidate-review-context/v2"
+                or review_context.get("policy") != review_policy
+                or any(review_context.get(k) != request.get(k) for k in ("candidate_digest", "checks_digest", "base_sha"))):
+            raise CapabilityError("trusted_role_review_context_invalid")
+    if request.get("candidate_review_check_mode") is True:
+        if (review_policy is None or request.get("candidate_review_check") not in packet.get("targeted_commands", [])
+                or request["candidate_review_check"].get("id") != request.get("command_id")):
+            raise CapabilityError("trusted_role_review_check_unbound")
     scope = {"write_set": copy.deepcopy(packet["write_set"]),
              "forbidden_paths": copy.deepcopy(packet.get("forbidden_paths", []))}
     evidence = {key: request[key] for key in ("candidate_digest", "candidate_commit", "checks_digest") if key in request}
@@ -131,7 +146,24 @@ def _trusted_role_input(request, *, role, phase, store, authority_digest):
         failure = {"phase": phase_name, "verdict": "RED", "receipt_digest": red["receipt_digest"],
             "reason": "completion_" + phase_name + "_red", "diagnostics": diagnostics,
             "evidence_ref": {"state_root": str(store.root), "phase_key": red["phase_key"]}}
-        if phase_name in {"verifier", "integration_verifier"}:
+        if review_policy is not None and red.get("review") is not None:
+            # A red review is fed back as written, once its sealed bytes still match.
+            from .delivery_contract import (_review_ref_bytes, load_candidate_review_json,
+                                             validate_candidate_review_result)
+            try:
+                red_review_ok = (validate_candidate_review_result(red["review"], red.get("candidate_review_context", {})) == "RED"
+                                 and load_candidate_review_json(_review_ref_bytes(red.get("review_ref"))) == red["review"])
+            except ValueError:
+                red_review_ok = False
+            if not red_review_ok:
+                raise CapabilityError("trusted_role_review_feedback_invalid")
+            failure.update(review=copy.deepcopy(red["review"]), review_ref=copy.deepcopy(red["review_ref"]),
+                           candidate_review_context=copy.deepcopy(red["candidate_review_context"]))
+        elif review_policy is not None and red.get("related_checks", {}).get("verdict") == "RED":
+            related = red["related_checks"]
+            if related.get("receipt_digest") != digest_json({k: v for k, v in related.items() if k != "receipt_digest"}):
+                raise CapabilityError("trusted_role_related_checks_feedback_invalid")
+        elif phase_name in {"verifier", "integration_verifier"}:
             provider = red.get("provider_execution", {})
             result = provider.get("result")
             result_digest, reason_code = provider.get("result_digest"), red.get("reason_code")
@@ -144,6 +176,8 @@ def _trusted_role_input(request, *, role, phase, store, authority_digest):
     fields = {"goal_id", "goal_revision", "node_id", "run_id", "work_unit_id", "dispatch_key", "attempt", "fence",
         "base_sha", "worktree", "branch", "packet_digest", "envelope_digest", "candidate_digest", "candidate_commit",
         "checks_digest", "read_only_required"}
+    if review_context is not None:
+        fields.add("candidate_review_context")
     projected = {key: copy.deepcopy(request[key]) for key in fields if key in request}
     projected.update(packet_path=str(path), execution_phase=phase, completion_repair=[failure] if failure else [],
         role_context={"role": role, "goal": goal, "objective": packet.get("task", ""), "scope": scope,
@@ -853,6 +887,12 @@ class ResolvedExecutionBinding:
                 or request.get("goal_revision") != self.policy["goal_revision"]):
             raise CapabilityError("trusted_goal_binding_mismatch")
         role = "coding" if phase == "coding" else ("verifier" if "verifier" in phase else None)
+        # Related commands are exact packet-owned checks run inside the admitted
+        # verifier operation, not a new provider phase or role.
+        if role == "verifier" and request.get("candidate_review_check_mode") is True:
+            _trusted_role_input(request, role="verifier", phase=phase, store=self.store,
+                                authority_digest=self.continuation_authority_digest)
+            role = None
         if role is not None and self.continuation_authority_digest is not None:
             if input_request is None:
                 raise CapabilityError("trusted_role_input_missing")
@@ -868,7 +908,10 @@ class ResolvedExecutionBinding:
         if role is not None:
             if argv != self.providers[role]["command"]:
                 raise CapabilityError("trusted_provider_command_mismatch")
-            schema = trusted_output_schema(role)
+            review_context = input_request.get("candidate_review_context") if role == "verifier" and input_request else None
+            if review_context != request.get("candidate_review_context"):
+                raise CapabilityError("trusted_publisher_review_context_changed")
+            schema = trusted_output_schema(role, review_version=2 if review_context is not None else 1)
             schema_path = scratch / "output-schema.json"
             schema_bytes = inputs.canonical_json(schema).encode()
             if schema_path.exists() and schema_path.read_bytes() != schema_bytes:
@@ -943,6 +986,8 @@ class ResolvedExecutionBinding:
             if role == "verifier":
                 expected["candidate_digest"] = request["candidate_digest"]
                 expected["checks_digest"] = request["checks_digest"]
+                if review_context is not None:
+                    expected["candidate_review_context"] = review_context
             normalized = normalize_trusted_provider_output(result.stdout, stderr=result.stderr,
                 returncode=result.returncode, role=role, model=self.operator["providers"][role]["model"],
                 expected=expected, diagnostics=diagnostics)
