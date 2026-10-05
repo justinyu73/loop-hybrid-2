@@ -244,7 +244,18 @@ TRUSTED_USAGE_FIELDS = {"state", "input_tokens", "cached_input_tokens", "fresh_i
 _REPORTED_USAGE_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
 
 
-def trusted_output_schema(role):
+def _review_engine():
+    if __package__:
+        from . import delivery_contract
+    else:
+        import delivery_contract
+    return delivery_contract
+
+
+def trusted_output_schema(role, *, review_version=1):
+    """The closed role result; verifier v2 also carries a candidate review."""
+    if review_version not in {1, 2} or (review_version == 2 and role != "verifier"):
+        raise ValueError("trusted_review_version_invalid")
     if role == "coding":
         properties = {"schema": {"type": "string", "enum": ["lh-worker-result/v1"]},
             "status": {"type": "string", "enum": ["completed", "failed"]},
@@ -258,6 +269,9 @@ def trusted_output_schema(role):
             "reason_code": {"type": "string", "enum": ["verified", "check_failed", "scope_failed"]}}
     else:
         raise ValueError("trusted_role_invalid")
+    if review_version == 2:
+        properties["schema"] = {"type": "string", "enum": ["lh-verifier-result/v2"]}
+        properties["review"] = _review_engine().candidate_review_output_schema()
     return {"type": "object", "properties": properties, "required": list(properties),
             "additionalProperties": False}
 
@@ -364,7 +378,9 @@ def normalize_trusted_provider_output(stdout, *, stderr, returncode, role, model
         return value
 
     try:
-        schema = trusted_output_schema(role)
+        # A bound review context selects v2; without one, v2 is never accepted.
+        review_context = expected.get("candidate_review_context") if role == "verifier" else None
+        schema = trusted_output_schema(role, review_version=2 if review_context is not None else 1)
         lines = [line for line in stdout.splitlines() if line.strip()]
         line = json.loads(lines[-1], object_pairs_hook=closed_object) if lines else None
         if (not isinstance(line, dict) or set(line) != {"schema", "outcome", "result", "usage"}
@@ -379,6 +395,10 @@ def normalize_trusted_provider_output(stdout, *, stderr, returncode, role, model
         if not isinstance(value, dict) or set(value) != set(schema["properties"]):
             raise ValueError("final shape")
         for key, definition in schema["properties"].items():
+            if key == "review":
+                if _review_engine().validate_candidate_review_result(value[key], review_context) != value["verdict"]:
+                    raise ValueError("final review verdict")
+                continue
             if (not isinstance(value[key], str)
                     or ("enum" in definition and value[key] not in definition["enum"])
                     or ("pattern" in definition and re.fullmatch(definition["pattern"], value[key]) is None)
