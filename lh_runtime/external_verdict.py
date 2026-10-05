@@ -7,10 +7,9 @@ starts, it POLLS the (durable) awaiting runs against a conclusion source (real C
 a stub here) and resumes them. This survives operator-host outage the same way the
 spine survives kill-9 — the awaiting state lives in SQLite, not in a live process.
 
-此 port 組合 external_action_port 與持久化 VerdictStore，不自行持有
-GitHub 憑證。goal_loop_run.build_github_verdict 已可依 contract 注入
-GitHub conclusion source；測試使用的 fixture transport 只證明隔離接線，
-不代表真實 CI 或 provider 驗收。
+此 port 組合 external_action_port 與持久化 VerdictStore，不持有任何憑證。
+conclusion source 由使用者透過引擎 API 注入；測試使用的 fixture source 只證明
+隔離接線，不代表真實 CI 驗收。
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ from typing import Any, Callable
 import external_action_port as eap
 
 # Given an op_key, return None if the external verdict is still pending, else a dict
-# like {"conclusion": "success" | "failure"}. A real source queries GitHub check-runs.
+# like {"conclusion": "success" | "failure"}. A real source queries the CI that runs the change.
 ConclusionSource = Callable[[str], dict[str, Any] | None]
 
 

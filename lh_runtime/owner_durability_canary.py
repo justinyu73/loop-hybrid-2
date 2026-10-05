@@ -33,9 +33,10 @@ from p7_fence_fixture import fixture_command_runner
 
 CAMPAIGN_ID = "campaign-w5"
 GOAL_ID = f"{CAMPAIGN_ID}:stage-1"
-# gpt-5.6-luna is priced at exactly $1.0/Mtok input in token_cost.DEFAULT_PRICING,
-# so one seeded receipt's input_tokens map 1:1 onto microdollars.
-COST_MODEL = "gpt-5.6-luna"
+# The fixture model is declared at exactly $1.0/Mtok input, so one seeded
+# receipt's input_tokens map 1:1 onto microdollars.
+COST_MODEL = "fixture-model"
+PRICING = {COST_MODEL: {"input": 1.0, "output": 6.0, "cache_read": 0.1}}
 
 
 def _noop_sleep(_seconds: float) -> None:
@@ -50,7 +51,7 @@ def _model(workspace: Path, capsule: dict) -> dict:
 
 
 def _auth_model(_workspace: Path, _capsule: dict) -> dict:
-    raise RuntimeError("codex exited 1: 401 Unauthorized: token expired, please log in again")
+    raise RuntimeError("coder exited 1: 401 Unauthorized: token expired, please log in again")
 
 
 def _worker(root: Path, tag: str, source: Path, base: str) -> GoalLoopWorker:
@@ -156,6 +157,7 @@ def _drive(worker: GoalLoopWorker, tag: str, *, model=_model, quota: float | Non
         sleep_fn=_noop_sleep,
         quota_reader=(lambda: {"used_percent": quota}) if quota is not None else None,
         status_snapshot_out=snap_out if snapshot else None,
+        pricing=PRICING,
     )
     snap = json.loads(snap_out.read_text(encoding="utf-8")) if snap_out.exists() else {}
     return result, snap

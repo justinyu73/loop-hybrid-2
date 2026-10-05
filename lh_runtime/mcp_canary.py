@@ -47,7 +47,7 @@ def main() -> int:
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({"check_id": "lh-runtime-mcp", "status": "pass" if not failures else "fail", "total": len(cases), "blocking_failures": failures,
-                      "known_gaps_open": ["This local stdio server exposes only read-only resources/tools; provider execution and GitHub actions remain controller ports."]}, ensure_ascii=False, indent=2))
+                      "known_gaps_open": ["This local stdio server exposes only read-only resources/tools; provider execution and external actions remain controller ports."]}, ensure_ascii=False, indent=2))
     return 0 if not failures else 1
 
 

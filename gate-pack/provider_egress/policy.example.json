@@ -7,8 +7,8 @@
   "credential_boundary": "gateway_only",
   "audit_boundary": "host_append_only",
   "provider_profiles": {
-    "codex_p3": {"runner": "codex", "account_profile": "subscription", "retention_profile": "account-bound", "training_profile": "account-bound", "quota_authority": "provider_5hr_percentage"},
-    "claude_o": {"runner": "claude", "account_profile": "subscription", "retention_profile": "account-bound", "training_profile": "account-bound", "quota_authority": "provider_status_or_fail_closed"},
-    "agy_subscription": {"runner": "agy", "account_profile": "subscription", "retention_profile": "account-bound", "training_profile": "account-bound", "quota_authority": "unknown_or_fail_closed"}
+    "profile_a": {"runner": "agent_a", "account_profile": "subscription", "retention_profile": "account-bound", "training_profile": "account-bound", "quota_authority": "provider_5hr_percentage"},
+    "profile_b": {"runner": "agent_b", "account_profile": "subscription", "retention_profile": "account-bound", "training_profile": "account-bound", "quota_authority": "provider_status_or_fail_closed"},
+    "profile_c": {"runner": "agent_c", "account_profile": "subscription", "retention_profile": "account-bound", "training_profile": "account-bound", "quota_authority": "unknown_or_fail_closed"}
   }
 }

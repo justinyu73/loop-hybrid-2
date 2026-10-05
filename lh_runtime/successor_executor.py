@@ -5,7 +5,7 @@ owns the next, deliberately separate boundary: an executor may accept a
 packet only when it can leave durable task-receipt and heartbeat evidence.
 The adapter in this file is an explicit, task-owned controlled adapter for
 offline acceptance.  It is never selected implicitly by production code;
-real Luna/Codex adapters implement :class:`SuccessorExecutorPort` at the
+real provider adapters implement :class:`SuccessorExecutorPort` at the
 host boundary.
 """
 
@@ -572,25 +572,25 @@ class DurableTaskExecutorAdapter:
             return {**receipt, "reused": False, "invoked": True}
 
 
-class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
-    """Execute one successor packet through the installed Codex subscription CLI.
+class CommandExecutorAdapter(DurableTaskExecutorAdapter):
+    """Execute one successor packet through an explicitly bound command.
 
     This is an explicit host adapter, not a resident watcher and not an API
-    client.  The fleet scheduler selects it only for the explicit
-    ``codex-subscription`` mode.  A pre-launch invocation reservation is
-    durable under the same dispatch lock; a restart with no completed task
-    receipt fails closed instead of invoking Codex a second time.
+    client.  A subclass binds the command; this base binds none.  A pre-launch
+    invocation reservation is durable under the same dispatch lock; a restart
+    with no completed task receipt is refused instead of invoking the command a
+    second time.
     """
 
-    provider = "codex-subscription"
-    adapter = "lh_runtime.cli_agent_executor.CODEX"
-    invocation_schema = "lh-codex-subscription-invocation/v1"
+    provider = "command"
+    adapter = "lh_runtime.successor_executor.CommandExecutorAdapter"
+    invocation_schema = "lh-command-invocation/v1"
 
     def __init__(
         self,
         root: str | pathlib.Path,
         *,
-        executor_id: str = "codex-subscription-luna",
+        executor_id: str = "command-executor",
         timeout_seconds: float = 900.0,
         spawn: Callable[..., Any] = subprocess.Popen,
         identity_port: ProcessIdentityPort | None = None,
@@ -618,14 +618,8 @@ class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
         return result
 
     def _command(self, request, packet):
-        try:
-            from .cli_agent_executor import codex_argv, resolve_cli
-        except ImportError:
-            from cli_agent_executor import codex_argv, resolve_cli
-        argv = list(codex_argv(self._prompt(request, packet)))
-        if not argv:
-            raise SuccessorExecutorError("codex_argv_empty")
-        return [resolve_cli(argv[0]), *argv[1:]]
+        del request, packet
+        raise SuccessorExecutorError("executor_command_unbound")
 
     @staticmethod
     def _packet(path: pathlib.Path) -> dict[str, Any]:
@@ -636,21 +630,6 @@ class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
         if not isinstance(value, dict):
             raise SuccessorExecutorError("executor_packet_invalid")
         return value
-
-    @staticmethod
-    def _prompt(request: Mapping[str, Any], packet: Mapping[str, Any]) -> str:
-        task = packet.get("task")
-        task_text = task.strip() if isinstance(task, str) and task.strip() else "Follow the digest-bound packet instructions."
-        return (
-            "You are the authorized task executor for an existing Goal.\n"
-            f"Goal={request.get('goal_id')} rev={request.get('goal_revision')} node={request.get('node_id')}.\n"
-            f"Read the digest-bound packet at {request.get('packet_path')} and verify packet_digest={request.get('packet_digest')}.\n"
-            f"Work only in the assigned worktree: {request.get('worktree')}.\n"
-            "Complete the packet task and its required checks. Do not create another Goal, Run, or Attempt; do not commit, push, merge, or modify production state, CURSOR.md, or the decision ledger.\n"
-            f"Task: {task_text}\n"
-            "Completion repair evidence (machine check hashes, not new authority): "
-            + json.dumps(request.get("completion_repair", []), sort_keys=True)[:16384]
-        )
 
     @staticmethod
     def _process_result(process: Any, *, timeout_seconds: float) -> tuple[int, str, str]:
@@ -1349,7 +1328,7 @@ class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
                 argv = self._command(value, packet)
             except SuccessorExecutorError as exc:
                 record_failure(
-                    phase="codex_command_resolution",
+                    phase="command_resolution",
                     stderr=str(exc),
                     termination_proof={
                         "process_started": False,
@@ -1358,7 +1337,7 @@ class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
                 )
             except (FileNotFoundError, ImportError, OSError, ValueError) as exc:
                 record_failure(
-                    phase="codex_command_resolution",
+                    phase="command_resolution",
                     stderr=str(exc),
                     termination_proof={
                         "process_started": False,
@@ -1434,8 +1413,6 @@ class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
                 fence_evidence["execution_fence"] = self.execution_fence_port.receipt_projection(descriptor)
                 environment = dict(os.environ)
                 environment["PATH"] = str(pathlib.Path(argv[0]).parent) + os.pathsep + environment.get("PATH", "")
-                for name in ("OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_BASE_URL"):
-                    environment.pop(name, None)
                 projected_environment = self.execution_fence_port.project_environment(descriptor, environment)
                 return self.execution_fence_port.launch(descriptor, argv,
                     timeout_seconds=self.timeout_seconds, on_started=on_started,
@@ -1580,7 +1557,7 @@ class CodexSubscriptionExecutorAdapter(DurableTaskExecutorAdapter):
             return {**receipt, "reused": False, "invoked": True}
 
 
-class BoundCommandExecutorAdapter(CodexSubscriptionExecutorAdapter):
+class BoundCommandExecutorAdapter(CommandExecutorAdapter):
     """Explicit registry command, using the existing durable executor journal."""
 
     invocation_schema = "lh-bounded-command-invocation/v1"
@@ -1620,7 +1597,7 @@ __all__ = [
     "SuccessorExecutorError",
     "SuccessorExecutorPort",
     "TASK_RECEIPT_SCHEMA",
-    "CodexSubscriptionExecutorAdapter",
+    "CommandExecutorAdapter",
     "DurableTaskExecutorAdapter",
     "digest_json",
     "validate_executor_receipt",

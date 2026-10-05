@@ -161,7 +161,7 @@ def evaluate_shadow(proposal: dict[str, Any], shadow: dict[str, Any], *, repo_ro
 
 def is_constitutional_surface(target_ref: Any) -> bool:
     return target_ref == "AGENTS.md" or isinstance(target_ref, str) and target_ref.startswith((
-        "gate-pack/boundary_seal/", "gate-pack/quota/", "gate-pack/ceremony_grader.py", "gate-pack/verify.sh",
+        "gate-pack/boundary_seal/", "gate-pack/ceremony_grader.py", "gate-pack/verify.sh",
     ))
 
 

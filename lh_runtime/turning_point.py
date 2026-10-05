@@ -126,10 +126,6 @@ def parse_decision(text: str) -> dict[str, Any]:
         value = json.loads(text)
         if isinstance(value, dict) and "decision" in value:
             return value
-        if isinstance(value, dict) and "status" in value:
-            if value.get("status") != "SUCCESS" or not isinstance(value.get("response"), str):
-                raise ValueError("judge JSON envelope is not successful")
-            return parse_decision(value["response"])
     except json.JSONDecodeError:
         pass
     for match in re.finditer(r"\{[^{}]*\}", text):

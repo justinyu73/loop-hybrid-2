@@ -263,7 +263,7 @@ def main() -> int:
         "total": len(cases), "blocking_failures": failures,
         "verification": {"command": "python3 -B lh_runtime/worker_async_canary.py", "adapter": "fixture only, no network"},
         "known_gaps_open": [
-            "github_conclusion_source remains Deferred; canary uses a fixture conclusion source.",
+            "the engine ships no conclusion source; this canary injects a fixture source.",
         ],
     }, ensure_ascii=False, indent=2))
     return 0 if not failures else 1

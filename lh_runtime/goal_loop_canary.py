@@ -213,7 +213,7 @@ def main() -> int:
 
         class Adapter:
             def perform(self, _op_key: str, _request: dict[str, object]) -> dict[str, object]:
-                return {"head_sha": base, "pr_url": "https://github.invalid/pr/g5", "pr_number": 5}
+                return {"head_sha": base, "pr_url": "https://scm.invalid/pr/g5", "pr_number": 5}
 
         verdict_ledger = eap.ActionLedger(root / "verdict-actions")
         verdict_worker = GoalLoopWorker(

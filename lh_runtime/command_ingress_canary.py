@@ -195,7 +195,7 @@ def main() -> int:
         "blocking_failures": failures,
         "known_gaps_open": [
             "ingress only records a bounded event; admission, execution, and promotion remain later LH ports",
-            "no executor, driver, provider, or GitHub path is wired by this node",
+            "no executor, driver, provider, or external-service path is wired by this node",
         ],
     }, ensure_ascii=False, indent=2))
     return 0 if not failures else 1

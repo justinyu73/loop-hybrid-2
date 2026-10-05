@@ -31,7 +31,7 @@ ALLOWLIST: tuple[tuple[str, str], ...] = (
     ("docs/active", ".md"),
     ("lh_runtime", ".py"),
 )
-ROOT_ALLOWLIST = ("AGENTS.md", "CLAUDE.md", "project_runtime_contract.json")
+ROOT_ALLOWLIST = ("AGENTS.md", "project_runtime_contract.json")
 CANONICAL_ALLOWLIST = ("docs/bootstrap-authority.md",)
 
 

@@ -33,7 +33,7 @@ def forged_facts(request: dict) -> dict:
 
 def ratified_delegation() -> dict:
     value = {"schema": delegation.SCHEMA, "delegation_id": "canary-delegation", "target_repo": "loop-hybrid", "roles": ["executor"],
-             "provider_profiles": ["codex_p3"], "max_calls": 1, "expires_at": "2026-07-11T13:00:00Z"}
+             "provider_profiles": ["profile_a"], "max_calls": 1, "expires_at": "2026-07-11T13:00:00Z"}
     contract = {key: value[key] for key in ("schema", "delegation_id", "target_repo", "roles", "provider_profiles", "max_calls", "expires_at")}
     value["ratification"] = {"state": "ratified", "ratified_by": "human", "contract_digest": delegation._digest(contract)}
     return value
@@ -56,8 +56,8 @@ def main() -> int:
         invalid = pe.admit(bad, POLICY, pe.AppendOnlyLedger(Path(tmp) / "events.jsonl"), host_verifier=facts, evaluated_at=NOW)
     with tempfile.TemporaryDirectory() as tmp:
         forged = pe.admit(ENVELOPE, POLICY, pe.AppendOnlyLedger(Path(tmp) / "events.jsonl"), host_verifier=forged_facts, evaluated_at=NOW)
-    ready = delegation.compile_exact_call(ratified_delegation(), role="executor", provider_profile="codex_p3", capsule=copy.deepcopy(ENVELOPE["capsule"]), requested_at="2026-07-11T12:00:00Z", call_suffix="1", policy=POLICY, prior_admissions=[])
-    capped = delegation.compile_exact_call(ratified_delegation(), role="executor", provider_profile="codex_p3", capsule=copy.deepcopy(ENVELOPE["capsule"]), requested_at="2026-07-11T12:00:00Z", call_suffix="2", policy=POLICY, prior_admissions=[{"type": "provider_egress_admitted", "call_id": "canary-delegation:1"}])
+    ready = delegation.compile_exact_call(ratified_delegation(), role="executor", provider_profile="profile_a", capsule=copy.deepcopy(ENVELOPE["capsule"]), requested_at="2026-07-11T12:00:00Z", call_suffix="1", policy=POLICY, prior_admissions=[])
+    capped = delegation.compile_exact_call(ratified_delegation(), role="executor", provider_profile="profile_a", capsule=copy.deepcopy(ENVELOPE["capsule"]), requested_at="2026-07-11T12:00:00Z", call_suffix="2", policy=POLICY, prior_admissions=[{"type": "provider_egress_admitted", "call_id": "canary-delegation:1"}])
     cases = [check("missing-host-stops", stopped["status"] == "platform_authorization_required" and stopped["provider_calls"] == 0, stopped["status"]),
              check("verified-host-is-metadata-only", admitted["status"] == "gateway_dispatch_ready" and admitted["provider_calls"] == 0 and metadata_only, admitted["status"]),
              check("forged-host-facts-stop", forged["status"] == "platform_authorization_invalid" and forged["provider_calls"] == 0, forged["status"]),

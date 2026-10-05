@@ -28,30 +28,10 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Ensure bubblewrap for the execution-fence gates
-        # The preventive execution-fence gate needs bwrap (0.9+ with seccomp)
-        # plus the unprivileged-userns allowance on the runner.
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v bwrap >/dev/null || {
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq bubblewrap
-          }
-          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          bwrap --version
-
       - name: Configure git identity for canaries
         run: |
           git config --global user.email "ci@example.invalid"
           git config --global user.name "Loop Hybrid CI"
-
-      - name: Provision hermetic executor stub
-        # Discovery-only: canaries resolve a coding CLI on PATH; no model is invoked.
-        run: |
-          printf '%s\n' '#!/usr/bin/env bash' 'echo "CI fixture codex stub: discovery-only; no model is invoked" >&2' 'exit 0' > "$RUNNER_TEMP/codex"
-          chmod +x "$RUNNER_TEMP/codex"
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: G6 CI conclusion smoke
         run: python3 -B lh_runtime/ci_conclusion_canary.py

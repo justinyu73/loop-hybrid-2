@@ -1,5 +1,5 @@
 {
-  "_note": "Example project runtime contract. Copy to project_runtime_contract.json and adjust per project. Each stage that opts in with `delivery.derive = acceptance_lamp` gets a sealed delivery binding from its own acceptance lamp; the lamp's verifier must live outside `allowed_paths`. The `models` block is optional: `execute` names the coding CLI that runs attempts; add `judge`/`judge_model` to route judging to a separate reasoning CLI.",
+  "_note": "Example project runtime contract. Copy to project_runtime_contract.json and adjust per project. Each stage that opts in with `delivery.derive = acceptance_lamp` gets a sealed delivery binding from its own acceptance lamp; the lamp's verifier must live outside `allowed_paths`. `executors` declares every model command the engine may run: an absolute argv[0] and a `{prompt}` slot (optionally `{model}` and `{base_url}`). `models.execute` names the declared coding executor; add `judge`/`judge_model` to route judging to another declared executor. `pricing` is optional; without it, costs stay unknown.",
   "schema": "lh-project-runtime-contract/v1",
   "project_id": "example-project",
   "campaign": {
@@ -62,7 +62,16 @@
     "status_snapshot_out": "runtime/platform_status.json",
     "pause_flag": "runtime/loop-pause"
   },
+  "executors": {
+    "coder": {
+      "argv": [
+        "/absolute/path/to/your-coding-agent",
+        "{prompt}"
+      ],
+      "usage": "none"
+    }
+  },
   "models": {
-    "execute": "codex"
+    "execute": "coder"
   }
 }

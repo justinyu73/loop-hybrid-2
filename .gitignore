@@ -1,8 +1,3 @@
-# Local agent configuration and workspace state
-/.claude/
-/.codex/
-/.grok/
-
 # Dependencies and generated Python artifacts
 /node_modules/
 .venv/

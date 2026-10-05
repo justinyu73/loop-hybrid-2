@@ -17,16 +17,9 @@ import os
 import platform
 import re
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Iterator, Mapping
-
-try:
-    from .execution_fence import PROVIDER_SANDBOX_DEFAULT_DENIED_SYSCALLS
-except ImportError:
-    from execution_fence import PROVIDER_SANDBOX_DEFAULT_DENIED_SYSCALLS
-
 
 INSTANCE_CONFIG_SCHEMA = "lh-instance-config/v1"
 LEGACY_INSTANCE_CONFIG_SCHEMA = "lh-instance-config/v0"
@@ -36,68 +29,6 @@ INSTANCE_CONFIG_ENV = "LH_INSTANCE_CONFIG"
 INSTANCE_ROOT_ENV = "LH_INSTANCE_ROOT"
 PATH_KEYS = ("repo", "state", "workspace", "cache", "logs")
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
-OPTIONAL_PROVIDER_RULES: dict[str, dict[str, Any]] = {
-    "codex": {
-        "flags": ["exec", "--ephemeral", "--json", "--dangerously-bypass-approvals-and-sandbox"],
-        "value_flags": ["-m"],
-        "prompt_flags": [],
-        "trailing_prompt": True,
-    },
-}
-GENERIC_PROVIDER_RULES: dict[str, Any] = {
-    "flags": [],
-    "value_flags": [],
-    "prompt_flags": [],
-    "trailing_prompt": True,
-}
-# Read-only system roots of a generated provider-sandbox profile.  Missing
-# entries are tolerated by the sandbox (bind-try), so one list serves distros
-# with and without a merged /usr or a systemd stub resolver.
-PROVIDER_SANDBOX_SYSTEM_RO_BINDS = ("/usr", "/bin", "/lib", "/lib64", "/etc", "/run/systemd/resolve")
-PROVIDER_SANDBOX_FLAGS = ("--die-with-parent", "--new-session")
-
-
-def _bubblewrap_version(path: Any) -> str | None:
-    """The version bubblewrap reports, or None when it cannot be read."""
-    if not isinstance(path, str) or not path:
-        return None
-    try:
-        result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    version = result.stdout.strip().removeprefix("bubblewrap ").strip()
-    return version if result.returncode == 0 and version else None
-
-
-def _provider_home_binds(name: str, *, environ: Mapping[str, str], home: Path) -> list[str]:
-    """Provider homes the sandbox exposes read-only (credentials stay on disk)."""
-    if name == "codex":
-        configured = environ.get("CODEX_HOME", "").strip()
-        return [str(Path(configured).expanduser().resolve(strict=False) if configured else home / ".codex")]
-    return []
-
-
-def _provider_ro_roots(path: Any) -> list[str]:
-    """Read-only roots a provider needs: its own directory and, for a
-    ``#!/usr/bin/env node`` script, the prefix holding the matching node."""
-    if not isinstance(path, str) or not path:
-        return []
-    provider = Path(path).resolve(strict=False)
-    roots = [str(provider.parent)]
-    try:
-        with provider.open("r", encoding="utf-8", errors="replace") as handle:
-            first_line = handle.readline(256)
-    except OSError:
-        return roots
-    if first_line[2:].strip().split() == ["/usr/bin/env", "node"]:
-        for parent in provider.parents:
-            runtime = parent / "bin" / "node"
-            if runtime.is_file() and os.access(runtime, os.X_OK):
-                roots.append(str(parent.resolve(strict=False)))
-                break
-    return roots
-
-
 class InstanceConfigError(ValueError):
     """The instance file cannot be safely consumed."""
 
@@ -163,33 +94,6 @@ def _is_executable(path: Path) -> bool:
     return os.access(path, os.X_OK)
 
 
-def _candidate_path(command: str, *, home: Path, environ: Mapping[str, str], name: str) -> list[Path]:
-    candidates: list[Path] = []
-    local_app_data = environ.get("LOCALAPPDATA") or environ.get("APPDATA")
-    if local_app_data:
-        local = Path(local_app_data)
-        candidates.extend(
-            (
-                local / "Programs" / name / f"{name}.exe",
-                local / name / f"{name}.exe",
-            )
-        )
-    candidates.extend(
-        (
-            home / ".local" / "bin" / command,
-            home / ".codex" / "bin" / command,
-        )
-    )
-    nvm_root = home / ".nvm" / "versions" / "node"
-    if nvm_root.is_dir():
-        try:
-            versions = sorted(nvm_root.iterdir(), reverse=True)
-        except OSError:
-            versions = []
-        candidates.extend(version / "bin" / command for version in versions)
-    return candidates
-
-
 def discover_executable(
     command: str,
     *,
@@ -199,9 +103,8 @@ def discover_executable(
     name: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one executable and return path/digest provenance only."""
+    del home, name  # discovery never guesses a per-user install location
     env = _environment(environ)
-    home_path = _home_path(env, home)
-    label = name or command
     requested = str(explicit).strip() if explicit is not None else ""
     if requested:
         requested_path = Path(requested).expanduser()
@@ -220,10 +123,6 @@ def discover_executable(
     if found and _is_executable(Path(found)):
         candidate = Path(found).resolve(strict=False)
         return {"command": command, "path": str(candidate), "sha256": digest_file(candidate), "source": "PATH"}
-    for candidate in _candidate_path(command, home=home_path, environ=env, name=label):
-        if _is_executable(candidate):
-            resolved = candidate.resolve(strict=False)
-            return {"command": command, "path": str(resolved), "sha256": digest_file(resolved), "source": "known_location"}
     return {"command": command, "path": None, "sha256": None, "source": "missing"}
 
 
@@ -370,41 +269,16 @@ def _default_config_data(
         name.strip() for name in declared_names.split(",")
         if name.strip()
     )
-    # Compatibility environment variables are opt-in declarations, not
-    # defaults: an unset variable creates no provider entry.
-    for name in ("codex", "claude"):
-        if env.get(f"LH_{name.upper()}_CLI", "").strip():
-            configured_names.add(name)
     for name in sorted(configured_names):
         if PROVIDER_NAME_RE.fullmatch(name) is None:
             raise InstanceConfigError(f"invalid provider adapter name: {name!r}")
         spec = provider_overrides.get(name)
         command = str(spec.get("command", name)) if isinstance(spec, Mapping) else name
-        env_name = f"LH_{name.upper()}_CLI"
-        explicit = _cli_override(spec) or env.get(env_name) or env.get(f"LH_PROVIDER_{name.upper()}_CLI") or None
+        explicit = _cli_override(spec) or env.get(f"LH_PROVIDER_{name.upper()}_CLI") or None
         entry = discover_executable(command, explicit=explicit, environ=env, home=home_path, name=name)
         if isinstance(spec, Mapping) and isinstance(spec.get("policy"), Mapping):
             entry["policy"] = dict(spec["policy"])
         cli["providers"][name] = entry
-    provider_sandbox: dict[str, Any] | None = None
-    if normalized == "linux":
-        # The local provider sandbox needs a pinned bubblewrap and the
-        # read-only provider homes.
-        bubblewrap_spec = cli_overrides.get("bubblewrap")
-        bubblewrap_override = _cli_override(bubblewrap_spec) or env.get("LH_BUBBLEWRAP") or None
-        bubblewrap = discover_executable(
-            "bwrap", explicit=bubblewrap_override, environ=env, home=home_path, name="bubblewrap")
-        bubblewrap["version"] = _bubblewrap_version(bubblewrap.get("path"))
-        cli["bubblewrap"] = bubblewrap
-        provider_sandbox = {
-            "provider_home_ro_binds": {
-                name: _provider_home_binds(name, environ=env, home=home_path)
-                for name in cli["providers"]
-            },
-        }
-        if isinstance(override_data.get("provider_sandbox"), Mapping):
-            _deep_update(provider_sandbox, override_data["provider_sandbox"])
-
     instance_id = override_data.get("instance_id")
     if not isinstance(instance_id, str) or not instance_id.strip():
         instance_id = "instance-" + hashlib.sha256(str(config_path.resolve(strict=False)).encode("utf-8")).hexdigest()[:16]
@@ -426,8 +300,6 @@ def _default_config_data(
         "secret_store": secret_store,
         "egress_policy": egress,
     }
-    if provider_sandbox is not None:
-        data["provider_sandbox"] = provider_sandbox
     for key in ("secret_store", "egress_policy"):
         if isinstance(override_data.get(key), Mapping):
             _deep_update(data[key], override_data[key])
@@ -504,21 +376,6 @@ class InstanceConfig:
             if not isinstance(entry, dict) or not isinstance(entry.get("command"), str) or not entry["command"].strip():
                 raise InstanceConfigError(f"cli.providers.{name} must contain a command")
             self._validate_cli_entry(entry, f"cli.providers.{name}")
-        if "bubblewrap" in cli:
-            bubblewrap = cli["bubblewrap"]
-            if not isinstance(bubblewrap, dict) or not isinstance(bubblewrap.get("command"), str):
-                raise InstanceConfigError("cli.bubblewrap must contain a command")
-            self._validate_cli_entry(bubblewrap, "cli.bubblewrap")
-            if bubblewrap.get("version") is not None and not isinstance(bubblewrap["version"], str):
-                raise InstanceConfigError("cli.bubblewrap.version must be a string or null")
-        sandbox = self.data.get("provider_sandbox")
-        if sandbox is not None:
-            homes = sandbox.get("provider_home_ro_binds") if isinstance(sandbox, dict) else None
-            if not isinstance(homes, dict) or any(
-                not isinstance(values, list) or any(not isinstance(item, str) for item in values)
-                for values in homes.values()
-            ):
-                raise InstanceConfigError("provider_sandbox.provider_home_ro_binds must map names to path lists")
         secret = self.data["secret_store"]
         if not isinstance(secret, dict) or not isinstance(secret.get("backend"), str) or not isinstance(secret.get("namespace"), str):
             raise InstanceConfigError("secret_store must contain backend and namespace strings")
@@ -571,9 +428,7 @@ class InstanceConfig:
 
         providers: dict[str, Any] = {}
         for name, entry in self.data["cli"]["providers"].items():
-            configured_rules = entry.get("policy") if isinstance(entry.get("policy"), Mapping) else {}
-            rules = dict(OPTIONAL_PROVIDER_RULES.get(name, GENERIC_PROVIDER_RULES))
-            rules.update(dict(configured_rules))
+            rules = dict(entry["policy"]) if isinstance(entry.get("policy"), Mapping) else {}
             providers[name] = {
                 **pinned(entry),
                 **rules,
@@ -591,51 +446,7 @@ class InstanceConfig:
                 "platform": self.data["platform"],
             },
         }
-        profile = self.provider_sandbox_profile()
-        if profile is not None:
-            policy["provider_sandbox_profile"] = profile
         return policy
-
-    def provider_sandbox_profile(self) -> dict[str, Any] | None:
-        """The generated local provider-sandbox profile (Linux with bubblewrap)."""
-        bubblewrap = self.data["cli"].get("bubblewrap")
-        sandbox = self.data.get("provider_sandbox")
-        if (
-            self.data.get("platform") != "linux"
-            or not isinstance(bubblewrap, dict)
-            or not bubblewrap.get("path")
-            or not bubblewrap.get("sha256")
-            or not bubblewrap.get("version")
-            or not isinstance(sandbox, dict)
-        ):
-            return None
-        provider_roots = [
-            root
-            for entry in self.data["cli"]["providers"].values()
-            for root in _provider_ro_roots(entry.get("path"))
-        ]
-        homes = sandbox.get("provider_home_ro_binds") or {}
-        return {
-            "declared": "Generated per installation for local provider launches; the profile is signed into each launch descriptor.",
-            "bubblewrap": {
-                "path": bubblewrap["path"],
-                "sha256": bubblewrap["sha256"],
-                "version": bubblewrap["version"],
-            },
-            "network": "host",
-            "ro_binds": sorted({*PROVIDER_SANDBOX_SYSTEM_RO_BINDS, *provider_roots}),
-            "provider_home_ro_binds": {
-                str(name): [str(item) for item in values]
-                for name, values in sorted(homes.items())
-                if isinstance(values, list)
-            },
-            "env": {"TERM": "xterm-256color"},
-            "flags": list(PROVIDER_SANDBOX_FLAGS),
-            "seccomp": {
-                "default": "allow",
-                "denied_syscalls": list(PROVIDER_SANDBOX_DEFAULT_DENIED_SYSCALLS),
-            },
-        }
 
     def write_egress_policy(self) -> Path:
         path = self.egress_policy_path

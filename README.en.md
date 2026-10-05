@@ -7,6 +7,10 @@ into audited runs: every step is replayable, every verdict comes from a
 committed check, and actions outside the ratified Goal envelope return to the
 project or human.
 
+The engine needs only Python and git. It is not tied to any model vendor,
+coding CLI, IDE, terminal host, hosting service, or operating-system service:
+every command it runs is one you declare in the contract.
+
 ## Loop at a glance
 
 ```mermaid
@@ -43,26 +47,29 @@ clone can reproduce the same closed loop.
   committed in the repo (`gate-pack/`, `lh_runtime/*_canary.py`), not a model's
   say-so.
 - **Goal-scoped authority** — the project/human ratifies the Goal, authority
-  envelope, stop conditions, and terminal acceptance. Inside it, the loop may
-  commit, push an `lh/*` branch, or conditionally merge when the committed gate
-  passes. Publication, release, and terminal product acceptance remain
-  project/human-owned.
-- **Multi-model layering** — the optional `models` contract field routes
-  execution to a coding CLI and judging to a separate reasoning CLI.
+  envelope, stop conditions, and terminal acceptance. Inside it, the engine
+  runs, verifies, and records. Effects outside the workspace (push, merge,
+  publish) go only through an external action port you inject; the engine ships
+  no implementation.
+- **Declared executors** — the contract's `executors` block declares every
+  command the engine may run (an absolute-path argv); `models` names only
+  declared entries. The engine never searches `PATH` for a provider.
+- **Multi-model layering** — `models.execute` and `models.judge` can name
+  different declarations; costs use the `pricing` you declare.
 
 ## Repository layout
 
 - `lh_runtime/` — the engine: goal store, run store, worker, driver,
   admission, budget, plus its canaries.
 - `gate-pack/` — the deterministic gate pack run by `npm test`
-  (boundary seal, ceremony grader, quota, improvement, and more).
+  (boundary seal, ceremony grader, design grill, falsifier, and more).
 - `hooks/` — optional git hooks (e.g. a pre-commit ceremony check).
-- `governance/` — checks registry and decision-seal data read by the gates.
 - `tests/` — shared offline fixtures imported by the canaries (native delivery
   run, fence fixture); they never start a provider.
 - `tools/portable_runtime_contract.py` — static check that the portable core
   stays free of host-specific imports and fixed paths.
-- `.github/workflows/ci.yml` — CI: gate pack, lint, boundary seal, diff hygiene.
+- `.github/workflows/ci.yml` — CI for this repository: gate pack, lint,
+  boundary seal, diff hygiene.
 
 ## Engine additions in this version
 
@@ -75,10 +82,14 @@ clone can reproduce the same closed loop.
   shared by planning, execution, and verification.
 - **Verifier protocol** (`verifier_protocol.py`, `verifier_normalizer.py`) —
   verifier results are normalized and bound to the attempt before they count.
-- **Execution fences** (`execution_fence*.py`) — an optional preventive fence
-  around agent CLIs (bubblewrap on Linux). It requires an egress policy file
-  (`LH_EGRESS_POLICY`); without one the fence refuses to start rather than run
-  unfenced.
+- **Declared executors** (`cli_agent_executor.py`) — an executor declaration is
+  closed data, not code; an undeclared name is refused.
+- **Execution fence port** (`execution_fence.py`, `execution_fence_local.py`) —
+  every launch first prepares a single-use, digest-bound launch descriptor. The
+  bundled `local-process` backend owns the process group, deadline, and output
+  limit, and its receipt states that nothing was contained; a containment
+  backend is a port you supply. With no backend selected the port is disabled
+  and the run stops at `human_required` instead of running unfenced.
 - **Platform ports** (`platform_ports.py`, `host_ports.py`, `instance_config.py`,
   `lifecycle.py`) — host-specific behavior (locks, paths, process control) sits
   behind ports, so the core carries no fixed host paths.
@@ -91,73 +102,53 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 73–74 of 87 gates pass (set `PYTHONUTF8=1`). 13 always fail because they rely on POSIX-only behavior: executable-bit fake CLIs (2), the bubblewrap fences including the local provider sandbox, the live-smoke rehearsal and the delivery runner's Linux cases (6), POSIX signals and process-holder semantics (2), and POSIX path or platform defaults (3). 1 more (run verdict) is timing-dependent: its fixed 0.25 s budget is exceeded when Windows process start-up is slow, and the outcome also depends on the checkout directory. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 68 of 76 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
-The engine depends on no IDE, terminal host, or platform bridge. Executors are
-local coding CLIs (`codex`) in disposable clones, or a provider the engine
-starts itself inside the Linux sandbox (`local`).
+## Declaring executors
 
-## Sandboxed provider runs (Linux)
+Every model command the engine runs must be declared in the contract's
+`executors` block:
 
-The `local` executor starts the provider CLI (Codex today) itself, inside a
-bubblewrap sandbox signed into each attempt's launch descriptor:
-
-- read-only system and provider directories; only the disposable clone is
-  writable; `/tmp` is a fresh tmpfs; the provider home is exposed read-only;
-- new user/pid/ipc/uts namespaces, nested user namespaces disabled;
-- a provider seccomp table (mount, namespace, tracing, module, BPF and
-  keyring syscalls return `EPERM`); a cleared environment with a fence-owned
-  `PATH`;
-- the provider and bubblewrap binaries are pinned by digest at prepare time
-  and re-checked at launch; each descriptor admits exactly one launch; a
-  timeout kills the whole sandboxed process group.
-
-Network stays the host's, because the provider must reach its API. Only the
-provider argv is checked against the policy, and the receipt says so
-(`host_network_policy_preflight`) instead of claiming network isolation.
-
-Setup:
-
-```sh
-export LH_PROVIDER_NAMES=codex                                # declare first: init pins declared providers only
-python3 -B lh_runtime/instance_config.py init --config ~/.config/loop-hybrid/instance.json
-export LH_EXECUTION_FENCE_BACKEND=linux-bubblewrap-seccomp   # bubblewrap 0.9.0 + libseccomp
-export LH_EGRESS_POLICY=<state root>/egress-policy.json       # generated by init
-export LH_LOCAL_PROVIDER_AGENT=codex                          # or pass a provider_binding
-python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --executor local --execute
+```json
+"executors": {
+  "coder": {"argv": ["/absolute/path/to/your-coding-agent", "{prompt}"], "usage": "none"},
+  "judge": {"argv": ["/absolute/path/to/your-reasoning-agent", "--model", "{model}", "{prompt}"],
+            "usage": "lh-usage-line/v1"}
+},
+"models": {"execute": "coder", "judge": "judge", "judge_model": "your-model-id"}
 ```
 
-Providers are declared explicitly: a provider not named in `LH_PROVIDER_NAMES`
-(or `LH_CODEX_CLI`) gets no policy entry, and the fence refuses at prepare (the
-run stops at `human_required` without calling the provider). On Linux, `init`
-pins bubblewrap and writes a `provider_sandbox_profile` into the generated
-policy. The Codex provider home
-needs only `auth.json`; `config.toml` is bound read-only when present. A
-`provider_binding` (runner, base_url, model) is supported for Codex; its
-per-invocation config flags must be allowed by the provider's policy rules.
-Windows and macOS refuse this executor (`local_provider_unsupported`).
-
-`lh_runtime/local_provider_live_smoke.py` runs one Goal end to end (instance
-init, manual intent, `goal_loop_run(executor="local")`, provider sandbox,
-delivery checks in the fence, receipt) in a throwaway directory:
-
-```sh
-# no account, no model call; on Linux + bubblewrap it rehearses the chain with a stand-in provider (also a gate)
-python3 -B lh_runtime/local_provider_live_smoke.py --dry-run
-# one real Codex call: logged-in codex, bubblewrap 0.9.0, libseccomp; the stage allows one attempt
-LH_LOCAL_PROVIDER_LIVE=1 python3 -B lh_runtime/local_provider_live_smoke.py --execute
-```
+- `argv[0]` must be an absolute path and `{prompt}` must appear exactly once.
+  The engine never searches `PATH`, so whatever CLIs happen to be installed on
+  the machine are never reached by accident.
+- `{model}` and `{base_url}` are optional slots. A slot needs a value
+  (`judge_model` or `models.execute_binding`) and a value needs a slot; anything
+  else is refused.
+- `usage` is one of two protocols: `none` (usage is recorded as unknown) or
+  `lh-usage-line/v1`, where the executor prints
+  `{"usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}}`
+  as its last stdout line. The engine parses no vendor output format and never
+  guesses a number.
+- A nonzero exit fails the attempt.
+- `pricing` (optional) declares per-model rates in USD per million tokens:
+  `{"your-model-id": {"input": 1.0, "output": 4.0, "cache_read": 0.1}}`. An
+  unpriced model's cost stays unknown; the engine ships no price table, and the
+  daily cost caps use only the rates you declare.
+- Without a contract, pass the same declarations with `--executors <file.json>`.
 
 ## Quickstart
 
-Requirements: Python 3.12+ and Node.js (npm scripts are thin wrappers around
-shell and Python).
+Requirements: Python 3.12+, git, and Node.js (npm scripts are thin wrappers
+around shell and Python).
 
 ```sh
 npm test       # run every deterministic gate; all must pass
 npm run lint   # shell syntax + in-memory Python compile check
 ```
+
+To put a real coding agent to work, declare its absolute path under
+`executors`; the engine requires no particular tool.
 
 ## Project runtime contract
 
@@ -165,33 +156,38 @@ Each adopting project describes itself with a runtime contract; see
 [`project_runtime_contract.example.json`](project_runtime_contract.example.json)
 for an annotated example.
 
-Every run needs a sealed delivery binding, and its delivery checks and
-independent verifier run inside the execution fence:
+Every run needs a sealed delivery binding, and its executor, delivery checks,
+and independent verifier all run through the execution fence:
 
 - **Opt in** per stage with `"delivery": {"derive": "acceptance_lamp"}` (see the
   example). Loading the contract compiles a binding from that stage's own
   acceptance lamp; the planner is recorded as `operator-contract`, bound to the
   contract file's digest. Optional `"checks": [{"id": "...", "argv": [...]}]`
   name the delivery checks; the default is `git diff --cached --check`.
-- **Execution**: with `--execute`, each check and the verifier run through the
-  fence named by `LH_EXECUTION_FENCE_BACKEND` (Linux: bubblewrap, no network,
-  read-only clone). Use system tools from `/usr/bin` or `/bin` (bare names
-  resolve against the sandbox PATH) or scripts inside the clone. The fence has no
-  `/dev`: the default `git diff --cached --check` gets `/dev/null` through the
-  fence's closed grant; other git commands that need `/dev/null` fail.
-- **No usable fence** (Windows, macOS, or no backend configured): no runner is
-  installed and the run stops at `human_required`; the reason is in the run's
-  `plan.delivery_command_runner`.
+- **Execution**: with `--execute`, each command runs through the fence named by
+  `LH_EXECUTION_FENCE_BACKEND`. `local-process` runs it inside the clone as an
+  owned process group, kills the whole group on timeout, and records
+  `kernel_containment: false` in the receipt — it does not isolate anything, and
+  the safety boundary remains the disposable clone. For isolation, implement
+  `ExecutionFencePort` and select your backend instead.
+- **No backend selected**: no runner is installed and the run stops at
+  `human_required`; the reason is in the run's `plan.delivery_command_runner`.
 - A stage without `delivery` still stops at `planning_required`; the native-run
   binding (`planner_recovery`) is unaffected.
 
+```sh
+export LH_EXECUTION_FENCE_BACKEND=local-process
+python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json \
+  --execute --max-cycles 12 --max-runtime-seconds 900
+```
+
 ## Live smoke
 
-The optional GitHub CI-conclusion live smoke
-(`lh_runtime/b7_live_smoke_canary.py --execute`) reads its target owner from the
-`LH_LIVE_SMOKE_OWNER` environment variable. When it is unset, the live path
-skips with a recorded known gap; the offline `--dry-run` gate is unaffected.
-
+`lh_runtime/live_smoke_canary.py` is the offline loop gate. With `--live
+--executor <name> --executors <file.json>` (optionally `--pricing
+<file.json>`), it runs the same chain once with a real declared executor. It
+skips (exit 0) when the executor is not declared or its executable is missing,
+so an absent provider never turns the smoke red. It is never part of `npm test`.
 
 ## Operator quickstart: bind your own project
 
@@ -210,22 +206,25 @@ End-to-end, offline-verifiable up to step C:
    --source operator --event-type manual_intent --event-id cmd-1 --payload
    '{"campaign_id":"example-campaign","stage_id":"feature","intent":"..."}'`
    (or let `standing_intents` emit one daily).
-3. **Run the driver** — `python3 -B lh_runtime/goal_loop_run.py --contract
-   project_runtime_contract.json --execute --max-cycles 12 --idle-limit 2`.
+3. **Run the driver** — `LH_EXECUTION_FENCE_BACKEND=local-process python3 -B
+   lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --execute
+   --max-cycles 12 --idle-limit 2`.
    Chain: intent → admission → disposable-clone execution → lamp + value gate →
-   receipt → next stage. A cron/systemd timer calling the same bounded command
+   receipt → next stage. Any external scheduler calling the same bounded command
    makes it resident; every invocation is restart-safe.
 4. **Read results** — `platform_status.json` (state, cost, heartbeat/staleness),
    `runs/artifacts/<run_id>/<attempt>/` (receipt, diff, verifier output, usage),
    and the read-only MCP server.
-5. **Draft-PR mode** — declare `external_verdict` on the stage plus the
-   `external_verdict.adapter` (github_pr): the engine pushes the diff to an `lh/*`
-   branch, opens a **draft PR** with the evidence chain in the body, and resumes on
-   the GitHub CI conclusion. Use a fine-grained PAT (single repo; Contents RW,
-   Pull requests RW, Actions read) via `LH_GITHUB_TOKEN`. The default stops at a
-   draft PR. Conditional merge requires an explicit `auto_merge` grant in the
-   Project Runtime Contract and a passing committed merge gate; publication,
-   release, and terminal product acceptance are not implied.
+5. **External effects and verdicts** — the engine ships no adapter for any
+   external service. To act outside the workspace (push, review, merge,
+   publish) or advance a run on an external conclusion, inject through the
+   engine API: an external action port (`external_action_port.py`, deduplicated
+   by `operation_key`; your adapter must read back an existing effect for the
+   same key) and a verdict store with a conclusion source
+   (`external_verdict.py`; only explicit `success` / `failure` count). A contract
+   carrying an `external_verdict` block is refused, not silently ignored.
+   Whether an external effect is allowed is the injecting project's call;
+   publication, release, and terminal product acceptance stay project/human-owned.
 
 ## License
 
@@ -233,12 +232,18 @@ End-to-end, offline-verifiable up to step C:
 
 ## Security model
 
-- **Isolation is the disposable clone.** Executor presets run agent CLIs in
-  full-auto mode (bypass flags) by design; the boundary is the throwaway
-  clone, never your working tree. Keep untrusted content out of the loop.
-- **Authority is goal-scoped** — commit, `lh/*` push, and conditional merge
-  require an explicit contract grant and passing committed gates. Publication,
-  release, and terminal product acceptance remain project/human-owned.
+- **Isolation is the disposable clone.** The bundled `local-process` fence
+  bounds time, output, and the process group but contains nothing, and says so
+  in every receipt. Your executor declaration decides how much autonomy the
+  agent gets. Keep untrusted content out of the loop.
+- **Only declared commands run** — absolute-path argv, no `PATH` search, and
+  undeclared names are refused.
+- **Authority is goal-scoped** — no push, merge, or publish adapter ships with
+  the engine; external effects go through an injected, project-authorized port.
+  Publication, release, and terminal product acceptance remain
+  project/human-owned.
 - **Credentials are environment variables only**, and missing ones raise.
 - **Acceptance is mechanical** (committed canaries), never the model's word.
+- **Costs are never invented** — unmeasured usage or an unpriced model stays
+  `unknown`.
 - **Out-of-scope diffs are rejected** and route to `human_required`.

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Portable foreground lifecycle and optional host adapter descriptors.
+"""Portable foreground lifecycle.
 
-The foreground process is the common lifecycle baseline.  A host service,
-task, timer, or launch agent may start that process, but it never becomes a
+The foreground process is the lifecycle.  Whatever starts it never becomes a
 second owner: the RunStore lock and this durable owner record remain the
 single runtime boundary.
 """
@@ -32,13 +31,6 @@ except ImportError:
 OWNER_LEASE_SCHEMA = "lh-runtime-owner-lease/v1"
 ADAPTER_SCHEMA = "lh-runtime-lifecycle-adapter/v1"
 OWNER_LEASE_FILENAME = "driver.owner.json"
-
-_PLATFORM_ADAPTERS: dict[str, tuple[str, ...]] = {
-    "win32": ("windows-service", "windows-task"),
-    "linux": ("linux-systemd-user",),
-    "darwin": ("macos-launchd",),
-}
-
 
 class LifecycleUnavailable(RuntimeError):
     """The host cannot provide a verifiable foreground owner identity."""
@@ -421,65 +413,6 @@ class _ShutdownController:
         self._installed = False
 
 
-@dataclass(frozen=True)
-class LifecycleAdapterDescriptor:
-    platform: str
-    adapter: str
-    command: tuple[str, ...]
-    optional: bool = True
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "schema": ADAPTER_SCHEMA,
-            "platform": self.platform,
-            "adapter": self.adapter,
-            "optional": self.optional,
-            "foreground": {
-                "argv": list(self.command),
-                "shell": False,
-                "bounded_session": True,
-            },
-            "owner": {
-                "lease": OWNER_LEASE_SCHEMA,
-                "pid_identity": "birth-token",
-            },
-            "shutdown": {
-                "mode": "graceful-signal-or-flag",
-                "preserve_inflight_attempt": True,
-            },
-        }
-
-
-def _platform_key(platform_name: str | None) -> str:
-    value = (platform_name or sys.platform).lower()
-    if value.startswith("win"):
-        return "win32"
-    if value.startswith("linux"):
-        return "linux"
-    if value.startswith("darwin") or value.startswith("mac"):
-        return "darwin"
-    return value
-
-
-def platform_adapter_kinds(platform_name: str | None = None) -> tuple[str, ...]:
-    """Return optional host adapters; no adapter is an implicit install claim."""
-    return _PLATFORM_ADAPTERS.get(_platform_key(platform_name), ())
-
-
-def build_adapter_descriptor(
-    platform_name: str,
-    adapter: str,
-    command: Sequence[str],
-) -> dict[str, Any]:
-    platform = _platform_key(platform_name)
-    if adapter not in platform_adapter_kinds(platform):
-        raise ValueError(f"unsupported lifecycle adapter: {platform}/{adapter}")
-    argv = tuple(str(item) for item in command)
-    if not argv or any(not item for item in argv):
-        raise ValueError("lifecycle adapter command must be a non-empty argv")
-    return LifecycleAdapterDescriptor(platform, adapter, argv).as_dict()
-
-
 def build_foreground_descriptor(command: Sequence[str]) -> dict[str, Any]:
     argv = tuple(str(item) for item in command)
     if not argv or any(not item for item in argv):
@@ -645,7 +578,6 @@ class ForegroundLifecycle:
 __all__ = [
     "ADAPTER_SCHEMA",
     "ForegroundLifecycle",
-    "LifecycleAdapterDescriptor",
     "LifecycleLease",
     "LifecycleOwnershipLost",
     "LifecyclePort",
@@ -655,8 +587,6 @@ __all__ = [
     "OWNER_LEASE_SCHEMA",
     "ProcessIdentity",
     "ProcessIdentityPort",
-    "build_adapter_descriptor",
     "build_foreground_descriptor",
-    "platform_adapter_kinds",
     "read_owner_record",
 ]

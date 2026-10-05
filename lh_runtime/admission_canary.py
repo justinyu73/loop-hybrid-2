@@ -200,7 +200,7 @@ def main() -> int:
         "total": len(cases),
         "blocking_failures": failures,
         "verification": {"command": "python3 -B lh_runtime/admission_canary.py", "run_state_required": "queued", "retry_semantics": "unchanged"},
-        "known_gaps_open": ["G4 creates a local queued RunStore run; controller execution, providers, GitHub, and promotion remain outside this node."],
+        "known_gaps_open": ["G4 creates a local queued RunStore run; controller execution, providers, external services, and promotion remain outside this node."],
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if not failures else 1

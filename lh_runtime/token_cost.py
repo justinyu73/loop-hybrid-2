@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Token usage cost estimation — model-agnostic, cache-aware, unknown-safe.
 
-Usage is captured as raw counts per run (see cli_agent_executor). Cost is an
-*estimate* derived at read time from a configurable pricing table, so a pricing
-change never requires re-running. Unknown usage is never reported as zero cost;
-it stays ``unknown`` (matching LH's no-fabrication discipline). Rates below are
-calibrated to the providers' official pricing pages (see table comment).
+Usage is captured as raw counts per run. Cost is an *estimate* derived at read
+time from the operator's declared pricing table, so a pricing change never
+requires re-running. The engine ships no prices: without a declared rate a cost
+stays ``unknown``, and unknown usage is never reported as zero cost.
 """
 
 from __future__ import annotations
@@ -15,29 +14,9 @@ from typing import Any
 USAGE_MEASURED = "measured"
 USAGE_UNKNOWN = "unknown"
 
-# Per-million-token USD rates. Override via `pricing` argument or an external
-# config. Cache reads are billed separately (they dominate real usage, so they
-# must not be priced as fresh input).
-#
-# 2026-07-18: calibrated against the providers' official pricing pages —
-# OpenAI Codex row (gpt-5.3-codex): https://platform.openai.com/docs/pricing
-# Anthropic Sonnet 5 (Claude Code default): https://www.anthropic.com/pricing
-# NOTE: Sonnet 5 rates are introductory through 2026-08-31, then $3/$15.
-# When either CLI runs on a subscription login these figures are API-equivalent
-# estimates, not billed amounts — the `estimated` basis label stays honest.
-DEFAULT_PRICING: dict[str, dict[str, float]] = {
-    # "model-id": {"input": <$/Mtok>, "output": <$/Mtok>, "cache_read": <$/Mtok>}
-    "codex": {"input": 1.75, "output": 14.0, "cache_read": 0.175},
-    "claude": {"input": 2.0, "output": 10.0, "cache_read": 0.20},
-    # Real model ids seen in codex session logs (usage records carry the real
-    # id since M4; executor-name keys above are the fallback when no id is
-    # found). gpt-5.6-luna per OpenAI's official pricing page 2026-07-18.
-    "gpt-5.6-luna": {"input": 1.0, "output": 6.0, "cache_read": 0.10},
-    # Real model ids seen in claude session logs.
-    # claude-opus-4-8 per anthropic.com/pricing; Sonnet 5 intro through 2026-08-31;
-    "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cache_read": 0.50},
-    "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20},
-}
+# A pricing table maps a model id to per-million-token USD rates:
+#   {"model-id": {"input": <$/Mtok>, "output": <$/Mtok>, "cache_read": <$/Mtok>}}
+# Cache reads are priced separately; they must not be priced as fresh input.
 
 
 def measured_usage(*, model: str, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0) -> dict[str, Any]:
@@ -57,7 +36,7 @@ def unknown_usage(*, model: str | None = None, reason: str = "provider did not r
 def compute_cost(usage: dict[str, Any] | None, *, pricing: dict[str, dict[str, float]] | None = None) -> dict[str, Any]:
     """Estimate cost from a usage record. Never manufactures a number from
     unknown usage or an unpriced model."""
-    table = pricing if pricing is not None else DEFAULT_PRICING
+    table = pricing or {}
     if not isinstance(usage, dict) or usage.get("state") != USAGE_MEASURED:
         return {"state": USAGE_UNKNOWN, "basis": "estimated", "reason": "usage is not measured"}
     model = usage.get("model")

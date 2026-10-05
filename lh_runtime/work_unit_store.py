@@ -6396,7 +6396,7 @@ class WorkUnitStore:
             invocation_body = {key: item for key, item in invocation.items()
                                if key != "invocation_digest"}
             trusted_preserved = preserved and invocation.get("schema") == "lh-trusted-command-invocation/v1"
-            if (invocation.get("schema") != ("lh-trusted-command-invocation/v1" if trusted_preserved else "lh-codex-subscription-invocation/v1")
+            if (invocation.get("schema") != ("lh-trusted-command-invocation/v1" if trusted_preserved else "lh-command-invocation/v1")
                 or invocation.get("status") != "reserved"
                 or invocation.get("invocation_digest") != recovery.get("invocation_digest")
                 or invocation.get("invocation_digest") != digest_json(invocation_body)):

@@ -118,6 +118,7 @@ def _write_contract(root: Path, source: Path, base: str, *, source_ref: str | No
             "workspace_root": "runtime/ws",
             "status_snapshot_out": "runtime/platform_status.json",
         },
+        "executors": {"coder": {"argv": [sys.executable, "-c", "pass", "{prompt}"]}},
     }
     path = root / "project_runtime_contract.json"
     path.write_text(json.dumps(contract), encoding="utf-8")
@@ -179,28 +180,17 @@ def main() -> int:
         bad_schema = _bad(lambda c: c.__setitem__("schema", "wrong/v9"))
         missing_field = _bad(lambda c: c.__delitem__("source_repo"))
 
-        # B13: external_verdict.adapter.auto_merge is optional; true flows into
-        # run kwargs, false/absent stays absent, non-boolean is rejected.
-        def _with_adapter(auto_merge) -> Path:
-            contract = json.loads(contract_path.read_text())
-            adapter = {"type": "github_pr", "owner": "o", "repo": "r", "base_branch": "master"}
-            if auto_merge is not None:
-                adapter["auto_merge"] = auto_merge
-            contract["external_verdict"] = {"owner": "o", "repo": "r", "workflow": "CI", "adapter": adapter}
-            p = root / f"adapter-{auto_merge!r}.json"
-            p.write_text(json.dumps(contract), encoding="utf-8")
-            return p
-
-        auto_merge_ok = (
-            resolve_project(_with_adapter(True))["run_kwargs"]["github_pr_adapter"].get("auto_merge") is True
-            and "auto_merge" not in resolve_project(_with_adapter(False))["run_kwargs"]["github_pr_adapter"]
-            and "auto_merge" not in resolve_project(_with_adapter(None))["run_kwargs"]["github_pr_adapter"]
-        )
+        # The engine wires no hosted service: a contract that still carries an
+        # external_verdict block is refused instead of being silently ignored.
+        service_contract = json.loads(contract_path.read_text())
+        service_contract["external_verdict"] = {"owner": "o", "repo": "r", "workflow": "CI"}
+        service_path = root / "external-verdict.json"
+        service_path.write_text(json.dumps(service_contract), encoding="utf-8")
         try:
-            resolve_project(_with_adapter("yes"))
-            auto_merge_rejects_nonbool = False
+            resolve_project(service_path)
+            external_verdict_refused = False
         except SystemExit:
-            auto_merge_rejects_nonbool = True
+            external_verdict_refused = True
 
         # An instance-owned binding changes only installation placement and
         # executable environment; project intent remains in the contract.
@@ -237,7 +227,7 @@ def main() -> int:
             cli_status = goal_loop_main([
                 "--contract", str(configured_contract),
                 "--instance-config", str(instance.path),
-                "--executor", "codex",
+                "--executor", "coder",
             ])
         config_consumed = (
             cli_status == 0
@@ -253,8 +243,8 @@ def main() -> int:
             case("resolves-contract-to-run-kwargs", resolve_ok, json.dumps({k: kw[k] for k in ("source_repo", "base_revision", "goal_store_root")})),
             case("resolved-bundle-drives-the-loop", drove, str(summary)),
             case("bad-schema-and-missing-field-rejected", bad_schema and missing_field, f"bad_schema={bad_schema} missing_field={missing_field}"),
-            case("auto-merge-flag-validated", auto_merge_ok and auto_merge_rejects_nonbool,
-                 f"flow={auto_merge_ok} nonbool_rejected={auto_merge_rejects_nonbool}"),
+            case("external-verdict-service-block-refused", external_verdict_refused,
+                 f"refused={external_verdict_refused}"),
             case("instance-config-is-consumed-by-binding-and-cli", config_consumed,
                  json.dumps({"status": cli_status, "binding": configured_kw, "output": output.getvalue()[-300:]}, ensure_ascii=False)),
         ]

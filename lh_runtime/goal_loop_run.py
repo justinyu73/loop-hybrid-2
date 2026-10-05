@@ -22,23 +22,19 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import capability_resolver as cr
 import provider_input_binding as provider_inputs
 import cli_agent_executor as executors
-import diff_grader
 import dispatch_envelope as dispatches
 import execution_fence as execution_fences
 import fence_command_runner as delivery_runners
 import external_action_port as eap
 import external_verdict as ev
-import github_conclusion_source as ghc
-import github_pr_adapter as gpa
 import grill_loop
-import merge_gate as mg
 import project_binding
 import instance_config
 import turning_point as tp
@@ -52,19 +48,8 @@ from knowledge_store import KnowledgeStore
 from run_store import RunStore
 from status_snapshot import DEFAULT_EXECUTOR_TIMEOUT_SECONDS
 
-# Model-agnostic executor registry. Add a CLI preset here, not a hardcoded model.
-EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
-    "codex": executors.CODEX,
-}
-# Execution hosts that start the provider themselves (no CLI preset of their
-# own).  Kept apart so EXECUTORS stays the closed set of CLI presets.
-HOST_EXECUTORS: dict[str, Callable[..., ModelRunner]] = {
-    "local": executors.LOCAL,
-}
-# Judge-only adapters are intentionally separate from the producer registry;
-# AGY never becomes a mutation executor or capability-resource runner here.
-JUDGE_EXECUTORS = {"agy", "codex"}
-CAPABILITY_EVALUATION_EXECUTORS = {"codex"}
+# No executor, judge, or evaluator is built in: every one is a declaration
+# (cli_agent_executor.validate_executor_declarations) or a caller's factory.
 EXECUTION_HOST_SCHEMA = "lh-execution-host-binding/v1"
 BOOTSTRAP_AUTHORITY_SCHEMA = "lh-bootstrap-authority/v1"
 EXECUTION_HOSTS = {"headless_cli"}
@@ -176,31 +161,34 @@ def resolve_executor(
     name: str,
     *,
     execute: bool,
+    declarations: dict[str, dict[str, Any]] | None = None,
     timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     provider_binding: dict[str, str] | None = None,
     factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
     execution_fence_port: execution_fences.ExecutionFencePort | None = None,
 ) -> ModelRunner | None:
-    """Fail closed on an unknown executor (even in dry-run). Return the real
-    model only when ``execute`` is true; dry-run returns None so nothing runs."""
-    factories = {**EXECUTORS, **HOST_EXECUTORS, **(factory_overrides or {})}
-    if name not in factories:
-        raise ValueError(f"unknown executor: {name!r}; choose one of {sorted(factories)}")
+    """Refuse an undeclared executor (even in dry-run). Return the real model
+    only when ``execute`` is true; dry-run returns None so nothing runs."""
+    declared = dict(declarations or {})
+    factories = dict(factory_overrides or {})
+    if name not in factories and name not in declared:
+        raise ValueError(f"unknown executor: {name!r}; declared: {sorted({*declared, *factories})}")
     if provider_binding is not None:
-        if name != "local":
-            raise ValueError("provider_binding is currently supported only with executor='local'")
-        runner = provider_binding.get("runner") if isinstance(provider_binding, dict) else None
-        if not isinstance(runner, str) or not runner.strip():
-            raise ValueError("provider_binding.runner is required; no provider default is allowed")
-        executors._validate_provider_binding(provider_binding, agent=runner)
+        executors._validate_provider_binding(provider_binding, agent=name)
     if not execute:
         return None
-    kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
-    if provider_binding is not None:
-        kwargs["provider_binding"] = provider_binding
-    if name not in (factory_overrides or {}):
-        kwargs["execution_fence_port"] = execution_fence_port
-    return factories[name](**kwargs)
+    if name in factories:
+        kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
+        if provider_binding is not None:
+            kwargs["provider_binding"] = provider_binding
+        return factories[name](**kwargs)
+    return executors.make_declared_agent(
+        name,
+        declared,
+        provider_binding=provider_binding,
+        timeout_seconds=timeout_seconds,
+        execution_fence_port=execution_fence_port,
+    )
 
 
 def _invoke_bound_model(
@@ -283,10 +271,12 @@ class CapabilityRoutingSession:
         execution_host_binding: dict[str, Any] | None = None,
         factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
         execution_fence_port: execution_fences.ExecutionFencePort | None = None,
+        executor_declarations: dict[str, dict[str, Any]] | None = None,
     ):
         self.timeout_seconds = timeout_seconds
         self.run_store_root = Path(run_store_root)
         self.factories = dict(factory_overrides or {})
+        self.executor_declarations = dict(executor_declarations or {})
         self.execution_host_binding = execution_host_binding
         self.execution_fence_port = (
             execution_fence_port
@@ -300,8 +290,8 @@ class CapabilityRoutingSession:
             if resource["executor_kind"] != "model":
                 continue
             runner = resource["runner"]
-            if runner not in EXECUTORS and runner not in HOST_EXECUTORS and runner not in self.factories:
-                raise ValueError(f"no runtime adapter registered for resource runner {runner!r}")
+            if runner not in self.executor_declarations and runner not in self.factories:
+                raise ValueError(f"no declared executor for resource runner {runner!r}")
             if runner in self.factories and (
                 resource.get("model") is not None
                 or resource.get("provider_binding") is not None
@@ -337,12 +327,11 @@ class CapabilityRoutingSession:
                 "workspace_write/external/external execution envelope"
             )
 
-    @staticmethod
-    def _validate_evaluation_resource(resource: dict[str, Any]) -> None:
-        if resource["runner"] not in CAPABILITY_EVALUATION_EXECUTORS:
+    def _validate_evaluation_resource(self, resource: dict[str, Any]) -> None:
+        if resource["runner"] not in self.executor_declarations:
             raise ValueError(
-                "evaluate_transition requires a no-write adapter; choose one of "
-                f"{sorted(CAPABILITY_EVALUATION_EXECUTORS)}, got {resource['runner']!r}"
+                "evaluate_transition requires a declared executor; declared: "
+                f"{sorted(self.executor_declarations)}, got {resource['runner']!r}"
             )
         if resource.get("provider_binding") is not None:
             raise ValueError("evaluate_transition does not support a provider binding")
@@ -371,8 +360,9 @@ class CapabilityRoutingSession:
             raise ValueError(
                 "capability production model requires execution_host='headless_cli'"
             )
-        return executors.make_named_cli_agent(
+        return executors.make_declared_agent(
             runner,
+            self.executor_declarations,
             model=resource.get("model"),
             provider_binding=resource.get("provider_binding"),
             timeout_seconds=timeout_seconds,
@@ -708,16 +698,19 @@ def _make_capability_evaluator(
         error: Exception | None = None
         try:
             prompt = prompt_builder(snapshot)
-            argv = executors.evaluation_argv(
+            argv = executors.declared_command(
+                routing.executor_declarations,
                 resource["runner"],
                 prompt,
                 resource["model"],
-                json_schema=output_schema,
             )
-            argv[0] = executors.resolve_cli(argv[0])
             env = dict(os.environ)
-            env["PATH"] = f"{Path(argv[0]).parent}:{env.get('PATH', '')}"
             routing.run_store_root.mkdir(parents=True, exist_ok=True)
+            if output_schema is not None:
+                schema_path = routing.run_store_root / "evaluation-schemas" / f"{kind}.json"
+                schema_path.parent.mkdir(parents=True, exist_ok=True)
+                schema_path.write_text(json.dumps(output_schema, sort_keys=True), encoding="utf-8")
+                env[executors.OUTPUT_SCHEMA_ENV] = str(schema_path)
             proc = subprocess.run(
                 argv,
                 capture_output=True,
@@ -798,21 +791,20 @@ def _evaluation_payload(
     *,
     require_structured: bool = False,
 ) -> str:
-    """Return the payload emitted by the explicitly configured adapter."""
+    """Return the payload a declared evaluator emitted on its last stdout line."""
     del runner
-    if require_structured:
-        try:
-            envelope = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            raise ValueError("schema-bound evaluation output is not JSON") from exc
-        if not isinstance(envelope, dict):
-            raise ValueError("schema-bound evaluation output is not an object")
-        if envelope.get("is_error") is True or envelope.get("subtype") == "error" or envelope.get("status") in {"ERROR", "error"}:
-            raise ValueError("schema-bound evaluation envelope reports an error")
-        if isinstance(envelope.get("structured_output"), dict):
-            return json.dumps(envelope["structured_output"], ensure_ascii=False, sort_keys=True)
-        raise ValueError("schema-bound evaluation has no structured_output")
-    return stdout
+    if not require_structured:
+        return stdout
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("schema-bound evaluation output is empty")
+    try:
+        value = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise ValueError("schema-bound evaluation output is not JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("schema-bound evaluation output is not an object")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _compatibility_model(
@@ -853,7 +845,6 @@ def build_worker(
     base_revision: str,
     executor_timeout_seconds: float = DEFAULT_EXECUTOR_TIMEOUT_SECONDS,
     grill_runner: grill_loop.GrillRunner | None = None,
-    merge_gate: mg.MergeGate | None = None,
     action_ledger: eap.ActionLedger | None = None,
     external_adapter: eap.ExternalAdapter | None = None,
     knowledge_store_root: str | Path | None = None,
@@ -891,144 +882,12 @@ def build_worker(
         compilers={campaign_id: CampaignCompiler(campaign)},
         execution_context={campaign_id: {"source_repo": Path(source_repo), "base_revision": base_revision}},
         grill_runner=grill_runner,
-        merge_gate=merge_gate,
         action_ledger=action_ledger,
         external_adapter=external_adapter,
         knowledge_store=knowledge_store,
         knowledge_repo_roots=tuple(Path(item) for item in knowledge_repo_roots),
         recovery_binding=native_execution_binding,
     )
-
-
-def build_pr_adapter(
-    github_pr_adapter: dict[str, Any],
-    *,
-    run_store_root: str | Path,
-    repo_root: str | Path | None = None,
-    environ: Mapping[str, str] | None = None,
-    transport: gpa.PrTransport | None = None,
-) -> tuple[eap.ActionLedger, eap.ExternalAdapter]:
-    """R1: construct the durable action ledger and the draft-PR adapter.
-
-    The ledger lives under the run store root (at-most-once survives
-    restarts). Credential binding is deferred until ``perform`` so an idle
-    resident tick can still refresh ownership and heartbeat evidence. A
-    missing token still raises before any git or API call, and the controller
-    records the external-action failure on the Attempt. The remote URL
-    defaults to github.com and can be overridden for fixtures or SSH remotes
-    via ``LH_GITHUB_GIT_REMOTE``.
-    """
-    values = os.environ if environ is None else environ
-    ledger = eap.ActionLedger(Path(run_store_root) / "action-ledger.sqlite3")
-    adapter: eap.ExternalAdapter = gpa.DeferredGitHubPrAdapter(
-        owner=github_pr_adapter["owner"],
-        repo=github_pr_adapter["repo"],
-        base_branch=github_pr_adapter["base_branch"],
-        run_store=RunStore(Path(run_store_root)),
-        environ=values,
-        remote_url=values.get("LH_GITHUB_GIT_REMOTE") or None,
-        transport=transport,
-    )
-    # The integration delivery route owns the pre-merge watch.  It is enabled
-    # by the service's durable state-root binding, not by a user --arm command;
-    # absent that binding, the legacy standalone adapter remains unchanged.
-    post_merge_root = values.get("LH_HOST_POST_MERGE_STATE_ROOT")
-    if post_merge_root and repo_root is not None:
-        tools_root = Path(__file__).resolve().parents[1] / "tools"
-        if str(tools_root) not in sys.path:
-            sys.path.insert(0, str(tools_root))
-        import session_post_merge_resume as host_post_merge  # type: ignore
-
-        canonical_repo = host_post_merge.canonical_repository_slug(Path(repo_root))
-        producer = host_post_merge.PostMergeWatchProducer(
-            repo_root=Path(repo_root),
-            state_root=Path(post_merge_root),
-            allow_production_state_root=True,
-        )
-        adapter = host_post_merge.PostMergeDeliveryEntrypoint(
-            adapter=adapter,
-            watch_producer=producer,
-            binding={
-                "repository_id": canonical_repo,
-                "goal_id": host_post_merge.DEFAULT_GOAL_ID,
-                "goal_revision": host_post_merge.DEFAULT_GOAL_REVISION,
-                "node_id": host_post_merge.DEFAULT_NODE_ID,
-            },
-        )
-    return ledger, adapter
-
-
-def build_merge_gate(
-    github_pr_adapter: dict[str, Any],
-    *,
-    run_store_root: str | Path,
-    verdict_store: ev.VerdictStore,
-    ledger: eap.ActionLedger,
-    goal_store: Any = None,
-    judge: diff_grader.GraderRunner | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> mg.DeferredMergeGate:
-    """B13: construct the conditional auto-merge gate for an allowlisted repo.
-
-    The merge credential is a SEPARATE token from the R1 draft-PR token
-    (LH_GITHUB_MERGE_TOKEN, merge-only scope, allowlisted repo); a missing
-    credential is bound only when a resolved row reaches the merge hook, so
-    idle ticks never depend on it. The trust-ramp store sits next to the
-    action ledger under the run store root, so ramp evidence survives restarts
-    with the runs it refers to.
-    """
-    values = os.environ if environ is None else environ
-    return mg.DeferredMergeGate(
-        owner=github_pr_adapter["owner"],
-        repo=github_pr_adapter["repo"],
-        base_branch=github_pr_adapter["base_branch"],
-        run_store=RunStore(Path(run_store_root)),
-        verdict_store=verdict_store,
-        ledger=ledger,
-        ramp_store=mg.TrustRampStore(Path(run_store_root) / "ramp.sqlite3"),
-        goal_store=goal_store,
-        judge=judge,
-        environ=values,
-    )
-
-
-def build_github_verdict(
-    github_verdict: dict[str, str],
-    *,
-    run_store_root: str | Path,
-    environ: Mapping[str, str] | None = None,
-    transport: ghc.Transport | None = None,
-) -> tuple[ev.VerdictStore, ev.ConclusionSource]:
-    """Construct the durable verdict store and the GitHub conclusion source.
-
-    The store lives under the run store root so the awaiting state survives
-    host restarts next to the runs it parks. The token comes from the
-    environment only and is bound lazily when an awaiting operation is
-    actually polled. An idle tick therefore does not depend on GitHub
-    credentials. Missing credentials or an unavailable source leave the run
-    parked through the existing poll-and-resume unknown-preserving path. The token is
-    never written to the store, receipts, or any artifact.
-    """
-    store = ev.VerdictStore(Path(run_store_root) / "verdict.sqlite3")
-
-    def sha_resolver(op_key: str) -> str | None:
-        action = store.action_for_op_key(op_key)
-        external = action.get("external") if isinstance(action, dict) else None
-        head_sha = external.get("head_sha") if isinstance(external, dict) else None
-        return head_sha if isinstance(head_sha, str) and head_sha.strip() else None
-
-    def source(op_key: str) -> dict[str, str] | None:
-        client = ghc.GitHubConclusionSource.from_env(
-            github_verdict["owner"],
-            github_verdict["repo"],
-            github_verdict["workflow"],
-            sha_resolver,
-            environ=environ,
-            transport=transport,
-        )
-        return client(op_key)
-
-    return store, source
 
 
 def run(
@@ -1053,16 +912,13 @@ def run(
     status_snapshot_out: str | Path | None = None,
     verdict_store: ev.VerdictStore | None = None,
     conclusion_source: ev.ConclusionSource | None = None,
-    github_verdict: dict[str, str] | None = None,
-    github_environ: Mapping[str, str] | None = None,
-    github_transport: ghc.Transport | None = None,
-    github_pr_adapter: dict[str, Any] | None = None,
     factory_overrides: dict[str, Callable[..., ModelRunner]] | None = None,
     driver_fn: Callable[..., dict[str, Any]] = run_driver,
     sleep_fn: Callable[[float], None] | None = None,
     judge_executor: str | None = None,
     judge_model: str | None = None,
     executor_binding: dict[str, str] | None = None,
+    executor_declarations: dict[str, dict[str, Any]] | None = None,
     execution_graph: dict[str, Any] | None = None,
     execution_host: str | None = None,
     bootstrap_authority: dict[str, str] | None = None,
@@ -1071,6 +927,7 @@ def run(
     quota_reader: Callable[[], dict[str, Any] | None] | None = None,
     daily_soft_cap_usd: float | None = 2.0,
     daily_hard_cap_usd: float | None = 5.0,
+    pricing: dict[str, dict[str, float]] | None = None,
     knowledge_store_root: str | Path | None = None,
     knowledge_repo_roots: tuple[str | Path, ...] = (),
     dispatch_envelope: dict[str, Any] | None = None,
@@ -1096,18 +953,13 @@ def run(
             else execution_fences.DisabledExecutionFencePort()
         )
     )
-    if github_verdict is not None:
-        if verdict_store is not None or conclusion_source is not None:
-            raise ValueError("github_verdict cannot be combined with an explicit verdict_store/conclusion_source")
-        verdict_store, conclusion_source = build_github_verdict(
-            github_verdict, run_store_root=run_store_root, environ=github_environ, transport=github_transport,
-        )
     if (verdict_store is None) != (conclusion_source is None):
         raise ValueError("verdict_store and conclusion_source must be supplied together")
     execution_host_binding = build_execution_host_binding(
         execution_host,
         bootstrap_authority,
     )
+    declarations = executors.validate_executor_declarations(executor_declarations)
     routing: CapabilityRoutingSession | None = None
     preview_bindings: list[dict[str, Any]] = []
     has_evaluate_node = False
@@ -1129,6 +981,7 @@ def run(
             execution_host_binding=execution_host_binding,
             factory_overrides=factory_overrides,
             execution_fence_port=fence_port,
+            executor_declarations=declarations,
         )
         preview_bindings = routing.preview()
         if (
@@ -1159,15 +1012,14 @@ def run(
             raise ValueError("executor is required when execution_graph is absent")
         if judge_executor is not None and turning_point is not None:
             raise ValueError("judge_executor and turning_point are mutually exclusive")
-        if judge_executor == "agy" and (
-            not isinstance(judge_model, str) or not judge_model.strip()
-        ):
-            raise ValueError("judge_executor='agy' requires judge_model for process-bound routing")
+        if judge_executor is not None and judge_executor not in declarations:
+            raise ValueError(f"unknown judge_executor: {judge_executor!r}; declared: {sorted(declarations)}")
         resolved_executor = executor
         resolved_judge = judge_executor
         routing_mode = "compatibility"
     plan = {
         "executor": resolved_executor,
+        "executors": sorted(declarations),
         "execute": execute,
         "campaign_id": campaign["campaign_id"],
         "goal_store": str(goal_store_root),
@@ -1199,7 +1051,6 @@ def run(
             "executor_timeout_seconds": executor_timeout_seconds,
             "status_snapshot_out": str(status_snapshot_out) if status_snapshot_out is not None else None,
             "external_verdict_poll": verdict_store is not None,
-            "auto_merge": github_pr_adapter is not None and github_pr_adapter.get("auto_merge") is True,
             "daily_soft_cap_usd": daily_soft_cap_usd,
             "daily_hard_cap_usd": daily_hard_cap_usd,
             "quota_gate": quota_reader is not None,
@@ -1226,6 +1077,7 @@ def run(
         raw_model = resolve_executor(
             resolved_executor,
             execute=execute,
+            declarations=declarations,
             timeout_seconds=executor_timeout_seconds,
             provider_binding=executor_binding,
             factory_overrides=factory_overrides,
@@ -1259,24 +1111,11 @@ def run(
         ]
     if model is None:
         return {"mode": "dry_run", "invoked": False, "plan": plan}
-    action_ledger: eap.ActionLedger | None = None
-    external_adapter: eap.ExternalAdapter | None = None
-    if github_pr_adapter is not None:
-        # R1: credential binding is deferred until a real external action.
-        # Idle resident ticks can still publish ownership/heartbeat evidence;
-        # a missing token still stops that action before any git or API call.
-        action_ledger, external_adapter = build_pr_adapter(
-            github_pr_adapter,
-            run_store_root=run_store_root,
-            repo_root=source_repo,
-            environ=github_environ,
-        )
     grill_runner: grill_loop.GrillRunner | None = None
-    grader: diff_grader.GraderRunner | None = None
     if routing is not None and has_evaluate_node:
         # Capability evaluation is deliberately post-Attempt.  Turning-point
         # selection happens before an actual produce binding exists and remains
-        # deterministic; grill and diff grading resolve against the persisted
+        # deterministic; the grill resolves against the persisted
         # binding they are reviewing.
         grill_runner = _make_capability_evaluator(
             routing,
@@ -1295,34 +1134,9 @@ def run(
                 "additionalProperties": False,
             },
         )
-        grader = _make_capability_evaluator(
-            routing,
-            kind="diff_grader",
-            prompt_builder=diff_grader.build_grader_prompt,
-            parser=diff_grader.parse_grade,
-            output_schema={
-                "type": "object",
-                "properties": {
-                    "grade": {
-                        "type": "string",
-                        "enum": ["routine", "sensitive"],
-                    },
-                    "rationale": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": diff_grader.MAX_RATIONALE_CHARS,
-                    },
-                },
-                "required": ["grade", "rationale"],
-                "additionalProperties": False,
-            },
-        )
     elif judge_executor is not None:
-        factories = {**EXECUTORS, **(factory_overrides or {})}
-        if judge_executor not in JUDGE_EXECUTORS:
-            raise ValueError(f"unknown judge_executor: {judge_executor!r}; choose one of {sorted(JUDGE_EXECUTORS)}")
         turning_point = tp.make_cli_judge(
-            lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
+            lambda prompt: executors.declared_command(declarations, judge_executor, prompt, judge_model),
             name=judge_executor,
         )
         # W6a: the same judge CLI layering carries the challenger grill before
@@ -1330,27 +1144,8 @@ def run(
         # original max_attempts behavior), so a missing models.judge config
         # never blocks the loop.
         grill_runner = grill_loop.make_cli_judge(
-            lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
+            lambda prompt: executors.declared_command(declarations, judge_executor, prompt, judge_model),
             name=judge_executor,
-        )
-        # B13: the same layering carries the merge gate's semantic diff
-        # grader. Absent judge = the grader's deterministic checks still run
-        # and everything else routes to a human.
-        grader = diff_grader.make_cli_grader(
-            lambda prompt: executors.judge_argv(judge_executor, prompt, judge_model),
-            name=judge_executor,
-        )
-    gate: mg.MergeGate | None = None
-    if external_adapter is not None and github_pr_adapter is not None and github_pr_adapter.get("auto_merge") is True:
-        # B13: the contract declared conditional auto-merge for this repo. A
-        # Credential binding is deferred until a resolved row reaches the
-        # merge hook. Undeclared repos get no gate at all.
-        if verdict_store is None:
-            raise ValueError("auto_merge requires the external verdict wiring (github_verdict or verdict_store/conclusion_source)")
-        gate = build_merge_gate(
-            github_pr_adapter, run_store_root=run_store_root, verdict_store=verdict_store,
-            ledger=action_ledger, goal_store=GoalStore(Path(goal_store_root)),
-            judge=grader, environ=github_environ,
         )
     worker = build_worker(
         goal_store_root=goal_store_root,
@@ -1361,9 +1156,6 @@ def run(
         base_revision=base_revision,
         executor_timeout_seconds=executor_timeout_seconds,
         grill_runner=grill_runner,
-        merge_gate=gate,
-        action_ledger=action_ledger,
-        external_adapter=external_adapter,
         knowledge_store_root=knowledge_store_root,
         knowledge_repo_roots=knowledge_repo_roots,
         dispatch_envelope=dispatch_envelope,
@@ -1408,6 +1200,7 @@ def run(
         quota_reader=quota_reader,
         daily_soft_cap_usd=daily_soft_cap_usd,
         daily_hard_cap_usd=daily_hard_cap_usd,
+        pricing=pricing,
         sleep_fn=sleep_fn,
         turning_point=turning_point,
     )
@@ -1416,10 +1209,12 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the autonomous driver with a real coding-agent executor (opt-in)")
-    parser.add_argument("--executor", default=None, choices=sorted({**EXECUTORS, **HOST_EXECUTORS}),
-                        help="coding executor; defaults to the contract's models.execute when --contract is used")
-    parser.add_argument("--judge-executor", default=None, choices=sorted(JUDGE_EXECUTORS),
-                        help="optional turning-point judge executor (M1 model routing); defaults to the contract's models.judge")
+    parser.add_argument("--executor", default=None,
+                        help="declared coding executor; defaults to the contract's models.execute when --contract is used")
+    parser.add_argument("--executors", default=None,
+                        help="JSON file of executor declarations, for runs without a contract")
+    parser.add_argument("--judge-executor", default=None,
+                        help="optional declared turning-point judge executor; defaults to the contract's models.judge")
     parser.add_argument("--judge-model", default=None, help="optional model id pinned for the judge (e.g. a reasoning-tier model)")
     parser.add_argument(
         "--execution-host",
@@ -1491,6 +1286,10 @@ def main(argv: list[str] | None = None) -> int:
             "run_store_root": args.run_store,
             "workspace_root": args.workspace_root,
         }
+    if args.executors:
+        if args.contract:
+            parser.error("--executors is for runs without a contract; declare executors in the contract")
+        binding["executor_declarations"] = json.loads(Path(args.executors).read_text(encoding="utf-8"))
     # explicit flags still override / supply the optional gates the contract does not carry
     binding.setdefault("pause_flag", args.pause_flag)
     if args.status_snapshot_out:

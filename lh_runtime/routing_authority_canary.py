@@ -133,15 +133,15 @@ def routing_authority() -> dict[str, Any]:
             "revision": "registry-1",
             "resources": [
                 _resource(
-                    "edit-codex",
-                    "codex",
+                    "edit-coder",
+                    "coder",
                     ["repo_edit", "test_reasoning"],
                 ),
                 _resource(
-                    "evaluate-codex",
-                    "codex",
+                    "evaluate-judge",
+                    "judge",
                     ["bounded_judgment"],
-                    model="judge-codex",
+                    model="judge-model",
                     permission="read_only",
                     tools=[],
                 ),
@@ -182,8 +182,8 @@ def main() -> int:
     cases.append({
         "id": "split-authority-composes-and-binds-provenance",
         "ok": (
-            change_binding["binding_id"] == "edit-codex"
-            and evaluation["binding"]["binding_id"] == "evaluate-codex"
+            change_binding["binding_id"] == "edit-coder"
+            and evaluation["binding"]["binding_id"] == "evaluate-judge"
             and change_binding["routing_profile"] == "operator-default"
             and change_binding["registry_owner"] == "loop-hybrid-operator"
             and change_binding["resource_health_evidence_digest"] == DIGEST_B
@@ -266,79 +266,33 @@ def main() -> int:
             }),
         })
 
-    schema = {
-        "type": "object",
-        "properties": {
-            "verdict": {"type": "string", "enum": ["accept", "reject"]},
-            "rationale": {"type": "string"},
-        },
-        "required": ["verdict", "rationale"],
-        "additionalProperties": False,
-    }
-    codex_argv = executors.evaluation_argv(
-        "codex",
-        "prompt",
-        "judge-codex",
-        json_schema=schema,
-    )
-    envelope_payload = _evaluation_payload(
-        "codex",
-        json.dumps({
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "result": "",
-            "structured_output": {
-                "verdict": "accept",
-                "rationale": "fixture",
-            },
-        }),
+    declarations = executors.validate_executor_declarations(
+        {"judge": {"argv": [sys.executable, "-c", "pass", "{model}", "{prompt}"]}})
+    judge_argv = executors.declared_command(declarations, "judge", "prompt", "judge-model")
+    line_payload = _evaluation_payload(
+        "judge",
+        'progress line\n{"verdict": "accept", "rationale": "fixture"}\n',
         require_structured=True,
     )
     rejected_wires = [
         "plain text",
-        '{"type":"result"}\n{"type":"result"}',
-        json.dumps({
-            "type": "result",
-            "subtype": "success",
-            "is_error": True,
-            "structured_output": {
-                "verdict": "accept",
-                "rationale": "fixture",
-            },
-        }),
-        json.dumps({
-            "type": "result",
-            "subtype": "error",
-            "is_error": False,
-            "structured_output": {
-                "verdict": "accept",
-                "rationale": "fixture",
-            },
-        }),
-        json.dumps({
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "result": "{\"verdict\":\"accept\",\"rationale\":\"bypass\"}",
-        }),
-        json.dumps({"verdict": "accept", "rationale": "naked bypass"}),
+        "",
+        '{"verdict": "accept", "rationale": "fixture"}\nnot json',
+        '["verdict", "accept"]',
+        'prefix {"verdict": "accept", "rationale": "fixture"}',
     ]
     cases.append({
         "id": "provider-neutral-evaluation-wire-is-schema-bound-before-parser",
         "ok": (
-            codex_argv[:4] == ["codex", "exec", "-m", "judge-codex"]
-            and "--sandbox" in codex_argv
-            and "read-only" in codex_argv
-            and "--dangerously-bypass-approvals-and-sandbox" not in codex_argv
-            and json.loads(envelope_payload) == {
+            judge_argv[-2:] == ["judge-model", "prompt"]
+            and json.loads(line_payload) == {
                 "verdict": "accept",
                 "rationale": "fixture",
             }
             and all(
                 _rejects(
                     lambda wire=wire: _evaluation_payload(
-                        "codex",
+                        "judge",
                         wire,
                         require_structured=True,
                     )
@@ -347,11 +301,8 @@ def main() -> int:
             )
         ),
         "detail": json.dumps({
-            "argv_flags": [
-                item for item in codex_argv
-                if item in {"--sandbox", "read-only"}
-            ],
-            "payload": envelope_payload,
+            "argv_tail": judge_argv[-2:],
+            "payload": line_payload,
         }),
     })
 

@@ -34,7 +34,7 @@ def main() -> int:
     policy = dg.load_json(HERE.parent / "provider_egress" / "policy.example.json")
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as external_tmp:
         root = Path(tmp); (root / "AGENTS.md").write_text("# Goal\nAssess feasibility.\n", encoding="utf-8")
-        spec = {"schema": dg.SPEC_SCHEMA, "grill_id": "model-neutral-review", "question": "Can an arbitrary model challenge a claimed design?", "documents": [{"ref": "AGENTS.md", "start_line": 1, "end_line": 2}], "subject": {"kind": "model_output", "label": "a proposed design", "binding": {"runner": "claude", "model": "opus"}}, "review_slots": [{"id": "counterevidence", "objective": "Find counterexamples.", "separation_from": ["subject"]}, {"id": "alternative-framing", "objective": "Find a different framing.", "separation_from": ["subject", "counterevidence"]}], "cannot_claim": sorted(dg.REQUIRED_CANNOT_CLAIM)}
+        spec = {"schema": dg.SPEC_SCHEMA, "grill_id": "model-neutral-review", "question": "Can an arbitrary model challenge a claimed design?", "documents": [{"ref": "AGENTS.md", "start_line": 1, "end_line": 2}], "subject": {"kind": "model_output", "label": "a proposed design", "binding": {"runner": "agent_b", "model": "model-b1"}}, "review_slots": [{"id": "counterevidence", "objective": "Find counterexamples.", "separation_from": ["subject"]}, {"id": "alternative-framing", "objective": "Find a different framing.", "separation_from": ["subject", "counterevidence"]}], "cannot_claim": sorted(dg.REQUIRED_CANNOT_CLAIM)}
         legacy = {"schema": "loop-hybrid-design-grill-spec/v1", "grill_id": "legacy", "question": "x", "documents": [{"ref": "AGENTS.md"}], "required_roles": ["griller", "challenger"], "cannot_claim": sorted(dg.REQUIRED_CANNOT_CLAIM)}
         session = Path(external_tmp) / "model-neutral-review"
         prepared = dg.prepare(spec, root, session)
@@ -48,10 +48,10 @@ def main() -> int:
         external_capsule = json.loads((external_session / "capsule.json").read_text(encoding="utf-8"))
         traversal = dg.prepare({**external_spec, "documents": [{"ref": "../outside.md", "start_line": 1, "end_line": 1}]}, root, Path(external_tmp) / "traversal", context_root=target)
         inside_target = dg.prepare(external_spec, root, target / "session", context_root=target)
-        same_subject = dg.request(session, review_id="counterevidence", runner="claude", model="opus", provider_profile="claude_o", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
-        dependent_early = dg.request(session, review_id="alternative-framing", runner="claude", model="sonnet", provider_profile="claude_o", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
-        counterevidence = dg.request(session, review_id="counterevidence", runner="codex", model="gpt-5", provider_profile="codex_p3", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
-        alternative = dg.request(session, review_id="alternative-framing", runner="claude", model="sonnet", provider_profile="claude_o", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
+        same_subject = dg.request(session, review_id="counterevidence", runner="agent_b", model="model-b1", provider_profile="profile_b", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
+        dependent_early = dg.request(session, review_id="alternative-framing", runner="agent_b", model="model-b2", provider_profile="profile_b", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
+        counterevidence = dg.request(session, review_id="counterevidence", runner="agent_a", model="model-a1", provider_profile="profile_a", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
+        alternative = dg.request(session, review_id="alternative-framing", runner="agent_b", model="model-b2", provider_profile="profile_b", requested_at="2026-07-12T23:00:00Z", expires_at="2026-07-13T01:00:00Z", policy=policy)
         ledger = pe.AppendOnlyLedger(Path(external_tmp) / "egress.jsonl")
         receipt_one = execution_receipt(counterevidence.get("contract", {}), policy, ledger)
         first = dg.record(session, counterevidence.get("contract", {}), receipt_one, result(counterevidence.get("contract", {})))

@@ -2,7 +2,7 @@
 """Command ingress — a bounded, commander-agnostic entry for issuing a goal event into LH.
 
 This is the "command down" entry into LH. It is deliberately NOT bound
-to any single commander (an external hub is one client of many: github, scheduler,
+to any single commander (an external hub is one client of many: a CI system, a scheduler,
 another front-end) and NOT bound to any model, provider, or file path. It only
 validates a bounded event contract and delegates durable idempotency to
 GoalStore.record_event; it never admits, runs, or promotes anything.
@@ -258,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-store", default=None, help="optional LH RunStore for run/attempt/receipt projection")
     parser.add_argument("--status", action="store_true", help="read back one event by key instead of submitting")
     parser.add_argument("--event-key", default=None, help="event key to read in --status mode")
-    parser.add_argument("--source", help="commander id, e.g. hub / github / scheduler")
+    parser.add_argument("--source", help="commander id, e.g. hub / ci / scheduler")
     parser.add_argument("--event-type", choices=sorted(SUPPORTED_EVENT_TYPES))
     parser.add_argument("--event-id")
     parser.add_argument("--payload", help="JSON object with at least campaign_id")

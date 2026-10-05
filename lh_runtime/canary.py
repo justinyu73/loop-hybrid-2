@@ -179,7 +179,7 @@ def main() -> int:
         ]
     failures = [{"id": item["id"], "detail": item["detail"]} for item in cases if not item["ok"]]
     print(json.dumps({"check_id": "lh-native-runtime-mvp", "status": "pass" if not failures else "fail", "total": len(cases), "blocking_failures": failures,
-                      "known_gaps_open": ["The model runner is injected for this provider-free canary; a provider adapter and GitHub adapter remain separate LH ports."]}, ensure_ascii=False, indent=2))
+                      "known_gaps_open": ["The model runner is injected for this provider-free canary; provider and external-service adapters remain separate LH ports."]}, ensure_ascii=False, indent=2))
     return 0 if not failures else 1
 
 

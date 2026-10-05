@@ -26,9 +26,7 @@ from lifecycle import (  # noqa: E402
     ForegroundLifecycle,
     NativeProcessIdentityPort,
     ProcessIdentity,
-    build_adapter_descriptor,
     build_foreground_descriptor,
-    platform_adapter_kinds,
     read_owner_record,
 )
 from run_store import RunStore  # noqa: E402
@@ -297,27 +295,12 @@ def _durable_completed_attempt_case(root: Path) -> dict[str, Any]:
 
 
 def _adapter_case() -> dict[str, Any]:
-    expected = {
-        "win32": {"windows-service", "windows-task"},
-        "linux": {"linux-systemd-user"},
-        "darwin": {"macos-launchd"},
-    }
-    observed: dict[str, Any] = {}
-    ok = True
-    for platform, kinds in expected.items():
-        actual = set(platform_adapter_kinds(platform))
-        descriptors = [build_adapter_descriptor(platform, kind, ("python", "-m", "lh_runtime.goal_loop_run")) for kind in actual]
-        observed[platform] = descriptors
-        ok = ok and actual == kinds and all(
-            item["optional"] is True
-            and item["foreground"]["shell"] is False
-            and item["foreground"]["bounded_session"] is True
-            and isinstance(item["foreground"]["argv"], list)
-            for item in descriptors
-        )
     foreground = build_foreground_descriptor(("python", "-m", "lh_runtime.goal_loop_run"))
-    ok = ok and foreground["optional"] is False and foreground["platform"] == "any"
-    return {"ok": ok, "detail": {"adapters": observed, "foreground": foreground}}
+    ok = (foreground["optional"] is False and foreground["platform"] == "any"
+          and foreground["foreground"]["shell"] is False
+          and foreground["foreground"]["bounded_session"] is True
+          and isinstance(foreground["foreground"]["argv"], list))
+    return {"ok": ok, "detail": {"foreground": foreground}}
 
 
 def main() -> int:
@@ -331,7 +314,7 @@ def main() -> int:
         {"current": current.as_dict() if current else None, "observed": observed.as_dict() if observed else None},
     ))
     adapter = _adapter_case()
-    cases.append(_case("platform-adapters-are-optional-and-argv-bound", adapter["ok"], adapter["detail"]))
+    cases.append(_case("foreground-lifecycle-is-argv-bound", adapter["ok"], adapter["detail"]))
     with tempfile.TemporaryDirectory(prefix="lh-p3-") as raw:
         root = Path(raw)
         holder = _single_holder_case(root / "holder")

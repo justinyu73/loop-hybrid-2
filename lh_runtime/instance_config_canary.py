@@ -55,8 +55,8 @@ def main() -> int:
         root = Path(raw)
         home = root / "clean user" / "使用者"
         fake_bin = root / "fake bin"
-        fake_codex = _fake_executable(fake_bin / "codex")
-        fake_claude = _fake_executable(fake_bin / "claude")
+        fake_coder = _fake_executable(fake_bin / "coder")
+        fake_reviewer = _fake_executable(fake_bin / "reviewer")
         fake_synthetic = _fake_executable(fake_bin / "synthetic")
         env = {
             "HOME": str(home),
@@ -97,8 +97,8 @@ def main() -> int:
                 "paths": configured_paths,
                 "cli": {
                     "providers": {
-                        "codex": str(fake_codex),
-                        "claude": str(fake_claude),
+                        "coder": str(fake_coder),
+                        "reviewer": str(fake_reviewer),
                         "synthetic": str(fake_synthetic),
                     },
                 },
@@ -115,11 +115,11 @@ def main() -> int:
             and readback["egress_policy"]["binding_status"] == "ok"
             and policy["schema"] == "host-execution-host-egress-policy/v1"
             and policy["instance_binding"]["config_digest"] == readback["config_digest"]
-            and policy["providers"]["codex"]["sha256"] is not None
+            and policy["providers"]["coder"]["sha256"] is not None
         )
         cli_discovery = (
-            config.data["cli"]["providers"]["codex"]["path"] == str(fake_codex.resolve())
-            and config.data["cli"]["providers"]["claude"]["path"] == str(fake_claude.resolve())
+            config.data["cli"]["providers"]["coder"]["path"] == str(fake_coder.resolve())
+            and config.data["cli"]["providers"]["reviewer"]["path"] == str(fake_reviewer.resolve())
             and config.data["cli"]["providers"]["synthetic"]["path"] == str(fake_synthetic.resolve())
         )
         secret_name_only = (
