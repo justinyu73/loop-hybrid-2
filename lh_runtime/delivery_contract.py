@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -79,6 +80,238 @@ def _strings(name: str, value: Any, *, required: bool = False) -> list[str]:
     if required and not result:
         raise DeliveryUnitError(f"{name}_empty")
     return result
+
+
+# -- Candidate review v2 ------------------------------------------------------
+# An independent verifier that opts into review returns a closed document bound
+# to one candidate; the engine derives its verdict and seals the raw bytes.
+
+REVIEW_POLICY_SCHEMA = "lh-candidate-review-contract/v2"
+REVIEW_CONTEXT_SCHEMA = "lh-candidate-review-context/v2"
+REVIEW_RESULT_SCHEMA = "lh-candidate-review-result/v2"
+REVIEW_REF_MAX_BYTES = 1048576
+REVIEW_CONTEXT_MAX_BYTES = 262144
+REVIEW_OUTPUT_MAX_BYTES = 1048576
+
+
+def _review_ref_bytes(reference: Any) -> bytes:
+    ref = _mapping("candidate_review.ref", reference)
+    if not {"path", "content_digest"} <= set(ref):
+        raise DeliveryUnitError("candidate_review_ref_invalid")
+    path = Path(_text("candidate_review.ref.path", ref.get("path")))
+    if (not path.is_absolute() or any(part.is_symlink() for part in (path, *path.parents))
+            or not path.is_file() or path.stat().st_size > REVIEW_REF_MAX_BYTES):
+        raise DeliveryUnitError("candidate_review_ref_unreadable")
+    raw = path.read_bytes()
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != _digest("candidate_review.ref.digest", ref.get("content_digest")):
+        raise DeliveryUnitError("candidate_review_ref_digest_mismatch")
+    if "bytes" in ref and ref["bytes"] != len(raw):
+        raise DeliveryUnitError("candidate_review_ref_bytes_mismatch")
+    return raw
+
+
+def _review_ref_text(reference: Any) -> str:
+    try:
+        return _review_ref_bytes(reference).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DeliveryUnitError("candidate_review_ref_not_utf8") from exc
+
+
+def validate_candidate_review_policy(raw: Any) -> dict[str, Any]:
+    """The approved spec, requirements, and caller context a review must answer."""
+    policy = _mapping("candidate_review", raw)
+    if (set(policy) != {"schema", "spec_ref", "requirements", "caller_context_refs"}
+            or policy.get("schema") != REVIEW_POLICY_SCHEMA):
+        raise DeliveryUnitError("candidate_review_policy_invalid")
+    refs = policy["caller_context_refs"]
+    if not isinstance(refs, list) or len(refs) > 16:
+        raise DeliveryUnitError("candidate_review_context_refs_invalid")
+    for ref in [policy["spec_ref"], *refs]:
+        if not isinstance(ref, Mapping) or set(ref) != {"path", "content_digest"}:
+            raise DeliveryUnitError("candidate_review_policy_ref_invalid")
+        if not _review_ref_text(ref).strip():
+            raise DeliveryUnitError("candidate_review_policy_ref_empty")
+    requirements = policy["requirements"]
+    if not isinstance(requirements, list) or not 1 <= len(requirements) <= 128:
+        raise DeliveryUnitError("candidate_review_requirements_missing")
+    names = []
+    for row in requirements:
+        if not isinstance(row, Mapping) or set(row) != {"id", "text"}:
+            raise DeliveryUnitError("candidate_review_requirement_invalid")
+        names.append(_text("candidate_review.requirement.id", row["id"]))
+        _text("candidate_review.requirement.text", row["text"])
+    # ``scope`` is the review's own scope verdict, so no requirement may take it.
+    if len(set(names)) != len(names) or "scope" in names:
+        raise DeliveryUnitError("candidate_review_requirement_duplicate")
+    return copy.deepcopy(dict(policy))
+
+
+def candidate_review_context(policy: Any, *, candidate_digest: str, base_sha: str, checks_digest: str,
+                             scope: Mapping[str, Any], identity: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind a policy to one candidate; the approved texts travel inside the context."""
+    policy = validate_candidate_review_policy(policy)
+    if not isinstance(base_sha, str) or COMMIT_RE.fullmatch(base_sha) is None:
+        raise DeliveryUnitError("candidate_review_base_invalid")
+    body = {
+        "schema": REVIEW_CONTEXT_SCHEMA,
+        "policy": policy,
+        "candidate_digest": _digest("candidate_review.candidate", candidate_digest),
+        "base_sha": base_sha,
+        "checks_digest": _digest("candidate_review.checks", checks_digest),
+        "scope": copy.deepcopy(dict(_mapping("candidate_review.scope", scope))),
+        "identity": copy.deepcopy(dict(_mapping("candidate_review.identity", identity))),
+        # The reviewer reads the approved text from the context, so it needs no
+        # extra filesystem grant and cannot be pointed at a different file.
+        "spec_text": _review_ref_text(policy["spec_ref"]),
+        "caller_context": [{"ref": ref, "content": _review_ref_text(ref)} for ref in policy["caller_context_refs"]],
+    }
+    if len(json.dumps(body, ensure_ascii=False).encode("utf-8")) > REVIEW_CONTEXT_MAX_BYTES:
+        raise DeliveryUnitError("candidate_review_context_limit")
+    return {**body, "context_digest": digest_json(body)}
+
+
+def candidate_review_output_schema() -> dict[str, Any]:
+    """The closed review document, as a JSON schema an executor can be given."""
+    def closed(properties: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "object", "properties": properties, "required": list(properties),
+                "additionalProperties": False}
+    text = {"type": "string", "minLength": 1, "maxLength": 8192}
+    digest = {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    verdict = {"type": "string", "enum": ["GREEN", "RED"]}
+    evidence = {"type": "array", "items": text, "minItems": 1, "maxItems": 32}
+    return closed({
+        "schema": {"type": "string", "enum": [REVIEW_RESULT_SCHEMA]},
+        "status": {"type": "string", "enum": ["completed"]},
+        "context_digest": digest,
+        "candidate_digest": digest,
+        "checks_digest": digest,
+        "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "requirements": {"type": "array", "minItems": 1, "maxItems": 128,
+                         "items": closed({"id": text, "verdict": verdict, "evidence": evidence})},
+        "scope": closed({"verdict": verdict, "evidence": evidence}),
+        "findings": {"type": "array", "maxItems": 32, "items": closed({
+            "id": text, "blocking": {"type": "boolean"}, "requirement_id": text, "condition": text,
+            "location": text, "impact": text, "evidence": evidence})},
+    })
+
+
+def _matches_schema(value: Any, definition: Mapping[str, Any]) -> bool:
+    kind = definition["type"]
+    if kind == "object":
+        return (isinstance(value, dict) and set(value) == set(definition["properties"])
+                and all(_matches_schema(value[key], child) for key, child in definition["properties"].items()))
+    if kind == "array":
+        return (isinstance(value, list)
+                and definition.get("minItems", 0) <= len(value) <= definition.get("maxItems", 128)
+                and all(_matches_schema(item, definition["items"]) for item in value))
+    if kind == "boolean":
+        return type(value) is bool
+    return (isinstance(value, str) and bool(value.strip()) and len(value) <= definition.get("maxLength", 8192)
+            and ("enum" not in definition or value in definition["enum"])
+            and ("pattern" not in definition or re.fullmatch(definition["pattern"], value) is not None))
+
+
+def validate_candidate_review_result(review: Any, context: Mapping[str, Any]) -> str:
+    """Return the verdict the review itself supports; never the reviewer's claim."""
+    if not _matches_schema(review, candidate_review_output_schema()):
+        raise DeliveryUnitError("candidate_review_content_invalid")
+    if not isinstance(context, Mapping) or context.get("schema") != REVIEW_CONTEXT_SCHEMA:
+        raise DeliveryUnitError("candidate_review_context_invalid")
+    policy = validate_candidate_review_policy(context.get("policy"))
+    for field in ("context_digest", "candidate_digest", "base_sha", "checks_digest"):
+        if review[field] != context.get(field):
+            raise DeliveryUnitError("candidate_review_" + field + "_mismatch")
+    _digest("candidate_review.context_digest", context.get("context_digest"))
+    expected = {row["id"] for row in policy["requirements"]}
+    rows = {row["id"]: row for row in review["requirements"]}
+    if set(rows) != expected or len(rows) != len(review["requirements"]):
+        raise DeliveryUnitError("candidate_review_requirement_coverage_invalid")
+    findings = review["findings"]
+    if len({row["id"] for row in findings}) != len(findings):
+        raise DeliveryUnitError("candidate_review_finding_duplicate")
+    blocked = set()
+    for finding in findings:
+        if finding["requirement_id"] not in expected | {"scope"}:
+            raise DeliveryUnitError("candidate_review_finding_requirement_invalid")
+        if finding["blocking"]:
+            blocked.add(finding["requirement_id"])
+    red = {name for name, row in rows.items() if row["verdict"] == "RED"}
+    if review["scope"]["verdict"] == "RED":
+        red.add("scope")
+    if not red <= blocked:
+        raise DeliveryUnitError("candidate_review_blocking_finding_missing")
+    return "RED" if red or blocked else "GREEN"
+
+
+def load_candidate_review_json(raw: str | bytes) -> Any:
+    """Parse reviewer output, refusing duplicate keys and oversized documents."""
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise DeliveryUnitError("candidate_review_duplicate_key")
+            value[key] = item
+        return value
+    if len(raw) > REVIEW_OUTPUT_MAX_BYTES:
+        raise DeliveryUnitError("candidate_review_output_limit")
+    return json.loads(raw, object_pairs_hook=unique)
+
+
+def seal_candidate_review_proof(review: Any, context: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    """Write the canonical review bytes once, content-addressed, as a private file."""
+    validate_candidate_review_result(review, context)
+    raw = json.dumps(review, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    content_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    folder = Path(root) / "candidate-reviews"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (content_digest.removeprefix("sha256:") + ".json")
+    if path.exists():
+        if path.read_bytes() != raw:
+            raise DeliveryUnitError("candidate_review_raw_ref_conflict")
+    else:
+        if __package__:
+            from .platform_ports import make_file_private
+        else:
+            from platform_ports import make_file_private
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        try:
+            make_file_private(fd, path)
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return {"review": copy.deepcopy(review), "candidate_review_context": copy.deepcopy(dict(context)),
+            "review_ref": {"path": str(path.resolve()), "content_digest": content_digest, "bytes": len(raw)}}
+
+
+def verify_candidate_review_proof(contract: Mapping[str, Any], verifier: Mapping[str, Any]) -> None:
+    """Re-derive a sealed review from the contract and the current approved texts."""
+    if "candidate_review" not in contract:
+        return
+    context = _mapping("candidate_review.context", verifier.get("candidate_review_context"))
+    if (context.get("policy") != validate_candidate_review_policy(contract["candidate_review"])
+            or context.get("context_digest") != digest_json(_without(context, "context_digest"))):
+        raise DeliveryUnitError("candidate_review_context_seal_invalid")
+    policy = context["policy"]
+    if (context.get("scope") != contract["scope"]
+            or context.get("spec_text") != _review_ref_text(policy["spec_ref"])
+            or context.get("caller_context") != [{"ref": ref, "content": _review_ref_text(ref)}
+                                                  for ref in policy["caller_context_refs"]]):
+        raise DeliveryUnitError("candidate_review_source_context_mismatch")
+    for field in ("candidate_digest", "base_sha", "checks_digest"):
+        if context.get(field) != verifier.get(field):
+            raise DeliveryUnitError("candidate_review_receipt_binding_invalid")
+    identity = _mapping("candidate_review.identity", context.get("identity"))
+    for key, value in identity.items():
+        if verifier.get(key) != value:
+            raise DeliveryUnitError("candidate_review_identity_mismatch")
+    raw = _review_ref_bytes(verifier.get("review_ref"))
+    if load_candidate_review_json(raw) != verifier.get("review"):
+        raise DeliveryUnitError("candidate_review_raw_content_mismatch")
+    if validate_candidate_review_result(verifier.get("review"), context) != "GREEN":
+        raise DeliveryUnitError("candidate_review_not_green")
 
 
 def normalize_scope_path(value: Any, *, name: str = "scope.path") -> str:
@@ -207,6 +440,8 @@ def validate_contract(contract: Mapping[str, Any], *, require_digest: bool = Tru
     _text("independent_verifier.principal", verifier.get("principal"))
     if verifier.get("read_only") is not True or verifier.get("source_write") is not False:
         raise DeliveryUnitError("independent_verifier_contract_invalid")
+    if "candidate_review" in contract:
+        validate_candidate_review_policy(contract["candidate_review"])
     outcome = _mapping("outcome", contract.get("outcome"))
     for field in ("observable", "start_state", "success_state"):
         _text(f"outcome.{field}", outcome.get(field))
@@ -745,6 +980,18 @@ def verify_delivery(
         verifier_receipt = verifier.get("receipt")
         if not isinstance(verifier_receipt, Mapping) or verifier_receipt.get("principal") != expected_verifier["principal"] or verifier_receipt.get("read_only") is not True or verifier_receipt.get("source_write") is not False or verifier_receipt.get("contract_digest") != resolved["contract_digest"] or not verify_receipt(verifier_receipt):
             raise DeliveryUnitError("delivery_independent_verifier_receipt_invalid")
+        if "candidate_review" in resolved:
+            verify_candidate_review_proof(resolved, verifier_receipt)
+            if any(verifier.get(key) != verifier_receipt.get(key) for key in
+                   ("review", "review_ref", "candidate_review_context", "candidate_digest", "checks_digest")):
+                raise DeliveryUnitError("candidate_review_wrapper_mismatch")
+            if not isinstance(verifier.get("snapshot"), Mapping):
+                # The work-unit completion path seals its review on a different
+                # receipt chain; until that chain is wired it must not pass here.
+                raise DeliveryUnitError("candidate_review_work_unit_path_unsupported")
+            if (verifier["candidate_digest"] != verifier["snapshot"].get("source_before")
+                    or verifier["checks_digest"] != digest_json(evidence.get("obligations"))):
+                raise DeliveryUnitError("candidate_review_snapshot_binding_invalid")
         plan = evidence.get("plan_verdict")
         if verify_plan_verdict(plan, resolved).get("verdict") != "GREEN":
             raise DeliveryUnitError("delivery_plan_verdict_missing")

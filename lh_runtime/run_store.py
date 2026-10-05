@@ -780,10 +780,26 @@ class RunStore:
                     raise ValueError("delivery_execution_context_contract_mismatch")
             except (ValueError, KeyError) as exc:
                 return {"verdict": "RED", "reason": str(exc), "invocation": invocation, "snapshot": snapshot}
+            review_context = None
+            if "candidate_review" in contract:
+                try:
+                    review_context = delivery_engine.candidate_review_context(
+                        contract["candidate_review"], candidate_digest=source_before, base_sha=context["base_sha"],
+                        checks_digest=execution_context["checks_digest"], scope=contract["scope"],
+                        identity={key: context[key] for key in ("goal_id", "goal_revision", "node_id", "unit_id",
+                                                                "run_id", "attempt", "fence", "base_sha")})
+                    context = {**context, "candidate_digest": source_before,
+                               "checks_digest": execution_context["checks_digest"],
+                               "candidate_review_context": review_context}
+                except (ValueError, KeyError) as exc:
+                    return {"verdict": "RED", "reason": str(exc), "invocation": invocation, "snapshot": snapshot}
+            # A reviewing verifier receives its bound context on stdin.
+            review_input = ({"input_request": {**context, "worktree": str(snapshot_worktree)}}
+                            if review_context is not None else {})
             try:
                 completed, fence_evidence, _descriptor = self.command_runner(
                     context, phase=context["execution_phase"], argv=rendered_argv,
-                    worktree=str(cwd), timeout_seconds=float(config["timeout_seconds"]))
+                    worktree=str(cwd), timeout_seconds=float(config["timeout_seconds"]), **review_input)
                 invocation.update({
                     **fence_evidence,
                     "invoked": True,
@@ -819,11 +835,25 @@ class RunStore:
                 reason = "delivery_independent_verifier_snapshot_mutated"
             else:
                 reason = "independent_verifier_passed"
+            review_proof: dict[str, Any] = {}
+            if review_context is not None and reason == "independent_verifier_passed":
+                # Exit 0 is not a review: the output must be a review whose own
+                # findings support GREEN, and only then is it sealed.
+                try:
+                    value = delivery_engine.load_candidate_review_json(completed.stdout)
+                    if (not isinstance(value, dict) or value.get("verdict") != "GREEN"
+                            or delivery_engine.validate_candidate_review_result(value.get("review"), review_context) != "GREEN"):
+                        raise ValueError("candidate_review_not_green")
+                    review_proof = delivery_engine.seal_candidate_review_proof(value["review"], review_context, self.root)
+                    review_proof.update(candidate_digest=source_before, checks_digest=review_context["checks_digest"])
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    reason = "delivery_independent_review_invalid:" + str(exc)
             return {
                 "verdict": "GREEN" if reason == "independent_verifier_passed" else "RED",
                 "reason": reason,
                 "invocation": invocation,
                 "snapshot": snapshot,
+                **review_proof,
             }
         except OSError as exc:
             return {
@@ -864,6 +894,11 @@ class RunStore:
             return {"verdict": "RED", "reason": "delivery_independent_verifier_snapshot_invalid"}
         if verifier.get("verdict") != "GREEN":
             return {"verdict": "RED", "reason": "delivery_independent_verifier_not_green"}
+        if "candidate_review" in contract:
+            try:
+                delivery_engine.verify_candidate_review_proof(contract, verifier)
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                return {"verdict": "RED", "reason": str(exc)}
         return {"verdict": "GREEN", "reason": "independent_verifier_evidence_valid"}
 
     def run_delivery_obligations(self, run_id: str, worktree: str | Path, *, phase: str) -> dict[str, Any]:
@@ -1025,7 +1060,9 @@ class RunStore:
         checker_green = checker_exit == 0 and obligations_green
         verifier_run = self._run_independent_verifier(contract, worktree,
             execution_context={**identity, "authority_store": "run", "worktree": str(Path(worktree).expanduser().resolve()),
-                               "execution_phase": "delivery_verifier"})
+                               "execution_phase": "delivery_verifier",
+                               **({"checks_digest": delivery_engine.digest_json(obligation_rows)}
+                                  if "candidate_review" in contract else {})})
         verifier_body = {
             "schema": "lh-delivery-unit-independent-verifier/v1",
             "principal": contract["independent_verifier"]["principal"],
@@ -1037,6 +1074,8 @@ class RunStore:
             "contract_digest": binding["contract_digest"],
             "invocation": verifier_run.get("invocation"),
             "snapshot": verifier_run.get("snapshot"),
+            **{key: verifier_run[key] for key in ("review", "review_ref", "candidate_review_context",
+                                                  "candidate_digest", "checks_digest") if key in verifier_run},
             "checker": {
                 "argv": checker_argv,
                 "exit_code": checker_exit,
