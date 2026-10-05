@@ -82,6 +82,11 @@ clone can reproduce the same closed loop.
   shared by planning, execution, and verification.
 - **Verifier protocol** (`verifier_protocol.py`, `verifier_normalizer.py`) —
   verifier results are normalized and bound to the attempt before they count.
+- **Candidate review v2** (`delivery_contract.py`) — a delivery contract may add
+  `candidate_review` (a digest-pinned spec, requirements, and caller context).
+  The independent verifier must then return a closed review bound to this
+  candidate; the engine derives the verdict from its findings, seals the raw
+  bytes, and re-verifies them on readback. Exit 0 without a review fails.
 - **Declared executors** (`cli_agent_executor.py`) — an executor declaration is
   closed data, not code; an undeclared name is refused.
 - **Execution fence port** (`execution_fence.py`, `execution_fence_local.py`) —
@@ -102,7 +107,7 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 68 of 76 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 69 of 77 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
