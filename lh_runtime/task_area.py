@@ -2145,6 +2145,7 @@ class TaskAreaController:
                             **self._delivery_fields(task)})
             if task["status"] != "approved":
                 continue
+            self._normal_review_task(task)
             envelope = task.get("envelope", {})
             if any(envelope.get(key) != manifest.get(key)
                    for key in ("goal_id", "goal_revision")) or (
@@ -2190,6 +2191,135 @@ class TaskAreaController:
             return self._tick_owned(manifest, max_cycles=max_cycles)
         finally:
             port.release(handle)
+
+    @staticmethod
+    def _normal_review_task(task: dict) -> bool:
+        """Only a task whose sealed contracts carry candidate review v2 continues by rule.
+
+        Legacy tasks keep their Planner handoff. The review itself belongs to
+        the delivery contract; this controller neither produces nor defines it.
+        """
+        completion = task.get("completion_contract", {})
+        delivery = task.get("delivery_contract", {})
+        if not isinstance(completion, dict) or not isinstance(delivery, dict):
+            return False
+        if "candidate_review" not in completion and "candidate_review" not in delivery:
+            return False
+        policy = completion.get("candidate_review")
+        if (not isinstance(policy, dict)
+                or policy.get("schema") != "lh-candidate-review-contract/v2"
+                or delivery.get("candidate_review") != policy):
+            raise TaskAreaError("task_area_candidate_review_contract_mismatch")
+        from . import delivery_contract
+        delivery_contract.validate_candidate_review_policy(policy)
+        return True
+
+    def _normal_completion(self, manifest: dict, task: dict, unit: dict) -> dict:
+        """Re-read the original Store's integrated receipt chain for one reviewed task.
+
+        A state label, an exit code, or a caller's PASS is not enough: every
+        phase must be settled for this envelope, contract, Attempt and fence,
+        and the machine receipt must reference exactly those phase receipts.
+        """
+        from . import delivery_contract
+        run = self.store.get_run_for_work_unit(unit["work_unit_id"])
+        envelope = task["envelope"]
+        contract = task["delivery_contract"]
+        if (task.get("status") != "approved" or not run
+                or unit.get("state") != "integrated" or run.get("state") != "integrated"
+                or unit.get("node_id") != task["node_id"]
+                or unit.get("parent_goal_id") != manifest["goal_id"]
+                or run.get("parent_goal_id") != manifest["goal_id"]
+                or run.get("work_unit_id") != unit["work_unit_id"]):
+            raise TaskAreaError("task_area_normal_completion_identity_invalid")
+        attempt = self.store.get_attempt(run["run_id"], run["attempts"])
+        dispatch = self.store.get_dispatch_consumption(envelope["dispatch_key"])
+        if (not attempt or not dispatch or attempt.get("fence") != run.get("fence")
+                or dispatch.get("run_id") != run["run_id"]
+                or dispatch.get("work_unit_id") != unit["work_unit_id"]
+                or dispatch.get("attempt") != attempt["attempt"]
+                or dispatch.get("envelope_digest") != envelope["envelope_digest"]
+                or (dispatch.get("envelope") or {}).get("packet_digest") != envelope["packet_digest"]):
+            raise TaskAreaError("task_area_normal_completion_dispatch_invalid")
+        identity = {"run_id": run["run_id"], "attempt": attempt["attempt"], "fence": attempt["fence"],
+                    "goal_id": manifest["goal_id"], "goal_revision": manifest["goal_revision"],
+                    "node_id": task["node_id"], "dispatch_key": envelope["dispatch_key"],
+                    "base_sha": manifest["base_sha"], "unit_id": contract["unit_id"],
+                    "contract_digest": contract["contract_digest"]}
+        names = ("candidate", "checks", "verifier", "integration", "integration_checks",
+                 "integration_verifier", "delivery_verifier", "machine_complete")
+        green = {"checks", "verifier", "integration_checks", "integration_verifier", "delivery_verifier"}
+        phases = {}
+        for name in names:
+            row = self.store.get_completion_phase(run["run_id"], attempt["attempt"], attempt["fence"], name)
+            evidence = row.get("evidence") if isinstance(row, dict) else None
+            if not isinstance(row, dict) or row.get("state") != "settled" or not isinstance(evidence, dict):
+                raise TaskAreaError("task_area_normal_completion_consumer_coverage_missing")
+            if (evidence.get("receipt_digest") != digest_json({key: value for key, value in evidence.items()
+                                                                  if key != "receipt_digest"})
+                    or any(evidence.get(key) != value for key, value in identity.items())
+                    or evidence.get("phase") != name or evidence.get("phase_key") != row["phase_key"]
+                    or evidence.get("binding") != row["binding"]
+                    or (name in green and evidence.get("verdict") != "GREEN")):
+                raise TaskAreaError("task_area_normal_completion_receipt_invalid:" + name)
+            phases[name] = evidence
+        machine = phases["machine_complete"]
+        stages = machine.get("stage_receipts")
+        if (machine.get("status") != "machine_complete" or not isinstance(stages, dict)
+                or any(stages.get(name) != phases[name]["receipt_digest"] for name in names[:-1])):
+            raise TaskAreaError("task_area_normal_completion_chain_invalid")
+        for name in ("verifier", "integration_verifier"):
+            evidence = phases[name]
+            if (evidence.get("principal") != task["completion_contract"]["verifier_principal"]
+                    or evidence.get("principal") == attempt["holder"]
+                    or evidence.get("read_only") is not True or evidence.get("source_write") is not False):
+                raise TaskAreaError("task_area_normal_completion_verifier_invalid")
+            delivery_contract.verify_candidate_review_proof(contract, evidence)
+        source, checks = phases["candidate"], phases["checks"]
+        joined, final, verified = (phases[name] for name in ("integration", "integration_checks", "integration_verifier"))
+        if (checks.get("candidate_digest") != source.get("candidate_digest")
+                or phases["verifier"].get("candidate_digest") != source.get("candidate_digest")
+                or joined.get("source_candidate_digest") != source.get("candidate_digest")
+                or joined.get("integration_candidate_digest") != final.get("candidate_digest")
+                or verified.get("candidate_digest") != final.get("candidate_digest")
+                or verified.get("checks_digest") != final["receipt_digest"]):
+            raise TaskAreaError("task_area_normal_completion_candidate_chain_invalid")
+        # A valid normal chain never washes an unresolved exception or unknown effect.
+        if self._unsettled_recovery(unit, run):
+            raise TaskAreaError("task_area_normal_completion_recovery_unsettled")
+        return machine
+
+    def _unsettled_recovery(self, unit: dict, run: dict) -> bool:
+        return any(record.get("request", {}).get("run_id") == run["run_id"]
+                   and record.get("status") in {"requested", "claimed", "result_recorded", "verifier_claimed",
+                                                "plan_verified", "outcome_unknown"}
+                   for record in self.store.recovery_requests(work_unit_id=unit["work_unit_id"]))
+
+    def _normal_recovery_needed(self, manifest: dict, task: dict) -> bool:
+        """Whether this round must reach the existing recovery (Planner) port for ``task``."""
+        if not self._normal_review_task(task):
+            return True
+        units = {unit["node_id"]: unit for unit in self.store.list_work_units(manifest["goal_id"])}
+        unit = units.get(task["node_id"])
+        if unit is None:
+            return False  # Nothing dispatched; approval and preconditions stay with admission.
+        run = self.store.get_run_for_work_unit(unit["work_unit_id"])
+        if run is None:
+            return False
+        if self._unsettled_recovery(unit, run):
+            return True
+        if unit.get("state") == "integrated":
+            self._normal_completion(manifest, task, unit)
+            # A legacy successor still consumes its original Planner handoff.
+            return any(task["node_id"] in target.get("depends_on", [])
+                       and target.get("status") == "approved" and not self._normal_review_task(target)
+                       for target in manifest["tasks"])
+        for name in ("checks", "verifier", "integration_checks", "integration_verifier", "delivery_verifier"):
+            row = self.store.get_completion_phase(run["run_id"], run["attempts"], run["fence"], name)
+            if (isinstance(row, dict) and row.get("state") in {"settled", "failed"}
+                    and isinstance(row.get("evidence"), dict) and row["evidence"].get("verdict") == "RED"):
+                return True  # The original port validates and claims the actual RED request.
+        return False  # Pending phases reconcile through their original consumer.
 
     def _tick_with_recovery(self, manifest: dict, *, max_cycles: int) -> dict[str, Any]:
         """Use the original scheduler; slow planning never owns its global lock.
@@ -2264,6 +2394,14 @@ class TaskAreaController:
                     # Waiting/unknown execution is not a RED or a new P/V request.
                     continue
                 try:
+                    if not self._normal_recovery_needed(manifest, task):
+                        # A reviewed task needs no role call: its integrated chain was
+                        # re-verified, so the next bounded cycle may release its successor.
+                        progress = progress or any(
+                            row.get("node_id") == task["node_id"]
+                            and (row.get("completion") or {}).get("status") == "integrated"
+                            for row in current.get("results", []))
+                        continue
                     outcome = self.recovery_port(task)
                     if not isinstance(outcome, dict):
                         raise TaskAreaError("recovery_port_result_invalid")
@@ -2304,6 +2442,7 @@ class TaskAreaController:
         current_digest = manifest_digest(manifest)
         units = {unit["node_id"]: unit
                  for unit in self.store.list_work_units(manifest["goal_id"])}
+        tasks = {task["node_id"]: task for task in manifest["tasks"]}
 
         for target in manifest["tasks"]:
             target_node = target.get("node_id")
@@ -2313,6 +2452,13 @@ class TaskAreaController:
                 source = units.get(dependency)
                 if not source or source.get("state") != "integrated":
                     continue
+                try:
+                    if self._normal_review_task(target) and self._normal_review_task(tasks[dependency]):
+                        self._normal_completion(manifest, tasks[dependency], source)
+                        continue
+                except (ValueError, KeyError, TypeError, OSError):
+                    eligible.discard(target_node)
+                    break
                 source_run = self.store.get_run_for_work_unit(source["work_unit_id"])
                 if not source_run:
                     eligible.discard(target_node)
@@ -2418,6 +2564,15 @@ class TaskAreaController:
                                     if task["status"] != "approved" else "dependencies",
                                     "dependencies": unmet})
                     continue
+                if self._normal_review_task(task):
+                    try:
+                        for dependency in task.get("depends_on", []):
+                            producer = next(item for item in tasks if item["node_id"] == dependency)
+                            if self._normal_review_task(producer):
+                                self._normal_completion(manifest, producer, units[dependency])
+                    except (ValueError, KeyError, TypeError, OSError) as exc:
+                        blocked.append({"node_id": node, "reason": str(exc)})
+                        continue
                 missing_preconditions = [ref for ref in task.get("required_preconditions", [])
                                         if (not isinstance(ref, dict)
                                             or (ref.get("prerequisite_id"),

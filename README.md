@@ -88,7 +88,8 @@ flowchart TB
 - **平行排程與 work-unit store**（`parallel_scheduler.py`、`work_unit_store.py`、`plan_node_controller.py`）：依賴與寫入範圍相容時，獨立 work unit 在隔離 workspace 中並行；完成依核准順序整合。
 - **交付契約與完成判定**（`delivery_contract.py`、`work_unit_completion.py`、`source_result.py`）：規劃、執行、驗證共用同一個封存的契約引擎。
 - **Verifier 協定**（`verifier_protocol.py`、`verifier_normalizer.py`）：verifier 結果先正規化並綁定到該次 attempt，才算數。
-- **候選覆核 v2**（`delivery_contract.py`）：delivery contract 可加上 `candidate_review`（以 digest 釘住的 spec、需求與呼叫端上下文）。獨立驗證器必須回傳綁定這次候選的封閉 review，判定由引擎依 findings 推導；review 以 digest 封存，讀回時重驗。exit 0 但沒有 review 不算通過。
+- **候選覆核 v2**（`delivery_contract.py`）：delivery contract 可加上 `candidate_review`（以 digest 釘住的 spec、需求與呼叫端上下文）。獨立驗證器必須回傳綁定這次候選的封閉 review，判定由引擎依 findings 推導；review 以 digest 封存，讀回時重驗。exit 0 但沒有 review 不算通過。work unit 路徑上，相關 checks 先跑；RED review 的 finding 回饋給下一次 attempt，次數受 attempt 上限約束；不阻擋的建議只寫入 discovery，不會自動成為任務。
+- **正常接續**（`task_area.py`）：採用候選覆核 v2 的任務，在前一個任務的整合收據鏈經重驗通過後，依規則放行已核准的後繼，不呼叫 Planner；RED、未結的修復請求與舊任務仍交給原本的 Planner port。
 - **宣告式 executor**（`cli_agent_executor.py`）：executor 宣告是封閉的資料，不是程式碼；未宣告的名稱一律拒絕。
 - **Execution fence port**（`execution_fence.py`、`execution_fence_local.py`）：每次啟動都先準備一次性、綁 digest 的 launch descriptor。
   引擎附的 `local-process` backend 管理程序群組、逾時與輸出上限，並在 receipt 如實寫出「沒有隔離」；
@@ -101,7 +102,7 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：77 個 gate 中 69 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：79 個 gate 中 71 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
