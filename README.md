@@ -3,6 +3,9 @@
 Loop Hybrid 2（LH2）是一個**確定性 goal loop 引擎**：把核准過的目標（goal）變成可稽核的執行（run）。
 每一步可重播、每個驗收來自 committed check；超出核准 Goal 權限的操作才回到人／專案。
 
+引擎只依賴 Python 與 git。它不綁定任何模型廠商、coding CLI、IDE、終端機宿主、代管服務或作業系統服務：
+會被執行的指令一律由你在 contract 裡宣告。
+
 > English: see [README.en.md](README.en.md)
 
 ## 60 秒看它閉合（self-closing proof）
@@ -24,10 +27,11 @@ python3 -B lh_runtime/goal_loop_canary.py         # 完整 loop：seed→執行�
 - **Serial 單 holder worker**：同一時間只有一個 worker 推進 loop，狀態轉移確定性、可稽核。
 - **Disposable-clone executor**：每次嘗試都在一次性 workspace clone 裡執行，不污染原始碼樹。
 - **Committed canary 是驗收權威**：驗收 = repo 裡的可重跑檢查（`gate-pack/`、`lh_runtime/*_canary.py`），不是模型說了算。
-- **Goal-scoped authority**：人／專案核准 Goal、權限 envelope、停止條件與終驗；其內可依 contract
-  自動 commit、push `lh/*` branch，或在 committed merge gate 通過時 conditional merge。
-  公開發布、release 與產品終驗仍由人／專案持有。
-- **多模型分層**：contract 的 `models` 欄位讓執行用 coding CLI、判斷用推理 CLI，彼此獨立、可各自計價。
+- **Goal-scoped authority**：人／專案核准 Goal、權限 envelope、停止條件與終驗。引擎在 envelope 內執行、驗收、記錄；
+  workspace 以外的作用（push、merge、發布）只能經由你注入的 external action port，引擎本身不附任何實作。
+- **宣告式 executor**：contract 的 `executors` 宣告每個可被執行的指令（絕對路徑 argv）；`models` 只引用宣告過的名稱。
+  引擎從不在 `PATH` 上搜尋 provider。
+- **多模型分層**：`models.execute` 與 `models.judge` 可以指向不同的宣告；成本按你宣告的 `pricing` 計算。
 
 ## 流程圖
 
@@ -53,7 +57,7 @@ flowchart LR
 flowchart LR
     Q[queued run] --> W[worker tick<br/>單 holder lease]
     W --> CL[disposable clone<br/>@ pinned commit]
-    CL --> X[executor CLI<br/>codex]
+    CL --> X[宣告的 executor<br/>contract executors]
     X --> V{acceptance lamp<br/>verification_argv}
     V -->|exit 0| RC[receipt + usage 入帳]
     V -->|失敗| RT[retry<br/>上限 max_attempts]
@@ -66,14 +70,14 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph 執行層
-        M1[models.execute<br/>coding CLI] --> RUN[run 執行]
+        M1[models.execute<br/>宣告的 coding executor] --> RUN[run 執行]
     end
     subgraph 判斷層（轉折點）
-        M2[models.judge<br/>推理 CLI] --> P{封閉三選一<br/>select / human_required}
+        M2[models.judge<br/>宣告的推理 executor] --> P{封閉三選一<br/>select / human_required}
         P -->|合法| SEL[選定下一條 runnable]
         P -->|越集/異常| F[退回決定性選路]
     end
-    RUN -.同一 store 計價.-> COST[(usage/cost<br/>按真實模型 id)]
+    RUN -.同一 store 計價.-> COST[(usage/cost<br/>按宣告的 pricing)]
     M2 -.-> COST
 ```
 
@@ -84,7 +88,10 @@ flowchart TB
 - **平行排程與 work-unit store**（`parallel_scheduler.py`、`work_unit_store.py`、`plan_node_controller.py`）：依賴與寫入範圍相容時，獨立 work unit 在隔離 workspace 中並行；完成依核准順序整合。
 - **交付契約與完成判定**（`delivery_contract.py`、`work_unit_completion.py`、`source_result.py`）：規劃、執行、驗證共用同一個封存的契約引擎。
 - **Verifier 協定**（`verifier_protocol.py`、`verifier_normalizer.py`）：verifier 結果先正規化並綁定到該次 attempt，才算數。
-- **Execution fence**（`execution_fence*.py`）：可選的 agent CLI 預防性隔離（Linux 用 bubblewrap）。需要 egress policy 檔（`LH_EGRESS_POLICY`）；沒有就拒絕啟動，不會無隔離執行。
+- **宣告式 executor**（`cli_agent_executor.py`）：executor 宣告是封閉的資料，不是程式碼；未宣告的名稱一律拒絕。
+- **Execution fence port**（`execution_fence.py`、`execution_fence_local.py`）：每次啟動都先準備一次性、綁 digest 的 launch descriptor。
+  引擎附的 `local-process` backend 管理程序群組、逾時與輸出上限，並在 receipt 如實寫出「沒有隔離」；
+  真正的隔離 backend 由你以 port 提供。沒有選 backend 時預設停用，run 停在 `human_required`，不會無 fence 執行。
 - **Platform ports**（`platform_ports.py`、`host_ports.py`、`instance_config.py`、`lifecycle.py`）：鎖、路徑、程序控制等主機差異集中在 port，核心不含固定主機路徑。
 - **Provider registry 與輸入綁定**（`provider_registry.py`、`provider_input_binding.py`、`runner_adapter.py`）：依 capability 選路，專案節點不指定 provider／model。
 
@@ -93,49 +100,34 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：87 個 gate 中 73～74 個通過（請設定 `PYTHONUTF8=1`）。13 個固定失敗，因為依賴 POSIX 行為：執行位元假 CLI（2）、bubblewrap fence——含本機 provider 沙箱、實測演練與 delivery 執行器的 Linux 案例（6）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（3）。另 1 個（run verdict）有固定 0.25 秒預算，Windows 程序啟動較慢時會超時，結果也和所在目錄有關。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：76 個 gate 中 68 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
-引擎不依賴任何 IDE、終端機宿主或平台橋接。executor 是在一次性 clone 中執行的本機 coding CLI（`codex`），或在 Linux 沙箱中由引擎直接啟動的 provider（`local`）。
+## 宣告 executor
 
-## 沙箱 provider 執行（Linux）
+引擎會執行的每個模型指令，都必須在 contract 的 `executors` 區塊宣告：
 
-`local` executor 由 LH 直接啟動 provider CLI（目前支援 Codex），執行環境是已簽入每次 attempt launch descriptor 的 bubblewrap 沙箱：
-
-- 系統與 provider 目錄唯讀；只有一次性 clone 可寫；`/tmp` 是全新 tmpfs；provider home 以唯讀方式掛入。
-- 新的 user／pid／ipc／uts namespace，禁止巢狀 user namespace。
-- provider seccomp 表：mount、namespace、tracing、kernel module、BPF、keyring 相關 syscall 一律回 `EPERM`。環境變數全部清除，`PATH` 由 fence 決定。
-- provider 與 bubblewrap 二進位在 prepare 時以 digest 釘住、啟動前重驗；每個 descriptor 只能啟動一次；逾時會終止整個沙箱程序群組。
-
-網路沿用主機網路（provider 必須連到自己的 API）。LH 只依 policy 檢查 provider 的 argv，receipt 會如實標示 `host_network_policy_preflight`，不會宣稱有網路隔離。
-
-設定方式：
-
-```sh
-export LH_PROVIDER_NAMES=codex                                # 先宣告 provider：init 只釘住已宣告的 provider
-python3 -B lh_runtime/instance_config.py init --config ~/.config/loop-hybrid/instance.json
-export LH_EXECUTION_FENCE_BACKEND=linux-bubblewrap-seccomp   # 需 bubblewrap 0.9.0 + libseccomp
-export LH_EGRESS_POLICY=<state root>/egress-policy.json       # init 產生
-export LH_LOCAL_PROVIDER_AGENT=codex                          # 或改傳 provider_binding
-python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --executor local --execute
+```json
+"executors": {
+  "coder": {"argv": ["/absolute/path/to/your-coding-agent", "{prompt}"], "usage": "none"},
+  "judge": {"argv": ["/absolute/path/to/your-reasoning-agent", "--model", "{model}", "{prompt}"],
+            "usage": "lh-usage-line/v1"}
+},
+"models": {"execute": "coder", "judge": "judge", "judge_model": "your-model-id"}
 ```
 
-provider 採明示宣告：沒有用 `LH_PROVIDER_NAMES`（或 `LH_CODEX_CLI`）宣告的 provider 不會寫入 policy，fence 會在 prepare 拒絕（run 停在 `human_required`，不會呼叫 provider）。Linux 上 `init` 會釘住 bubblewrap，並在產生的 policy 寫入 `provider_sandbox_profile`。Codex 的 provider home 只需要 `auth.json`；`config.toml` 存在時才會以唯讀方式掛入。Codex 支援 `provider_binding`（runner、base_url、model），但其每次呼叫的 config 旗標必須在該 provider 的 policy 規則中允許。Windows 與 macOS 會拒絕此 executor（`local_provider_unsupported`）。
-
-實測工具 `lh_runtime/local_provider_live_smoke.py` 會用暫存目錄跑一個 Goal（請 provider 建立 `src/hello.txt`），完整走過 instance init → manual intent → `goal_loop_run(executor="local")` → provider 沙箱 → 驗證器 → receipt：
-
-```sh
-# 不需任何帳號、不呼叫模型；Linux + bubblewrap 上以替身 provider 演練整條鏈路（gate 也會跑）
-python3 -B lh_runtime/local_provider_live_smoke.py --dry-run
-# 真實 Codex 一次：需已登入的 codex、bubblewrap 0.9.0、libseccomp；stage 只允許 1 次 attempt
-LH_LOCAL_PROVIDER_LIVE=1 python3 -B lh_runtime/local_provider_live_smoke.py --execute
-```
-
-工具會自行宣告 codex，演練與真實執行走同一條宣告路徑。通過條件：policy 已釘住 codex；run 為 `verified`；diff 只有 `src/hello.txt`；來源 repo 不變；receipt 帶有 local provider 三項 proof；usage 為 measured；`CODEX_HOME` 與 `$HOME` 頂層沒有變動；沒有殘留程序；delivery 檢查確實在 fence 內執行。工具走正式路徑（stage 啟用 delivery，見「使用」第 3 節），不使用任何 `tests/` fixture。
+- `argv[0]` 必須是絕對路徑；`{prompt}` 恰好出現一次。引擎從不在 `PATH` 上找 provider，所以機器上裝了什麼 CLI 都不會被意外叫到。
+- `{model}`、`{base_url}` 是可選的插槽：有插槽就必須有值（`judge_model` 或 `models.execute_binding`），有值也必須有插槽，否則拒絕。
+- `usage` 只有兩種：`none`（用量記為 unknown），或 `lh-usage-line/v1`——executor 在 stdout 最後一行印出
+  `{"usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}}`。引擎不解析任何廠商的輸出格式，也不猜數字。
+- 非零退出就是該次 attempt 失敗。
+- `pricing`（可選）以「每百萬 token 美元」宣告各 model 的費率：`{"your-model-id": {"input": 1.0, "output": 4.0, "cache_read": 0.1}}`。
+  沒有宣告的 model 成本為 unknown；引擎不內建任何價目表。每日成本上限只會用你宣告的費率。
+- 不帶 contract 時，可以用 `--executors <file.json>` 傳入同樣格式的宣告。
 
 ## 安裝
 
-需求：**Python 3.12+** 與 **Node.js**（npm script 只是 shell/Python 的薄包裝）。
+需求：**Python 3.12+**、**git** 與 **Node.js**（npm script 只是 shell/Python 的薄包裝）。
 
 ```bash
 git clone https://github.com/justinyu73/loop-hybrid-2.git
@@ -144,15 +136,15 @@ npm test        # 跑全部確定性 gate（必須全綠）
 npm run lint    # shell 語法 + Python 編譯檢查
 ```
 
-要執行真實 coding agent，需要已登入的 `codex` CLI。
+要讓真實 coding agent 工作，在 contract 的 `executors` 宣告它的絕對路徑即可；引擎不要求任何特定工具。
 
 ## 使用
 
 ### 1. 建立專案 contract
 
 複製 [`project_runtime_contract.example.json`](project_runtime_contract.example.json) 到你的專案，填入
-`project_id`、`campaign`（stage、驗收燈、允許路徑）、`source_repo`、`base_revision`、以及可選的
-`models`（execute / judge / judge_model）。
+`project_id`、`campaign`（stage、驗收燈、允許路徑）、`source_repo`、`base_revision`、`executors`、
+`models`（execute，可選 judge / judge_model），以及可選的 `pricing`。
 
 ### 2. Dry-run（不觸碰 provider）
 
@@ -166,21 +158,21 @@ python3 -B lh_runtime/goal_loop_run.py \
 ### 3. 真實執行（有界）
 
 ```bash
+export LH_EXECUTION_FENCE_BACKEND=local-process
 python3 -B lh_runtime/goal_loop_run.py \
   --contract /path/to/project_runtime_contract.json \
-  --executor codex --execute \
-  --max-cycles 12 --max-runtime-seconds 900
+  --execute --max-cycles 12 --max-runtime-seconds 900
 ```
 
-- executor 只在 disposable clone 裡工作；輸出止步於 PR。
+- executor 只在 disposable clone 裡工作；引擎不會把結果推到任何地方。
 - 每個 attempt 產生 receipt（含 usage）；`status_snapshot_out` 指向的檔案會得到即時狀態投影。
 - `runtime/loop-pause`（或 contract 的 `pause_flag`）存在即於下一個 tick 安全停止。
 
-> **delivery 綁定與執行（必讀）**：引擎要求每個 run 都有 delivery 綁定，而且 delivery 檢查與獨立驗證器必須在 execution fence 內執行。
+> **delivery 綁定與執行（必讀）**：引擎要求每個 run 都有 delivery 綁定，而且 executor、delivery 檢查與獨立驗證器都必須經過 execution fence 執行。
 >
 > - **啟用**：在 stage 加上 `"delivery": {"derive": "acceptance_lamp"}`（見範例 contract）。載入 contract 時，會用該 stage 的驗收燈編出封存綁定：planner 標為 `operator-contract`，並綁定 contract 檔的 digest。可以用 `"checks": [{"id": "...", "argv": [...]}]` 指定 delivery 檢查，預設為 `git diff --cached --check`。
-> - **執行**：`--execute` 時，delivery 檢查與獨立驗證器經 `LH_EXECUTION_FENCE_BACKEND` 指定的 fence 逐指令執行（Linux：bubblewrap、無網路、唯讀 clone）。指令請用 `/usr/bin`、`/bin` 的系統工具（純名稱依沙箱 PATH 解析），或 clone 內的腳本。fence 內沒有 `/dev`：預設的 `git diff --cached --check` 透過 fence 的封閉授權取得 `/dev/null`，其他需要 `/dev/null` 的 git 指令會失敗。
-> - **沒有可用 fence 時**（Windows、macOS 或未設定 backend）：不安裝執行器，run 停在 `human_required`，原因寫在輸出的 `plan.delivery_command_runner`。
+> - **執行**：`--execute` 時，每個指令經 `LH_EXECUTION_FENCE_BACKEND` 指定的 fence 執行。`local-process` 在 clone 內以獨立程序群組執行、逾時會終止整個群組，並在 receipt 標示 `kernel_containment: false`——它不提供隔離，安全邊界仍是 disposable clone。需要隔離時，實作 `ExecutionFencePort` 並以你的 backend 取代它。
+> - **沒有選 backend 時**：不安裝執行器，run 停在 `human_required`，原因寫在輸出的 `plan.delivery_command_runner`。
 > - 沒有 `delivery` 欄位的 stage 仍停在 `planning_required`；native-run 綁定（`planner_recovery`）不受影響。
 
 ### 4. 驗收紀律
@@ -219,12 +211,13 @@ python3 -B lh_runtime/command_ingress.py --goal-store /path/to/goals \
 ### C. 跑 driver
 
 ```bash
+LH_EXECUTION_FENCE_BACKEND=local-process \
 python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json --execute \
   --max-cycles 12 --idle-limit 2
 ```
 
 鏈路：intent → admission → disposable clone 執行 → 燈 + value gate → receipt →
-（多 stage 時）自動派生下一 stage。前提是 stage 已啟用 delivery，而且有可用的 execution fence，見「使用」第 3 節。`--status-snapshot-out` 給即時狀態投影；
+（多 stage 時）自動派生下一 stage。前提是 stage 已啟用 delivery，見「使用」第 3 節。`--status-snapshot-out` 給即時狀態投影；
 任何外部排程器定期呼叫同一指令即成常駐（每次都是有界 session，重啟可續）。
 
 ### D. 讀結果
@@ -233,14 +226,18 @@ python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json 
 - `runs/artifacts/<run_id>/<attempt>/`：receipt、diff、verifier 輸出、usage——完整證據鏈。
 - MCP（read-only）：`python3 -B lh_runtime/mcp_server.py --run-store ... --knowledge-store ...`。
 
-### E. 進階：draft-PR 模式
+### E. 進階：外部作用與外部判定
 
-Stage 宣告 `external_verdict`（無本地燈）+ contract 的 `external_verdict.adapter`
-（github_pr）：引擎把 diff 推到你 repo 的 `lh/*` branch 並開 **draft PR**（body 帶證據鏈），
-再用 GitHub CI 結論推進 run。token 用 fine-grained PAT（單一 repo、Contents RW、
-Pull requests RW、Actions R），放環境變數 `LH_GITHUB_TOKEN`，不進任何檔案。
-預設止於 draft PR；只有 Project Runtime Contract 明確授予 `auto_merge`，且 committed
-merge gate 通過時，才允許 conditional merge。公開發布、release 與產品終驗不因此被授權。
+引擎不附任何外部服務的 adapter。要讓 loop 在 workspace 以外產生作用（push、開 review、merge、發布），
+或以外部系統的結論推進 run，請透過引擎 API 注入：
+
+- **external action port**（`external_action_port.py`）：以 `operation_key` 去重的介面與本地 ledger；
+  你的 adapter 必須對同一個 key 讀回既有效果，才能保證重試不重複作用。
+- **verdict store 與 conclusion source**（`external_verdict.py`）：外部結論只接受明確的 `success` / `failure`，
+  來源或憑證錯誤不會變成重試判定。
+
+contract 裡帶 `external_verdict` 區塊會被明確拒絕，不會靜默忽略。是否允許外部作用，由注入方的授權決定；
+公開發布、release 與產品終驗仍由人／專案持有。
 
 ## License
 
@@ -248,21 +245,26 @@ merge gate 通過時，才允許 conditional merge。公開發布、release 與�
 
 ## Security model
 
-- **Isolation = disposable clone.** Executor presets run agent CLIs in
-  full-auto mode (`--dangerously-bypass-approvals-and-sandbox` / `--yolo` /
-  `--permission-mode bypassPermissions`). This is deliberate: the safety
-  boundary is that every attempt runs inside a throwaway clone pinned to a
-  commit — never in your working tree. Do not point the engine at a repo you
-  cannot afford to have an agent touch, and keep that boundary in mind before
-  feeding it untrusted content (issues, external text).
-- **Authority is goal-scoped.** The loop may commit, push an `lh/*` branch, or
-  conditionally merge only when the approved Project Runtime Contract grants
-  it and the committed gate passes. Publication, release, and terminal product
+- **Isolation is the disposable clone.** Every attempt runs in a throwaway
+  clone pinned to a commit, never in your working tree. The bundled
+  `local-process` fence bounds time, output, and the process group but contains
+  nothing, and its receipts say so (`kernel_containment: false`). The flags in
+  your executor declaration decide how much autonomy the agent gets. Do not
+  point the engine at a repo you cannot afford to have an agent touch, and keep
+  that boundary in mind before feeding it untrusted content.
+- **Only declared commands run.** Executors are absolute-path argv
+  declarations; the engine never searches `PATH` for a provider, and an
+  undeclared name is refused.
+- **Authority is goal-scoped.** The engine ships no push, merge, or publish
+  adapter. Effects outside the workspace go through an injected external action
+  port that the project authorizes. Publication, release, and terminal product
   acceptance remain project/human-owned.
-- **Credentials come from environment variables only** (`LH_CI_TOKEN`,
-  `LH_GITHUB_TOKEN`) and are required to be absent-safe: a missing credential
-  raises instead of degrading silently.
+- **Credentials come from environment variables only** (for example
+  `LH_CI_TOKEN` for an injected conclusion source) and are required to be
+  absent-safe: a missing credential raises instead of degrading silently.
 - **Acceptance is mechanical.** Only committed canaries / verification lamps
   mark work complete; model output never flips goal/run state on its own.
+- **Costs are never invented.** Unmeasured usage or an unpriced model stays
+  `unknown`; the engine ships no price table.
 - **Out-of-scope diffs are rejected deterministically** — an executor that
   writes outside the campaign's `allowed_paths` routes to `human_required`.
