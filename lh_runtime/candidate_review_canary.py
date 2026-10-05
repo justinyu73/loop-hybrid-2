@@ -167,7 +167,9 @@ def c1_policy_is_closed(root: Path) -> dict[str, Any]:
     except OSError:
         pass
     else:
-        symlink = reason_of(lambda: validate(mutate(lambda p: p.update(spec_ref=ref(link)))))
+        # Keep the link path as given: resolving it would hand the engine the target.
+        linked = {"path": str(link), "content_digest": sha256(link.read_bytes())}
+        symlink = reason_of(lambda: validate(mutate(lambda p: p.update(spec_ref=linked))))
     accepted = reason_of(lambda: validate(base)) is None
     ok = (accepted and all(observed[name] == expected for name, (_, expected) in expectations.items())
           and symlink in {"unavailable", "candidate_review_ref_unreadable"})
