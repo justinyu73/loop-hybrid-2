@@ -35,6 +35,7 @@ CONTRACTS = (
     "campaign-requirement-template.md",
     "entry-governance-v1.md",
     "planner-recovery-v1.md",
+    "failure-routing-v1.md",
 )
 DIFFERENCES_HEADING = "## 與現行程式的差異"
 SOURCE_PREFIXES = ("lh_runtime/", "gate-pack/", "tests/", "tools/")

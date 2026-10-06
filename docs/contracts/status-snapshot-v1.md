@@ -73,6 +73,7 @@ heartbeat 也帶 `code_identity`：
 - 類型由封閉的原因代碼前綴表決定：`awaiting_owner`、`blocked_by_evidence`、`scope_escalation`；
 - 表外的代碼一律歸為 `awaiting_owner`，並保留原始原因；
 - 這只是投影，不做決定，也不寫入任何 store。
+- 每一筆都帶 `route`（`lh-failure-route/v1`，見 `failure-routing-v1.md`）與 `machine_route_available`：原因其實是機器可處理、卻停在 `human_required` 時為 true。
 
 ## 7. 健康燈
 
