@@ -1,6 +1,6 @@
 # 自主 driver v1
 
-狀態：active。本文件描述有界的自主 loop。依據為 `lh_runtime/goal_loop_driver.py`、`lh_runtime/goal_loop_run.py`、`lh_runtime/goal_loop_worker.py` 與 `lh_runtime/dispatch_gate.py`。
+狀態：active。本文件描述有界的自主 loop。依據為 `lh_runtime/goal_loop_driver.py`、`lh_runtime/goal_loop_run.py`、`lh_runtime/goal_loop_worker.py`、`lh_runtime/dispatch_gate.py` 與 `lh_runtime/fleet.py`。
 
 ## 1. 形狀
 
@@ -50,16 +50,35 @@ dry-run（不加 `--execute`）只印出解析後的計畫，不呼叫任何模�
 - 超出 `allowed_paths` 的 diff，以決定性方式轉為 `human_required`。
 - 宣告中的旗標決定 agent 能有多少自主權；安全邊界仍是一次性 clone。
 
-## 5. 驗收燈
+## 5. 多專案（fleet）
+
+`lh_runtime/fleet.py --registry <file>` 在一次喚醒中，依登記表順序處理每個專案。登記表 `lh-fleet-registry/v1` 是封閉的：
+
+- 每個專案有 `project_id`、`contract` 與 `desired_state`（`enabled` 或 `paused`），可選 `max_cycles`（預設 30）與 `max_runtime_seconds`；
+- 兩個上限都必須是正數。未知欄位、重複的 id、未知狀態一律拒絕；
+- `contract` 的相對路徑以登記表所在目錄解析。
+
+喚醒時的處理：
+
+- `paused` 的專案不會被喚醒；
+- `enabled` 的專案以子程序執行一次有界的 `goal_loop_run.py --contract <path> --execute --max-cycles N`。每個專案保有自己的 contract、store、singleton lock 與 receipt；
+- 某個專案失敗時記為 `failed`，下一個專案照常執行；
+- 專案的 lock 已被其他程序持有時，該專案回報 driver 的 `not_holder`，不會重複執行。
+
+輸出 `lh-fleet-wake/v1`，列出每個專案的狀態與 `stop_reason`。有任何專案失敗時，結束碼為 1。fleet 本身不保存狀態、也不安裝任何服務，由外部排程器（cron、工作排程器、CI 計時器）呼叫。可用 `--only` 只喚醒單一專案。
+
+## 6. 驗收燈
 
 driver 與入口的行為，由不呼叫 provider 的 canary 驗證，例如：
 - `lh_runtime/goal_loop_canary.py`：完整 loop；
 - `lh_runtime/driver_heartbeat_canary.py`：heartbeat；
-- `lh_runtime/live_smoke_canary.py`：離線閉環。
+- `lh_runtime/live_smoke_canary.py`：離線閉環；
+- `lh_runtime/fleet_canary.py`：多專案喚醒、隔離、暫停與 `not_holder`。
 
 真實 executor 的實測（`live_smoke_canary.py --live`）由人執行，不在 `npm test` 之內。
 
 ## 與現行程式的差異
 
+- 原設計的多專案排程附有控制平面、執行期登記與系統服務。公開版的 fleet 只有一個靜態登記表，觸發一律交給外部排程器。
 - 原設計附有特定宿主的 executor 與兩個內建的廠商 executor。公開版只有宣告式 executor，沒有宿主 executor。
 - 原設計以服務的 CI 結論推進 parked run。公開版保留 verdict store 與 conclusion source 介面，但 contract 中的 `external_verdict` 區塊會被拒絕，接線必須經由引擎 API 注入。
