@@ -79,6 +79,8 @@ run_gate lh-assignment-packet python3 -B lh_runtime/assignment_packet_canary.py 
 run_gate lh-bounded-edit python3 -B lh_runtime/bounded_edit_canary.py || exit $?
 run_gate lh-plan-node-controller python3 -B lh_runtime/plan_node_controller_canary.py || exit $?
 run_gate lh-verifier-protocol python3 -B lh_runtime/verifier_protocol_canary.py || exit $?
+run_gate lh-parallel-scheduler python3 -B lh_runtime/parallel_scheduler_canary.py || exit $?
+run_gate lh-work-unit-recovery python3 -B lh_runtime/work_unit_recovery_canary.py || exit $?
 run_gate lh-canary-inventory python3 -B lh_runtime/canary_inventory_canary.py || exit $?
 run_gate lh-lifecycle-context-path-n05 python3 -B lh_runtime/lifecycle_context_path_canary.py || exit $?
 run_gate lh-provider-input-binding python3 -B lh_runtime/provider_input_binding_canary.py || exit $?

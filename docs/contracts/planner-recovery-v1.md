@@ -75,15 +75,20 @@ recovery 是 opt-in，必須同時滿足三個條件：
 
 - **incident**：同一個 Run、同一個檢查階段的連續失敗，由已結算的收據推導，不採信呼叫端提供的次數。
 - **稽核**：incident 的失敗次數達 3 時，必須先有唯讀稽核（`lh-planner-recovery-audit-binding/v1`、`lh-recovery-audit-result/v1`）。稽核者不得是 planner，結果必須綁定同一個請求與失敗清單。
-- **套用**（`apply_recovery_decision`）：只接受 `plan_verified` 的紀錄，而且動作必須與審核過的方案一致。
+- **請求**：必須指名真實的 Run，且 work unit、goal、revision、node 都與 store 一致；`request_id` 必須等於請求自身 key 欄位的 digest。
+- **預算**：planner 呼叫與驗證者呼叫的次數，以 Run 為單位、跨該 Run 的所有請求計算；用盡時 claim 被拒（`planner_call_budget_exhausted`）。
+- **套用**（`apply_recovery_decision`）：先依第 5 節重驗方案與判定，再要求紀錄為 `plan_verified`，而且動作必須與審核過的方案相同。審核之前，或動作與方案不同時，一律拒絕。
 
-| 動作 | 結果狀態 |
+| 動作 | 結果 |
 |---|---|
-| `resume_phase`、`dispatch_successor` | `applied` |
-| `repair_same_node`、`retry_within_budget` | 排入同一 Run 的重試（必須附證據與 attempt 上限） |
+| `resume_phase`（方案的目標階段為 `closeout`，且 Run 已整合） | `applied` |
+| `dispatch_successor`（原因與階段都是 `machine_complete`、Run 已整合、指向另一個節點） | `applied` |
+| `repair_same_node`、`retry_within_budget` | 紀錄維持 `plan_verified`，apply 狀態為 `retry_pending`；必須附證據與 attempt 上限，實際的重試由後續的完成流程提交 |
 | `request_authority` | `awaiting_authority` |
 | `insufficient_evidence` | `awaiting_evidence` |
-| `collect_evidence` | 維持 `plan_verified` |
+| `collect_evidence` | 套用時拒絕（unsupported） |
+
+- **引擎自己的停止**：同一檢查階段連續失敗 3 次時，完成流程本身會把 work unit 停在 `audit_required`；此時沒有唯讀稽核，planner 無法 claim，也無法套用任何動作。
 
 ## 5. 方案與判定的驗證規則
 
@@ -113,9 +118,16 @@ recovery 是 opt-in，必須同時滿足三個條件：
 
 考卷中有兩處是測試替身，**不算涵蓋**：native 綁定（正式環境由封存的 contract、provider registry 與 dispatch 解析），以及失敗子 Goal 收據的讀取。
 
+`lh_runtime/work_unit_recovery_canary.py`（gate `lh-work-unit-recovery`）在 work-unit fixture 走完真實完成流程的 Run 上，涵蓋第 4 節：
+- 請求的身分與 key；
+- 以 Run 為單位的呼叫預算；
+- 套用時的重驗、各動作的落點、審核之前不得套用；
+- 連續 3 次失敗時引擎停在 `audit_required`，以及稽核之前 planner 無法 claim。
+
+只有 phase 綁定的 metadata（capability、fence、provider input）是 fixture 資料。
+
 以下尚無行為考卷：
 - native 綁定解析的完整鏈；
-- work-unit store API 的生命週期；
 - 從真實失敗子 Goal 建立請求的步驟。
 
 這份契約另由 `gate-pack/docs_contracts/canary.py` 檢查：文件中提到的路徑、schema id 與名稱都必須存在於程式中。
@@ -123,5 +135,6 @@ recovery 是 opt-in，必須同時滿足三個條件：
 ## 與現行程式的差異
 
 - 原設計先以固定選路表處理失敗，只有需要判斷的情況才交給 planner。公開版沒有選路表：campaign 路徑在連續失敗後直接交給 planner，而單次失敗不會觸發 recovery。
-- 原設計的 recovery 由協調者驅動 work-unit 的完整生命週期。公開版保留了 store API，但沒有接線，也沒有行為考卷。
+- 原設計的 recovery 由協調者驅動 work-unit 的完整生命週期。公開版保留了 store API 並有行為考卷，但沒有任何引擎路徑呼叫它。
+- 本文件第一版（X18）的動作表把 `collect_evidence` 寫成「維持 `plan_verified`」，並把 `repair_same_node`、`retry_within_budget` 寫成「排入重試」。依程式更正為上表：前者在套用時被拒，後兩者的紀錄維持 `plan_verified`、apply 為 `retry_pending`。
 - `execution_binding` 的 schema 名稱仍帶有前身時期的 `host-` 前綴。

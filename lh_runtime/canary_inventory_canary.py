@@ -18,12 +18,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 CHECK_ID = "lh-canary-inventory"
 # file name -> why it is not a gate of its own.  Keep this list short and justified.
-EXEMPT: dict[str, str] = {
-    "parallel_scheduler_canary.py": (
-        "four of its five cases pass with the repaired delivery fixture; the dependency-release case needs a "
-        "real final delivery verdict before integration, which X23's real completion fixture will provide "
-        "(owner decision 2026-10-07)"),
-}
+EXEMPT: dict[str, str] = {}
 
 
 def case(case_id: str, ok: bool, detail: Any) -> dict[str, Any]:
