@@ -10,7 +10,8 @@ single-holder worker, disposable-clone executors, committed canaries as the
 acceptance authority, and goal-scoped execution authority.
 
 ## Conventions
-- This repo has no docs layer; the three-layer docs convention does not apply.
+- Docs follow three layers: `docs/contracts/` (long-lived, describes the code as
+  it is; changing one needs approval), `docs/active/`, `docs/archive/`.
 - Boundary-seal vocabulary: non-test files must not introduce the sealed gate
   vocabulary (the pattern list lives in `gate-pack/boundary_seal/canary.py`
   PATTERNS); any new site outside the sealed baseline turns that gate red.
@@ -18,6 +19,7 @@ acceptance authority, and goal-scoped execution authority.
   only).
 - The human/project owns the Goal, authority envelope, stop conditions, terminal
   acceptance, public release, and publication.
-- Inside an approved Project Runtime Contract, the loop may commit, push an
-  `lh/*` branch, or conditionally merge only when that exact action is granted
-  and its committed gate passes. Per-node reminders are not required.
+- Inside an approved Project Runtime Contract the loop runs, verifies, and
+  continues approved work without per-node reminders. Effects outside the
+  workspace go only through an injected port; post-run effects go through
+  `lh_runtime/effect_guard.py`.
