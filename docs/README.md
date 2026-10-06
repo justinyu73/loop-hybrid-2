@@ -22,3 +22,4 @@
 | [campaign-requirement-template](contracts/campaign-requirement-template.md) | 給目標專案用的 campaign 範本 |
 | [entry-governance-v1](contracts/entry-governance-v1.md) | 入口與文件治理 |
 | [planner-recovery-v1](contracts/planner-recovery-v1.md) | 失敗後的有界修復提案、獨立審核、預算與稽核 |
+| [failure-routing-v1](contracts/failure-routing-v1.md) | 失敗後「下一步由誰做什麼」的固定選路表（投影） |

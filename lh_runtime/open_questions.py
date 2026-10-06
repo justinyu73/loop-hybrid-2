@@ -14,6 +14,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+try:
+    from . import failure_router
+except ImportError:  # direct execution keeps lh_runtime on sys.path
+    import failure_router  # type: ignore
+
 SCHEMA = "lh-open-questions/v1"
 DEFAULT_QUIET_AFTER_SECONDS = 24 * 3600.0
 AWAITING_OWNER = "awaiting_owner"
@@ -68,8 +73,11 @@ def _run_reason(run_store: Any, run_id: str | None) -> str | None:
 
 def _item(source: str, subject: str, reason: str | None, since: float, now: float, quiet_after: float) -> dict[str, Any]:
     waiting = max(0.0, now - float(since))
+    routed = failure_router.route(reason)
+    # Every item here is parked for a human; a machine route means a machine could act instead.
     return {"source": source, "subject": subject, "kind": classify(reason), "reason": reason or "unrecorded",
-            "since": since, "waiting_seconds": round(waiting, 3), "quiet": waiting > quiet_after}
+            "since": since, "waiting_seconds": round(waiting, 3), "quiet": waiting > quiet_after,
+            "route": routed, "machine_route_available": not routed["human_required"]}
 
 
 def build_open_questions(run_store: Any, goal_store: Any, *, now: float,
