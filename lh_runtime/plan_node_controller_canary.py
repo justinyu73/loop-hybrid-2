@@ -167,7 +167,7 @@ def main() -> int:
     finally:
         temporary.cleanup()
     failures = [case for case in cases if not case["ok"]]
-    print(json.dumps({"check_id": "p3b0-plan-node-controller", "status": "pass" if not failures else "fail", "cases": cases, "failures": failures}, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps({"check_id": "lh-plan-node-controller", "status": "pass" if not failures else "fail", "cases": cases, "failures": failures}, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if not failures else 1
 
 
