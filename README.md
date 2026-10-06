@@ -104,13 +104,14 @@ flowchart TB
 - **待人處理事項**（`open_questions.py`）：快照中的 `open_questions` 把每個 `human_required` 的 Goal 與事件標上類型、原因與等待時間，久未處理的標為 `quiet`。
 - **保存與工作區衛生**（`retention.py`）：預設只產生計畫（`lh-retention-plan/v1`），加上 `--apply` 才刪除。只刪引擎自己產生、已被取代且未被參照的暫存（驗證快照、啟動暫存、失敗診斷、修復副本、review proof）；被 store 或 JSON 證據引用的、寬限期內的、每類最新的一筆、repository 根目錄與任何 symlink／junction 一律保留並寫明原因，store 之外不碰。
 - **狀態可信度**（`status_lamp.py`、`status_snapshot.py`）：heartbeat 與快照帶 `code_identity`，磁碟上的引擎已更新而 driver 沒重啟時標為 stale（只回報，不自動重啟）；快照的 `lamp` 是唯一的健康判定，由純函式依固定規則產生並附上觸發的規則。
+- **多專案排程**（`fleet.py`）：外部排程器每次喚醒時，依登記表（`lh-fleet-registry/v1`）讓每個 `enabled` 專案各跑一次有界的 `goal_loop_run` session，各自保有 contract、store、lock 與 receipt；一個專案失敗不阻擋其他專案，`paused` 不被喚醒，已被持有的專案回報 `not_holder`。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：90 個 gate 中 82 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：91 個 gate 中 83 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
