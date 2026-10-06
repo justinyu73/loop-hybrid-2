@@ -86,7 +86,14 @@ clone can reproduce the same closed loop.
   `candidate_review` (a digest-pinned spec, requirements, and caller context).
   The independent verifier must then return a closed review bound to this
   candidate; the engine derives the verdict from its findings, seals the raw
-  bytes, and re-verifies them on readback. Exit 0 without a review fails.
+  bytes, and re-verifies them on readback. Exit 0 without a review fails. On
+  the work-unit path the related checks run first, a red review's findings go
+  back to the next attempt within the attempt budget, and non-blocking
+  suggestions are only recorded in discovery, never turned into work.
+- **Normal successor** (`task_area.py`) — once a reviewed task's integrated
+  receipt chain re-verifies, its approved successor is released by rule
+  without a Planner call; a red result, an unsettled recovery request, and
+  legacy tasks still go to the existing Planner port.
 - **Declared executors** (`cli_agent_executor.py`) — an executor declaration is
   closed data, not code; an undeclared name is refused.
 - **Execution fence port** (`execution_fence.py`, `execution_fence_local.py`) —
@@ -107,7 +114,7 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 69 of 77 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 71 of 79 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
