@@ -151,13 +151,20 @@ clone can reproduce the same closed loop.
   `goal_loop_run` session with its own contract, stores, lock, and receipts. A
   failing project does not block the others, `paused` projects are not woken,
   and a project held elsewhere reports `not_holder`.
+- **Onboarding** (`onboarding.py`) — `init` writes contract and acceptance
+  lamp templates (never overwriting a file); `validate` reads files and git
+  objects only and reports shape errors and drift (for example a verifier
+  inside `allowed_paths` or an executor that is not an absolute path);
+  `pilot` clones the target into a scratch directory and drives one full run
+  to verified with a declared stand-in executor through the real entry
+  points, leaving the target repository unchanged.
 
 ## Platform support
 
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 83 of 91 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 84 of 92 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
@@ -209,7 +216,19 @@ To put a real coding agent to work, declare its absolute path under
 
 Each adopting project describes itself with a runtime contract; see
 [`project_runtime_contract.example.json`](project_runtime_contract.example.json)
-for an annotated example.
+for an annotated example. The quickest start is to let the engine write the
+templates, check them, and try one run with a stand-in executor (no model is
+called and your repository is not changed):
+
+```bash
+python3 -B lh_runtime/onboarding.py init /path/to/your-repo
+python3 -B lh_runtime/onboarding.py validate /path/to/your-repo
+python3 -B lh_runtime/onboarding.py pilot /path/to/your-repo \
+  --executors stand-in.json --executor stand-in
+```
+
+The pilot reads the repository's committed content, so commit the acceptance
+lamp first.
 
 Every run needs a sealed delivery binding, and its executor, delivery checks,
 and independent verifier all run through the execution fence:
