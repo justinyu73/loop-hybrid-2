@@ -99,7 +99,8 @@ def _review_ref_bytes(reference: Any) -> bytes:
     if not {"path", "content_digest"} <= set(ref):
         raise DeliveryUnitError("candidate_review_ref_invalid")
     path = Path(_text("candidate_review.ref.path", ref.get("path")))
-    if (not path.is_absolute() or any(part.is_symlink() for part in (path, *path.parents))
+    # A symlink or a directory junction anywhere on the path could point the review elsewhere.
+    if (not path.is_absolute() or any(part.is_symlink() or part.is_junction() for part in (path, *path.parents))
             or not path.is_file() or path.stat().st_size > REVIEW_REF_MAX_BYTES):
         raise DeliveryUnitError("candidate_review_ref_unreadable")
     raw = path.read_bytes()
