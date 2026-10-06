@@ -113,13 +113,19 @@ clone can reproduce the same closed loop.
   probes and the paths it may touch; git is read commit by commit for guarded
   changes that name no registered decision; the outcome is re-derived by
   running the probes, never stored as done.
+- **Progress receipts and verifier queue** (`gate-pack/progress_receipts/`, a
+  tool for target repositories) — a requester names only a check id; the
+  verifier runs it in a snapshot pinned to HEAD and writes a hash-chained
+  receipt, so progress without a receipt is not progress. Verification,
+  acceptance, and promotion are recorded separately and in order; whether the
+  two roles really are different principals is measured and reported.
 
 ## Platform support
 
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 74 of 82 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 75 of 83 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
