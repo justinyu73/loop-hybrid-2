@@ -105,13 +105,14 @@ flowchart TB
 - **保存與工作區衛生**（`retention.py`）：預設只產生計畫（`lh-retention-plan/v1`），加上 `--apply` 才刪除。只刪引擎自己產生、已被取代且未被參照的暫存（驗證快照、啟動暫存、失敗診斷、修復副本、review proof）；被 store 或 JSON 證據引用的、寬限期內的、每類最新的一筆、repository 根目錄與任何 symlink／junction 一律保留並寫明原因，store 之外不碰。
 - **狀態可信度**（`status_lamp.py`、`status_snapshot.py`）：heartbeat 與快照帶 `code_identity`，磁碟上的引擎已更新而 driver 沒重啟時標為 stale（只回報，不自動重啟）；快照的 `lamp` 是唯一的健康判定，由純函式依固定規則產生並附上觸發的規則。
 - **多專案排程**（`fleet.py`）：外部排程器每次喚醒時，依登記表（`lh-fleet-registry/v1`）讓每個 `enabled` 專案各跑一次有界的 `goal_loop_run` session，各自保有 contract、store、lock 與 receipt；一個專案失敗不阻擋其他專案，`paused` 不被喚醒，已被持有的專案回報 `not_holder`。
+- **專案上手**（`onboarding.py`）：`init` 寫入 contract 與驗收燈範本（不覆寫既有檔案）；`validate` 只讀檔案與 git 物件，回報形狀錯誤與漂移（例如驗證器落在 `allowed_paths` 內、executor 不是絕對路徑）；`pilot` 把目標 clone 到暫存目錄，以宣告的替身 executor 經真實入口跑一次完整的 run 到 verified，目標 repo 前後不變。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：91 個 gate 中 83 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：92 個 gate 中 84 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
@@ -153,6 +154,16 @@ npm run lint    # shell 語法 + Python 編譯檢查
 
 ### 1. 建立專案 contract
 
+最快的方式是讓引擎寫出範本，先檢查，再用替身 executor 試跑一次（不呼叫任何模型，也不改動你的 repo）：
+
+```bash
+python3 -B lh_runtime/onboarding.py init /path/to/your-repo        # 寫入 project_runtime_contract.json 與 checks/acceptance.py
+python3 -B lh_runtime/onboarding.py validate /path/to/your-repo    # 回報形狀錯誤與漂移；不執行 repo 中的任何東西
+python3 -B lh_runtime/onboarding.py pilot /path/to/your-repo \
+  --executors stand-in.json --executor stand-in                   # 在暫存 clone 中跑一次完整的 run
+```
+
+pilot 讀的是 repo 的已 commit 內容，所以驗收燈要先 commit。也可以手動
 複製 [`project_runtime_contract.example.json`](project_runtime_contract.example.json) 到你的專案，填入
 `project_id`、`campaign`（stage、驗收燈、允許路徑）、`source_repo`、`base_revision`、`executors`、
 `models`（execute，可選 judge / judge_model），以及可選的 `pricing`。

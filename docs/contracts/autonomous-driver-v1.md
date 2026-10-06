@@ -1,6 +1,6 @@
 # 自主 driver v1
 
-狀態：active。本文件描述有界的自主 loop。依據為 `lh_runtime/goal_loop_driver.py`、`lh_runtime/goal_loop_run.py`、`lh_runtime/goal_loop_worker.py`、`lh_runtime/dispatch_gate.py` 與 `lh_runtime/fleet.py`。
+狀態：active。本文件描述有界的自主 loop。依據為 `lh_runtime/goal_loop_driver.py`、`lh_runtime/goal_loop_run.py`、`lh_runtime/goal_loop_worker.py`、`lh_runtime/dispatch_gate.py`、`lh_runtime/fleet.py` 與 `lh_runtime/onboarding.py`。
 
 ## 1. 形狀
 
@@ -67,13 +67,24 @@ dry-run（不加 `--execute`）只印出解析後的計畫，不呼叫任何模�
 
 輸出 `lh-fleet-wake/v1`，列出每個專案的狀態與 `stop_reason`。有任何專案失敗時，結束碼為 1。fleet 本身不保存狀態、也不安裝任何服務，由外部排程器（cron、工作排程器、CI 計時器）呼叫。可用 `--only` 只喚醒單一專案。
 
-## 6. 驗收燈
+## 6. 專案上手（onboarding）
+
+`lh_runtime/onboarding.py` 分三步把目標 repo 接上 loop：
+
+- `init <target>`：寫入 `project_runtime_contract.json`（含 `executors` 宣告範本，executor 先以佔位路徑表示）與 `checks/acceptance.py`（驗收燈範本）。已存在的檔案不覆寫，輸出 `lh-onboarding-init/v1`。
+- `validate <target>`：只讀檔案與 git 物件，不執行目標中的任何東西，輸出 `lh-onboarding-validate/v1`。回報的代碼包括：`verifier_in_allowed_paths`、`verifier_missing`、`verifier_not_committed`、`executor_not_absolute`、`executor_missing`、`executor_prompt_slot_missing`、`model_executor_undeclared`、`base_revision_unknown`。形狀都正確時，再交給引擎自己的 resolver 綁定一次；失敗則回報 `contract_unresolvable`。
+- `pilot <target> --executors <file> --executor <name>`：以宣告的替身 executor 取代 contract 中的 executor，先對這份有效 contract 執行 validate，不通過就拒絕。通過後把目標 clone 到暫存目錄，base 釘在 `base_revision` 解析出的 commit，再經真實入口（`command_ingress.py`、`goal_loop_run.py --execute`）跑一次完整的 run。沒有指定 fence backend 時使用 `local-process`，receipt 會如實寫出沒有隔離。輸出 `lh-onboarding-pilot/v1`：run 與 Goal 的狀態、receipt 路徑，以及目標 repo 的 HEAD 與工作樹前後是否相同。
+
+pilot 讀的是目標的已 commit 內容。範本的交付檢查包含 `git diff --cached --check`：在沒有設定 `core.autocrlf` 的 Windows 上，以文字模式寫出 CRLF 的 executor 會被這個檢查擋下。
+
+## 7. 驗收燈
 
 driver 與入口的行為，由不呼叫 provider 的 canary 驗證，例如：
 - `lh_runtime/goal_loop_canary.py`：完整 loop；
 - `lh_runtime/driver_heartbeat_canary.py`：heartbeat；
 - `lh_runtime/live_smoke_canary.py`：離線閉環；
-- `lh_runtime/fleet_canary.py`：多專案喚醒、隔離、暫停與 `not_holder`。
+- `lh_runtime/fleet_canary.py`：多專案喚醒、隔離、暫停與 `not_holder`；
+- `lh_runtime/onboarding_e2e_canary.py`：在乾淨環境中走完 init、validate、pilot 並讀回 receipt。
 
 真實 executor 的實測（`live_smoke_canary.py --live`）由人執行，不在 `npm test` 之內。
 
