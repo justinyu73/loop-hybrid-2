@@ -21,3 +21,4 @@
 | [token-accounting-v1](contracts/token-accounting-v1.md) | 用量與成本 |
 | [campaign-requirement-template](contracts/campaign-requirement-template.md) | 給目標專案用的 campaign 範本 |
 | [entry-governance-v1](contracts/entry-governance-v1.md) | 入口與文件治理 |
+| [planner-recovery-v1](contracts/planner-recovery-v1.md) | 失敗後的有界修復提案、獨立審核、預算與稽核 |
