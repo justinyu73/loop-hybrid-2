@@ -134,13 +134,30 @@ clone can reproduce the same closed loop.
 - **Open questions** (`open_questions.py`) — the snapshot's `open_questions`
   gives every `human_required` goal and event a kind, reason, and waiting time,
   and marks long-waiting ones `quiet`.
+- **Retention** (`retention.py`) — plans by default (`lh-retention-plan/v1`)
+  and removes only with `--apply`. It removes engine scratch (verifier
+  snapshots, launch scratch, failed-check diagnostics, recovery copies, review
+  proofs) only when superseded and unreferenced. Anything cited by the store or
+  JSON evidence, within the grace period, the newest of its kind, a repository
+  root, or any symlink or junction is kept with its reason; nothing outside the
+  store root is touched.
+- **Status trust** (`status_lamp.py`, `status_snapshot.py`) — the heartbeat and
+  snapshot carry `code_identity`, which reports stale when the engine on disk
+  changed but the driver was not restarted (report only, no automatic
+  restart). The snapshot's `lamp` is the one health verdict, produced by a pure
+  function from fixed rules, with the rules that fired.
+- **Fleet** (`fleet.py`) — on each wake-up from an external scheduler, every
+  `enabled` project in the registry (`lh-fleet-registry/v1`) runs one bounded
+  `goal_loop_run` session with its own contract, stores, lock, and receipts. A
+  failing project does not block the others, `paused` projects are not woken,
+  and a project held elsewhere reports `not_holder`.
 
 ## Platform support
 
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 80 of 88 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 83 of 91 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
