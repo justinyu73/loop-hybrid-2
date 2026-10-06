@@ -11,6 +11,7 @@ never an authority: LH's SQLite stores remain the source of truth.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from goal_store import GoalStore
 import open_questions
+import status_lamp
 from project_status import _wall_age_seconds, build_run_liveness, build_status
 from run_store import RunStore
 
@@ -49,6 +51,27 @@ A2_ATTEMPT_PHASES = (
 )
 
 
+def engine_digest(root: str | Path = HERE) -> str:
+    """Digest of the engine modules on disk: every non-canary ``*.py`` in the engine directory."""
+    lines = []
+    for path in sorted(Path(root).glob("*.py")):
+        if path.name.endswith("_canary.py"):
+            continue
+        lines.append(f"{path.name}\0{hashlib.sha256(path.read_bytes()).hexdigest()}\n")
+    return "sha256:" + hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
+def engine_code_identity(loaded_digest: str | None, root: str | Path = HERE) -> dict[str, Any]:
+    """Compare the digest a driver loaded with the engine on disk now.
+
+    ``stale`` is true when they differ, and null when the loaded digest is
+    unknown.  This only reports; nothing restarts because of it.
+    """
+    disk = engine_digest(root)
+    loaded = loaded_digest if isinstance(loaded_digest, str) else None
+    return {"loaded_digest": loaded, "disk_digest": disk, "stale": None if loaded is None else loaded != disk}
+
+
 def default_heartbeat_path(run_store_root: str | Path) -> Path:
     """Return the durable heartbeat sidecar for one LH run store."""
     return Path(run_store_root) / DEFAULT_HEARTBEAT_FILENAME
@@ -61,6 +84,7 @@ def build_heartbeat(
     wall_ts: str,
     phase: str,
     cycles: int,
+    code_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the small, process-owned liveness projection.
 
@@ -75,6 +99,7 @@ def build_heartbeat(
         "wall_ts": str(wall_ts),
         "phase": str(phase),
         "cycles": int(cycles),
+        "code_identity": code_identity,
     }
 
 
@@ -124,7 +149,8 @@ def build_snapshot(
     # reported stale (unknown is not live); recovery semantics are unchanged.
     heartbeat_age = _wall_age_seconds(heartbeat)
     stale = heartbeat_age is None or heartbeat_age > threshold
-    return {
+    loaded = ((heartbeat or {}).get("code_identity") or {}).get("loaded_digest")
+    snapshot = {
         "schema": SCHEMA,
         "generated_at": generated_at,
         "run_store_root": str(run_store.root),
@@ -143,7 +169,11 @@ def build_snapshot(
             staleness_threshold_seconds=threshold,
         ),
         "open_questions": open_questions.build_open_questions(run_store, goal_store, now=time.time()),
+        "code_identity": engine_code_identity(loaded),
     }
+    # The one degraded verdict: a pure function of every other field.
+    snapshot["lamp"] = status_lamp.lamp(snapshot)
+    return snapshot
 
 
 def write_snapshot(snapshot: dict[str, Any], out_path: Path) -> Path:

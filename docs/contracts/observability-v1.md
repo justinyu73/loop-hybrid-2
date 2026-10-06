@@ -44,14 +44,15 @@ python3 -B lh_runtime/mcp_server.py --run-store ... --knowledge-store ...
 
 ## 5. 警報與交付
 
-引擎不附任何通知管道。需要警報時，讀取端以快照的 `stale`、`needs_human` 與 `dispatch_gate` 自行判斷並送出。
+引擎不附任何通知管道。需要警報時，讀取端以快照的 `lamp`（`lh_runtime/status_lamp.py` 的唯一健康判定，附觸發的規則）決定是否送出，不要從其他欄位自行推導。
 
 ## 6. 驗收燈
 
 - `lh_runtime/driver_heartbeat_canary.py`：heartbeat；
 - `lh_runtime/status_snapshot_canary.py`：快照欄位與 stale 判定；
 - `lh_runtime/mcp_canary.py`：唯讀介面；
-- `lh_runtime/retention_canary.py`：保存與工作區衛生。
+- `lh_runtime/retention_canary.py`：保存與工作區衛生；
+- `lh_runtime/status_trust_canary.py`：code identity 與健康燈。
 
 ## 與現行程式的差異
 

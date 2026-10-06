@@ -28,7 +28,8 @@ from lifecycle import (
     LifecycleUnavailable,
 )
 from platform_ports import FileLockSchedulerPort, SchedulerPort
-from status_snapshot import build_heartbeat, build_snapshot, default_heartbeat_path, write_heartbeat, write_snapshot
+from status_snapshot import (build_heartbeat, build_snapshot, default_heartbeat_path, engine_code_identity,
+                             engine_digest, write_heartbeat, write_snapshot)
 
 
 def run_driver(
@@ -184,6 +185,8 @@ def _run_driver_loop(
     pause = Path(pause_flag) if pause_flag is not None else None
     snapshot_out = Path(status_snapshot_out) if status_snapshot_out is not None else None
     heartbeat_out = default_heartbeat_path(worker.run_store.root)
+    # The engine this driver runs is the one on disk now; later edits make heartbeats report stale code.
+    loaded_digest = engine_digest()
     gate = dispatch_gate.DispatchGate(
         worker.run_store,
         quota_reader=quota_reader,
@@ -221,7 +224,7 @@ def _run_driver_loop(
             break
         if gate_state["action"] == dispatch_gate.IDLE:
             idle_streak += 1
-            _write_heartbeat(worker, heartbeat_out, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
+            _write_heartbeat(worker, heartbeat_out, loaded_digest, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
             _lifecycle_heartbeat(lifecycle, phase="idle", cycles=cycles)
             if snapshot_out is not None:
                 _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state, pricing=pricing)
@@ -240,7 +243,7 @@ def _run_driver_loop(
             stop_reason = "timeout"
             break
 
-        _write_heartbeat(worker, heartbeat_out, holder=holder, phase="tick", cycles=cycles, monotonic_ts=clock())
+        _write_heartbeat(worker, heartbeat_out, loaded_digest, holder=holder, phase="tick", cycles=cycles, monotonic_ts=clock())
         _lifecycle_heartbeat(lifecycle, phase="tick", cycles=cycles)
         result = worker.tick(holder=holder, model=model, verdict_store=verdict_store, conclusion_source=conclusion_source, turning_point=turning_point)
         cycles += 1
@@ -266,11 +269,11 @@ def _run_driver_loop(
             idle_streak = 0
             if snapshot_out is not None:
                 _refresh_snapshot(worker, snapshot_out, tick_overhead_seconds=backoff_seconds, gate_state=gate_state, pricing=pricing)
-            _write_heartbeat(worker, heartbeat_out, holder=holder, phase="progress", cycles=cycles, monotonic_ts=clock())
+            _write_heartbeat(worker, heartbeat_out, loaded_digest, holder=holder, phase="progress", cycles=cycles, monotonic_ts=clock())
             _lifecycle_heartbeat(lifecycle, phase="progress", cycles=cycles)
             continue
         idle_streak += 1
-        _write_heartbeat(worker, heartbeat_out, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
+        _write_heartbeat(worker, heartbeat_out, loaded_digest, holder=holder, phase="idle", cycles=cycles, monotonic_ts=clock())
         _lifecycle_heartbeat(lifecycle, phase="idle", cycles=cycles)
         if idle_streak >= idle_limit:
             stop_reason = "parked" if _parked_goal_ids(worker) else "idle"
@@ -320,6 +323,7 @@ def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_s
 def _write_heartbeat(
     worker: GoalLoopWorker,
     out_path: Path,
+    loaded_digest: str,
     *,
     holder: str,
     phase: str,
@@ -333,6 +337,7 @@ def _write_heartbeat(
         wall_ts=datetime.now(timezone.utc).isoformat(),
         phase=phase,
         cycles=cycles,
+        code_identity=engine_code_identity(loaded_digest),
     )
     write_heartbeat(heartbeat, out_path)
 
