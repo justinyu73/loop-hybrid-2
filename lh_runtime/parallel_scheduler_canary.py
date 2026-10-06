@@ -12,6 +12,8 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(1, str(HERE.parent))  # the work-unit fixture imports lh_runtime as a package
+sys.path.insert(2, str(HERE.parent / "tests"))
 
 import delivery_contract as engine  # noqa: E402
 from parallel_scheduler import ParallelScheduler  # noqa: E402
@@ -48,12 +50,14 @@ def unit(
     }
 
 
-def delivery(store: WorkUnitStore, parent_goal_id: str) -> dict[str, Any]:
+def delivery(store: WorkUnitStore, parent_goal_id: str, only: tuple[str, ...] | None = None) -> dict[str, Any]:
     """A sealed delivery contract and bound packet for every unit, as the scheduler now requires."""
     parent = store.get_parent_goal(parent_goal_id)
     contracts, packets = {}, {}
     for definition in store.list_work_units(parent_goal_id):
         work_unit_id = definition["work_unit_id"]
+        if only is not None and work_unit_id not in only:
+            continue
         command = {"id": "unit-check", "argv": [sys.executable, "-B", "-c", "pass"], "cwd": "${WORKTREE}",
                    "expect_exit": 0, "timeout_seconds": 30}
         contract = engine.seal_contract({
@@ -148,32 +152,47 @@ def parallel_case(root: Path) -> dict[str, Any]:
 
 
 def dependency_and_fence_case(root: Path) -> dict[str, Any]:
-    store = WorkUnitStore(root / "dependency")
-    store.create_parent_goal("parent-dependency", base_sha=BASE, goal_revision=2)
-    store.register_work_units("parent-dependency", [
-        unit(root, "dep-a"),
-        unit(root, "dep-b", dependencies=("dep-a",)),
-        unit(root, "dep-c"),
-        unit(root, "dep-d"),
+    """Dependents wait for a real integration: the anchor goes through the real completion flow.
+
+    Integration now needs a final delivery verdict, so the anchor is driven by the
+    work-unit fixture (executor, checks, independent verifier, integration) rather
+    than marked integrated by hand.
+    """
+    import candidate_review_work_unit_canary as fixture
+    from lh_runtime.parallel_scheduler import ParallelScheduler as PackageScheduler
+
+    harness = fixture.Harness(root / "dependency", executor_mode="right", policy=False)
+    store = harness.store
+    started = harness.consumer.consume(harness.envelope, complete=False)
+    anchor = str(started["work_unit_id"])
+    run = store.get_run(str(started["run_id"]))
+    parent_base = store.get_parent_goal(fixture.GOAL_ID)["base_sha"]
+    store.register_work_units(fixture.GOAL_ID, [
+        unit(root, "dep-b", base_sha=parent_base, dependencies=(anchor,)),
+        unit(root, "dep-e", base_sha=parent_base, dependencies=(anchor,)),
     ])
-    scheduler = ParallelScheduler(store, **delivery(store, "parent-dependency"))
-    first = scheduler.dispatch("parent-dependency", holder="dependency")
+    scheduler = PackageScheduler(store, **delivery(store, fixture.GOAL_ID, only=("dep-b", "dep-e")))
+    first = scheduler.dispatch(fixture.GOAL_ID, holder="dependency")
     first_ids = {row["work_unit_id"] for row in first["dispatched"]}
-    dep_a = next(row for row in first["dispatched"] if row["work_unit_id"] == "dep-a")
-    stale = scheduler.integrate("dep-a", holder=dep_a["holder"], fence=int(dep_a["fence"]) - 1)
-    integrated = scheduler.integrate("dep-a", holder=dep_a["holder"], fence=int(dep_a["fence"]))
-    second = scheduler.dispatch("parent-dependency", holder="dependency")
+    holder = harness.consumer.holder
+    stale = scheduler.integrate(anchor, holder=holder, fence=int(run["fence"]) - 1)
+    without_verdict = scheduler.integrate(anchor, holder=holder, fence=int(run["fence"]))
+    harness.drive()
+    integrated = scheduler.integrate(anchor, holder=holder, fence=int(store.get_run(str(started["run_id"]))["fence"]))
+    second = scheduler.dispatch(fixture.GOAL_ID, holder="dependency")
     second_ids = {row["work_unit_id"] for row in second["dispatched"]}
     ok = (
-        first["status"] == "dispatched"
-        and "dep-b" not in first_ids
+        "dep-b" not in first_ids and "dep-e" not in first_ids
         and stale is False
+        and without_verdict is False
         and integrated is True
-        and "dep-b" in second_ids
-        and store.get_work_unit("dep-a")["state"] == "integrated"
+        and {"dep-b", "dep-e"} <= second_ids
+        and store.get_work_unit(anchor)["state"] == "integrated"
         and store.get_work_unit("dep-b")["state"] == "running"
     )
-    return case("integrated-dependency-and-current-fence-required", ok, {"first": first, "stale_integrate": stale, "integrated": integrated, "second": second})
+    return case("integrated-dependency-and-current-fence-required", ok, {
+        "first": sorted(first_ids), "stale_integrate": stale, "integrate_without_delivery_verdict": without_verdict,
+        "integrated": integrated, "second": sorted(second_ids), "anchor_state": store.get_work_unit(anchor)["state"]})
 
 
 def restart_case(root: Path) -> dict[str, Any]:
