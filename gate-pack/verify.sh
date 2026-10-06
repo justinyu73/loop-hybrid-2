@@ -65,6 +65,7 @@ run_gate lh-candidate-review-work-unit python3 -B lh_runtime/candidate_review_wo
 run_gate lh-normal-successor python3 -B lh_runtime/normal_successor_canary.py || exit $?
 run_gate lh-effect-guard python3 -B lh_runtime/effect_guard_canary.py || exit $?
 run_gate lh-clone-push-boundary python3 -B lh_runtime/clone_push_boundary_canary.py || exit $?
+run_gate lh-open-questions python3 -B lh_runtime/open_questions_canary.py || exit $?
 run_gate lh-lifecycle-context-path-n05 python3 -B lh_runtime/lifecycle_context_path_canary.py || exit $?
 run_gate lh-provider-input-binding python3 -B lh_runtime/provider_input_binding_canary.py || exit $?
 run_gate lh-attempt-timeout python3 -B lh_runtime/attempt_timeout_canary.py || exit $?
