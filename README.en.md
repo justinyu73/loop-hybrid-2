@@ -169,13 +169,17 @@ clone can reproduce the same closed loop.
   duplicates, placeholders, unknown dependencies and dispatchable nodes,
   path overlap and dependencies inside a parallel group) before any verifier
   sees it; a defect is refused with its code and the verifier is not called.
+- **Planner recovery exam** (`planner_recovery_canary.py`) — checks the plan
+  and verdict rules one by one; on the campaign path a reviewed plan always
+  waits for authority (never applied, attempt ceilings never replenished),
+  a failed role is not retried, and a restart does not call a role twice.
 
 ## Platform support
 
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 86 of 94 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 87 of 95 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors

@@ -98,10 +98,30 @@ recovery 是 opt-in，必須同時滿足三個條件：
 
 ## 6. 驗收燈
 
-目前沒有 canary 涵蓋本文件描述的 campaign 路徑與 work-unit API。這份契約由 `gate-pack/docs_contracts/canary.py` 檢查：文件中提到的路徑、schema id 與名稱都必須存在於程式中。行為層級的考卷列為後續工作。
+`lh_runtime/planner_recovery_canary.py`（gate `lh-planner-recovery`）涵蓋兩部分：
+
+- **方案與判定的驗證規則**（第 5 節）：一筆綁定正確的紀錄必須通過，每一種單一違規都必須被拒絕；
+- **campaign 路徑的狀態機**（第 3 節），以真實的 GoalStore 執行，涵蓋以下情況：
+  - 審核通過後停在 `awaiting_authority`，不會被套用；
+  - 子 Goal 的 attempt 用完時不補充；
+  - principal 不獨立時，在任何角色呼叫之前就拒絕；
+  - 角色失敗時不重試：已啟動後失敗記為 `outcome_unknown`，未能啟動則記為 `rejected`；
+  - 重啟後，已記錄的 planner 不會再被呼叫；
+  - 未結的 claim、但程序已不在時，記為 `outcome_unknown`；
+  - incident 期限已過時，停在 `awaiting_authority`；
+  - stop line 被改過時，記為 authority mismatch。
+
+考卷中有兩處是測試替身，**不算涵蓋**：native 綁定（正式環境由封存的 contract、provider registry 與 dispatch 解析），以及失敗子 Goal 收據的讀取。
+
+以下尚無行為考卷：
+- native 綁定解析的完整鏈；
+- work-unit store API 的生命週期；
+- 從真實失敗子 Goal 建立請求的步驟。
+
+這份契約另由 `gate-pack/docs_contracts/canary.py` 檢查：文件中提到的路徑、schema id 與名稱都必須存在於程式中。
 
 ## 與現行程式的差異
 
 - 原設計先以固定選路表處理失敗，只有需要判斷的情況才交給 planner。公開版沒有選路表：campaign 路徑在連續失敗後直接交給 planner，而單次失敗不會觸發 recovery。
-- 原設計的 recovery 由協調者驅動 work-unit 的完整生命週期。公開版保留了 store API，但沒有接線，也沒有 canary。
+- 原設計的 recovery 由協調者驅動 work-unit 的完整生命週期。公開版保留了 store API，但沒有接線，也沒有行為考卷。
 - `execution_binding` 的 schema 名稱仍帶有前身時期的 `host-` 前綴。

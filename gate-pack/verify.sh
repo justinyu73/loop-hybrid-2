@@ -73,6 +73,7 @@ run_gate lh-fleet python3 -B lh_runtime/fleet_canary.py || exit $?
 run_gate lh-onboarding-e2e python3 -B lh_runtime/onboarding_e2e_canary.py || exit $?
 run_gate lh-failure-router python3 -B lh_runtime/failure_router_canary.py || exit $?
 run_gate lh-plan-shape python3 -B lh_runtime/plan_shape_canary.py || exit $?
+run_gate lh-planner-recovery python3 -B lh_runtime/planner_recovery_canary.py || exit $?
 run_gate lh-lifecycle-context-path-n05 python3 -B lh_runtime/lifecycle_context_path_canary.py || exit $?
 run_gate lh-provider-input-binding python3 -B lh_runtime/provider_input_binding_canary.py || exit $?
 run_gate lh-attempt-timeout python3 -B lh_runtime/attempt_timeout_canary.py || exit $?
