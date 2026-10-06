@@ -39,6 +39,13 @@ envelope（`lh-campaign-admission-envelope/v1`）必須指明：
 - **目標專案擁有：** repository、campaign 範圍、分支、推廣政策與產品終驗。
 - **引擎擁有：** durable 的 Goal 狀態，以及釘在 `base_revision` 的一次性 clone。
 
+一次性 clone 建立後，引擎會封閉它的對外 push：
+- 所有 remote 的 push URL 都設為不可用；
+- 安裝一律拒絕的 `pre-push` hook；
+- executor 執行前後比對 source repo 的 refs。若 refs 被改動（例如以 git 的 no-verify 選項繞過 hook），該次 attempt 轉為 `human_required`，原因為 `source_refs_mutated_by_executor`。
+
+注意：繞過 hook 的情況是偵測後拒絕驗收，不是事前阻止；在沒有隔離 backend 時，這是能做到的最強保證。
+
 引擎不寫入目標的工作樹，只會：
 - 保存 artifact 與 receipt；
 - 在一次性 clone 中提交；

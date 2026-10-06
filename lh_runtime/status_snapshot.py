@@ -15,6 +15,7 @@ import json
 import math
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from goal_store import GoalStore
+import open_questions
 from project_status import _wall_age_seconds, build_run_liveness, build_status
 from run_store import RunStore
 
@@ -140,6 +142,7 @@ def build_snapshot(
             heartbeat=heartbeat,
             staleness_threshold_seconds=threshold,
         ),
+        "open_questions": open_questions.build_open_questions(run_store, goal_store, now=time.time()),
     }
 
 

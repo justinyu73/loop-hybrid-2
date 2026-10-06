@@ -161,6 +161,7 @@ class LoopController:
         workspace = clone_root / target_subdir
         if not workspace.is_dir():
             raise RuntimeError("source target subtree is missing from disposable workspace")
+        self._seal_push(clone_root, budget)
         marker = {
             "schema": "loop-hybrid-disposable-workspace/v1",
             "run_id": run["run_id"],
@@ -168,9 +169,45 @@ class LoopController:
             "base_revision": run["base_revision"],
             "git_root": str(clone_root),
             "target_subdir": target_subdir.as_posix(),
+            "push_sealed": True,
         }
         (clone_root / ".git" / "lh-disposable-workspace.json").write_text(json.dumps(marker, sort_keys=True), encoding="utf-8", newline="")
         return workspace, f"workspace://{run['run_id']}/{ordinal}", clone_root
+
+    def _seal_push(self, clone_root: Path, budget: _TimeoutBudget) -> None:
+        """The clone's remotes point at the local source; nothing may push back through them.
+
+        Every existing remote gets an unusable push URL, and a pre-push hook
+        refuses any push, including one to a remote the executor adds later.
+        A push that bypasses the hook is caught by the source-refs comparison
+        around the executor call.
+        """
+        remotes = self._run(["git", "-C", str(clone_root), "remote"], cwd=None, budget=budget)
+        for name in remotes.stdout.split():
+            sealed = self._run(["git", "-C", str(clone_root), "remote", "set-url", "--push", name,
+                                "lh-push-disabled://disposable-workspace"], cwd=None, budget=budget)
+            if sealed.returncode != 0:
+                raise RuntimeError("could not seal the disposable workspace remote")
+        hook = clone_root / ".git" / "hooks" / "pre-push"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/sh\necho 'lh: pushing from a disposable workspace is refused' >&2\nexit 1\n",
+                        encoding="utf-8", newline="\n")
+        hook.chmod(0o755)
+
+    def _source_refs_digest(self, run: dict[str, Any], budget: _TimeoutBudget) -> str:
+        """Digest of every ref in the source repository the clone was made from."""
+        source_root, _target = self._source_layout(run["source_repo"], budget)
+        listed = self._run(["git", "-C", str(source_root), "for-each-ref", "--format=%(refname) %(objectname)"],
+                           cwd=None, budget=budget)
+        return _digest(f"{listed.returncode}\n{listed.stdout}")
+
+    @staticmethod
+    def _source_refs_guard(provider: dict[str, Any], before: str, after: str) -> dict[str, Any]:
+        """An executor that moved a source ref has crossed the clone; a human must look."""
+        if before == after:
+            return provider
+        return {**provider, "failure": "source_refs_mutated_by_executor",
+                "routing": {"route": "human_required", "reason": "source_refs_mutated_by_executor"}}
 
     def _write_artifact(self, run_id: str, ordinal: int, name: str, content: str, budget: _TimeoutBudget) -> dict[str, str]:
         budget.check()
@@ -743,6 +780,7 @@ class LoopController:
                             mode="local",
                         )
                     capsule["execution_fence"] = descriptor
+                source_refs_before = self._source_refs_digest(run, budget)
                 try:
                     provider = model(workspace, capsule)
                     if not isinstance(provider, dict) or not isinstance(provider.get("summary"), str):
@@ -765,6 +803,7 @@ class LoopController:
                     }
                 except Exception as exc:  # Provider failures are facts for the next controller tick.
                     provider = {"summary": "model invocation failed", "failure": f"{type(exc).__name__}: {exc}"}
+                provider = self._source_refs_guard(provider, source_refs_before, self._source_refs_digest(run, budget))
                 # Stage everything first so new/untracked files the executor created
                 # appear in the diff; a plain `git diff` omits them, which would make
                 # the value reducer see an empty diff for a real new-file change.
@@ -1034,6 +1073,7 @@ class LoopController:
                         mode="external_async",
                     )
                 capsule["execution_fence"] = descriptor
+            source_refs_before = self._source_refs_digest(run, budget)
             try:
                 provider = model(workspace, capsule)
                 if not isinstance(provider, dict) or not isinstance(provider.get("summary"), str):
@@ -1056,6 +1096,7 @@ class LoopController:
                 }
             except Exception as exc:
                 provider = {"summary": "model invocation failed", "failure": f"{type(exc).__name__}: {exc}"}
+            provider = self._source_refs_guard(provider, source_refs_before, self._source_refs_digest(run, budget))
             # Stage everything first so new/untracked files the executor created
             # appear in the diff — a plain `git diff` omits them, which would
             # hand the external adapter an empty patch for a real new-file change.
