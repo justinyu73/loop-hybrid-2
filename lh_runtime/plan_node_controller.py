@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Provider-neutral controller for one deterministic planner node.
 
-The P3B bootstrap is a single plan operation, not an LH Goal/Run/Attempt.
-This controller therefore owns only a task-owned, idempotent plan receipt.  A
+A plan node is a single plan operation, not an LH Goal/Run/Attempt.  This
+controller therefore owns only a task-owned, idempotent plan receipt.  A
 successful plan is persisted after an independent read-only verifier and a
 queue projection have both accepted it.  Replaying the same input reads that
 receipt; it never invokes a planner twice or creates execution state.
+
+A plan that declares ``lh-sealed-plan/v1`` is first checked by the engine's own
+structural check (``plan_shape.check_plan``); a defect is refused before the
+verifier is called.  A plan that declares no shape still goes to the verifier,
+and the receipt records ``shape_checked: false``.
 """
 
 from __future__ import annotations
@@ -22,12 +27,15 @@ from typing import Any
 
 try:
     from .work_unit_store import LeaseBusyError, WorkUnitStore, WorkUnitStoreError
+    from . import plan_shape
 except ImportError:  # direct canary execution keeps lh_runtime on sys.path
     from work_unit_store import LeaseBusyError, WorkUnitStore, WorkUnitStoreError  # type: ignore
+    import plan_shape  # type: ignore
 
 
-SCHEMA = "host-plan-node-controller/v1"
-STATE_SCHEMA = "host-plan-node-state/v1"
+# State files written under earlier schema names still replay: replay checks identity, not the name.
+SCHEMA = "lh-plan-node-controller/v1"
+STATE_SCHEMA = "lh-plan-node-state/v1"
 PLAN_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -136,8 +144,8 @@ class PlanNodeController:
         state_root: str | Path | WorkUnitStore,
         *,
         goal_id: str | None = None,
-        node_id: str = "P3B",
-        first_actionable_node: str = "R0",
+        node_id: str = "plan",
+        first_actionable_node: str = "first",
         worker_id: str | None = None,
         lease_seconds: float = 60.0,
     ):
@@ -145,10 +153,9 @@ class PlanNodeController:
         self.first_actionable_node = _text("first_actionable_node", first_actionable_node)
         self._legacy_store: WorkUnitStore | None = None
         if isinstance(state_root, WorkUnitStore):
-            # PR #572 exposed a WorkUnitStore-backed single-node controller.
-            # Keep that read/dispatch surface for already-merged callers; the
-            # P3B0 deterministic route below uses the newer task-owned plan
-            # receipt and does not enter this compatibility mode.
+            # Compatibility mode: a WorkUnitStore-backed single-node controller
+            # kept for existing callers.  The deterministic route below uses
+            # the task-owned plan receipt and does not enter this mode.
             if goal_id is not None:
                 raise PlanNodeControllerError("legacy_store_goal_id_invalid")
             self._legacy_store = state_root
@@ -187,7 +194,7 @@ class PlanNodeController:
             return None
         if state.get("goal_id") != self.goal_id or state.get("node_id") != self.node_id:
             raise PlanNodeControllerError("state_identity_mismatch")
-        if state.get("first_actionable_node", "R0") != self.first_actionable_node:
+        if state.get("first_actionable_node") != self.first_actionable_node:
             raise PlanNodeControllerError("state_next_node_mismatch")
         if state.get("status") != "completed":
             raise PlanNodeControllerError("state_status_invalid")
@@ -334,6 +341,11 @@ class PlanNodeController:
         planner_receipt = self._require_mapping("planner_receipt", produced_map.get("planner_receipt"))
         _digest("sealed_plan.plan_digest", sealed_plan.get("plan_digest"))
         planner_identity = _identity_token("planner_receipt.identity", planner_receipt.get("identity"))
+        shape_check = None
+        if plan_shape.declares_shape(sealed_plan):
+            shape_check = plan_shape.check_plan(copy.deepcopy(dict(sealed_plan)))
+            if shape_check["verdict"] != "GREEN":
+                raise PlanNodeControllerError("plan_shape_red:" + shape_check["reasons"][0])
 
         try:
             verifier_receipt = verifier(
@@ -387,6 +399,8 @@ class PlanNodeController:
             "planner_receipt": _copy_json("planner_receipt", planner_receipt),
             "verifier_receipt": _copy_json("verifier_receipt", verifier_map),
             "queue": _copy_json("queue", queue_map),
+            "shape_checked": shape_check is not None,
+            "shape_check": shape_check,
             "runs_created": 0,
             "attempts_created": 0,
             "provider_invocations": 0,

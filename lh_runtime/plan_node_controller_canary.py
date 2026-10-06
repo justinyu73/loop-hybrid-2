@@ -26,7 +26,7 @@ def _plan(char: str = "1") -> dict[str, Any]:
 def _project(_: dict[str, Any], __: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "projected",
-        "first_actionable": {"node_id": "R0"},
+        "first_actionable": {"node_id": "first"},
         "runs_created": 0,
         "attempts_created": 0,
         "provider_invocations": 0,
@@ -123,25 +123,25 @@ def run_cases(root: Path) -> list[dict[str, Any]]:
 
     store = WorkUnitStore(root / "legacy-store")
     store.create_parent_goal(
-        "parent-p3b0",
+        "parent-plan",
         goal_id="LH-EXAMPLE-GOAL-001",
         goal_revision=4,
         base_sha="a" * 40,
     )
     store.create_work_unit(
         "work-p3b",
-        parent_goal_id="parent-p3b0",
-        node_id="P3B",
+        parent_goal_id="parent-plan",
+        node_id="plan",
         node_kind="planning",
         producer="PlanNodeController",
         worker_id="runtime-planner",
         base_sha="a" * 40,
     )
-    legacy_controller = PlanNodeController(store, node_id="P3B")
-    legacy_first = legacy_controller.dispatch("parent-p3b0", "planner-holder", workspace_ref="task-worktree")
-    legacy_replay = PlanNodeController(store, node_id="P3B").dispatch("parent-p3b0", "planner-holder")
-    legacy_busy = legacy_controller.dispatch("parent-p3b0", "different-holder")
-    runs = store.list_runs("parent-p3b0")
+    legacy_controller = PlanNodeController(store, node_id="plan")
+    legacy_first = legacy_controller.dispatch("parent-plan", "planner-holder", workspace_ref="task-worktree")
+    legacy_replay = PlanNodeController(store, node_id="plan").dispatch("parent-plan", "planner-holder")
+    legacy_busy = legacy_controller.dispatch("parent-plan", "different-holder")
+    runs = store.list_runs("parent-plan")
     attempts = store.attempts_for_run(runs[0]["run_id"]) if runs else []
     cases.extend([
         _case("legacy-store-single-node-admitted", legacy_first["status"] == "dispatched" and legacy_first["parallel_minimum"] == 1, legacy_first),

@@ -1,6 +1,6 @@
 # Goal 階層與平行 work unit v1
 
-狀態：active。本文件描述父 Goal 下的 work unit、平行波次、依賴與 task area 的接續規則，依據為 `lh_runtime/work_unit_store.py`、`lh_runtime/parallel_scheduler.py`、`lh_runtime/plan_node_controller.py`、`lh_runtime/task_area.py` 與 `lh_runtime/work_unit_completion.py`。
+狀態：active。本文件描述父 Goal 下的 work unit、平行波次、依賴與 task area 的接續規則，依據為 `lh_runtime/work_unit_store.py`、`lh_runtime/parallel_scheduler.py`、`lh_runtime/plan_node_controller.py`、`lh_runtime/plan_shape.py`、`lh_runtime/task_area.py` 與 `lh_runtime/work_unit_completion.py`。
 
 ## 1. 名詞
 
@@ -21,6 +21,17 @@ task area manifest 必須同時通過：
 - **approval**：綁定整份 manifest 的 digest。
 
 manifest 中只有 `approved` 的 task 會被 admission；`pending` 與 `deferred` 不會派工。改動 manifest 的任何內容都會讓核准失效。
+
+### 計畫形狀的檢查
+
+plan 節點（`PlanNodeController`）收到 planner 產出的計畫後，若計畫宣告 `lh-sealed-plan/v1`，會先以 `plan_shape.check_plan` 做固定的結構檢查，再交給驗證器：
+
+- 欄位：`base_sha`、`work_units`（`node_id`、`depends_on`、`read_set`、`write_set`，可選 `worker_id`、`worktree`）、`dispatchable_nodes`、可選的 `parallel_groups`、`plan_digest`；欄位集合是封閉的；
+- 拒絕代碼：`plan_schema_invalid`、`plan_digest_mismatch`、`plan_placeholder_unresolved`、`work_unit_duplicate`、`worker_not_unique`、`worktree_not_unique`、`dependency_unknown`、`graph_cycle`、`dispatchable_node_unknown`、`parallel_group_node_unknown`、`parallel_group_path_overlap`、`parallel_group_dependent`；
+- 平行群組的路徑衝突與 scheduler 使用同一個判斷（`read_write_conflicts`），兩邊判定一致；
+- 有缺陷時以 `plan_shape_red:<代碼>` 拒絕，驗證器不會被呼叫。
+
+沒有宣告形狀的計畫照舊交給驗證器，收據記錄 `shape_checked: false`。狀態檔的 schema 為 `lh-plan-node-state/v1`；以前身時期名稱寫出的狀態檔會被拒絕（`state_schema_invalid`），不會重播。
 
 ## 3. 平行波次
 
@@ -53,4 +64,5 @@ manifest 中只有 `approved` 的 task 會被 admission；`pending` 與 `deferre
 
 - 原設計記錄了宿主上的 preflight 欄位與階層落地步驟。公開版只保留引擎內的資料模型與規則。
 - 原設計的「轉折點受限裁量」在公開版由 `lh_runtime/turning_point.py` 實作：判斷器只能從封閉選項中選擇（`select`、`parent_done`、`human_required`），越界或異常時退回決定性選路。
+- 原設計在 admission 時重驗整份封存計畫（含節點集合與可派工清單）。公開版只對宣告 `lh-sealed-plan/v1` 的計畫做結構檢查；未宣告的計畫仍只由注入的驗證器把關。
 - 原設計由宿主喚醒 task area。公開版不附宿主，`TaskAreaController.tick` 由呼叫者觸發。
