@@ -126,9 +126,21 @@ recovery 是 opt-in，必須同時滿足三個條件：
 
 只有 phase 綁定的 metadata（capability、fence、provider input）是 fixture 資料。
 
-以下尚無行為考卷：
-- native 綁定解析的完整鏈；
-- 從真實失敗子 Goal 建立請求的步驟。
+`lh_runtime/native_recovery_binding_canary.py`（gate `lh-native-recovery-binding`）以真實檔案建立第 2 節的完整封存鏈，驗證兩件事：
+- 封存正確的鏈可以被解析；
+- 以下十種單一變動，各以其特定原因被拒：
+  - contract 在封存後被改；
+  - registry 在釘住後被改；
+  - planner 指令與 registry 不符；
+  - 角色次數不是 1；
+  - identity profile 不是 `native-run-v1`；
+  - 驗證者與 coding 是同一身分；
+  - dispatch owner 不符；
+  - desired state 不是 `enabled`；
+  - campaign 不符；
+  - base 不符。
+
+以下尚無行為考卷：從真實失敗的子 Goal 建立 campaign 請求，並經 fence 呼叫角色。它需要原生 run 的完整路徑（scheduler 入口、連續失敗的原生子 Run、native store 連結），以及能依指令邊界 metadata 產生方案的替身 planner。
 
 這份契約另由 `gate-pack/docs_contracts/canary.py` 檢查：文件中提到的路徑、schema id 與名稱都必須存在於程式中。
 
