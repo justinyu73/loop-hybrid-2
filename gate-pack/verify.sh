@@ -70,6 +70,7 @@ run_gate lh-known-defects python3 -B lh_runtime/known_defects_canary.py || exit 
 run_gate lh-retention python3 -B lh_runtime/retention_canary.py || exit $?
 run_gate lh-status-trust python3 -B lh_runtime/status_trust_canary.py || exit $?
 run_gate lh-fleet python3 -B lh_runtime/fleet_canary.py || exit $?
+run_gate lh-onboarding-e2e python3 -B lh_runtime/onboarding_e2e_canary.py || exit $?
 run_gate lh-lifecycle-context-path-n05 python3 -B lh_runtime/lifecycle_context_path_canary.py || exit $?
 run_gate lh-provider-input-binding python3 -B lh_runtime/provider_input_binding_canary.py || exit $?
 run_gate lh-attempt-timeout python3 -B lh_runtime/attempt_timeout_canary.py || exit $?
