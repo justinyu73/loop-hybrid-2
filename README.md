@@ -111,13 +111,14 @@ flowchart TB
 - **planner recovery 行為考卷**（`planner_recovery_canary.py`）：方案與判定的驗證規則逐條驗證；campaign 路徑在審核通過後一律停在等待授權，不自行套用、不補 attempt 上限，角色失敗不重試，重啟不重呼叫。
 - **正式根目錄防護**（`platform_ports.py`）：任務與測試的狀態、暫存目錄，一律不得位於引擎依平台路徑規則得到的正式根目錄內；任務暫存改名為 `LH_TASK_STATE_ROOT`／`LH_TASK_TMP_ROOT`，設定舊名稱時明確拒絕並指出新名稱。
 - **考卷盤點**（`canary_inventory_canary.py`）：`lh_runtime/` 的每一支 canary 都必須由 `verify.sh` 執行，或列在附理由的豁免表中，避免考卷沒人執行而靜靜壞掉。
+- **work-unit recovery 生命週期考卷**（`work_unit_recovery_canary.py`）：在走完真實完成流程的 Run 上驗證 recovery store API：身分綁定、以 Run 計的呼叫預算、套用前重驗與各動作的落點，以及連續 3 次失敗時引擎要求先做唯讀稽核。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：101 個 gate 中 93 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：103 個 gate 中 95 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
