@@ -54,9 +54,9 @@
 |---|---|---|
 | 單一 plan 節點的冪等收據 | `plan_node_controller.py`：planner 產出封存的計畫 → 獨立的唯讀 verifier（identity 必須不同、不得寫入 source）→ queue projection（不得建立 run、attempt，也不得呼叫 provider）→ 寫入收據。相同輸入重播時讀回收據，不會再呼叫 planner；輸入 digest 漂移時拒絕 | 已具備 |
 | DAG、依賴與路徑分割 | `parallel_scheduler.py` 與 `work_unit_store.py`：環偵測、依賴整合後才放行、所選子單位必須使用 parent base、write/write 與 write/read 衝突檢查、每個 wave 最多 3 個、重啟後不會重複建立 run | 已具備 |
-| 計畫內容的形狀檢查 | plan 節點把這些檢查全部交給注入的 verifier callback；引擎本身不檢查計畫的形狀（環、唯一性、佔位符、可派工清單） | 缺少 |
+| 計畫內容的形狀檢查 | plan 節點把這些檢查全部交給注入的 verifier callback；引擎本身不檢查計畫的形狀（環、唯一性、佔位符、可派工清單） | 缺少 → **已由 X17 補上**（宣告 `lh-sealed-plan/v1` 的計畫） |
 | base 漂移 | 回報 `base_mismatch`，不派工；原設計會作廢該 wave 的收據並重新具體化 | 行為不同 |
-| 宿主時期的殘留命名 | `plan_node_controller.py` 有以下殘留：預設節點名稱 `P3B`、`R0`；拒絕位於 `LH_HOST_STATE_ROOT`（預設 `~/.local/state/external-host`）之下的 state root；一段引用私有 PR 編號的註解；schema 名稱為 `host-plan-node-controller/v1`。這些不影響行為，但不符合純 LOOP 的命名 | 行為不同（殘留） |
+| 宿主時期的殘留命名 | `plan_node_controller.py` 有以下殘留：預設節點名稱 `P3B`、`R0`；拒絕位於 `LH_HOST_STATE_ROOT`（預設 `~/.local/state/external-host`）之下的 state root；一段引用私有 PR 編號的註解；schema 名稱為 `host-plan-node-controller/v1`。這些不影響行為，但不符合純 LOOP 的命名 | 行為不同（殘留）→ **已由 X17 清理**（節點代號、註解、schema 改名；正式狀態目錄防護的命名仍在） |
 
 **建議：**
 - **成為新任務包（計畫形狀的引擎內驗證）。** 把無環、唯一性、路徑分割、佔位符、可派工節點這幾項做成引擎內的純函式，plan 節點在呼叫 verifier 之前先跑；verifier 仍是獨立的第二層。
@@ -85,9 +85,9 @@
 
 | 建議 | 內容 | 規模 | 優先 |
 |---|---|---|---|
-| 固定選路表 | 純函式的代碼表、擁有者白名單、門檻與可重算收據，先以投影形式提供 | 中 | 高 |
-| 計畫形狀的引擎內驗證 | plan 節點在呼叫 verifier 前先做形狀檢查；同時清理殘留命名 | 中 | 中 |
-| planner recovery 契約文件 | 依現行程式寫契約，並納入 `docs-contracts` | 小 | 中 |
+| 固定選路表 | 純函式的代碼表、擁有者白名單、門檻與可重算收據，先以投影形式提供（**已由 X16 完成**） | 中 | 高 |
+| 計畫形狀的引擎內驗證 | plan 節點在呼叫 verifier 前先做形狀檢查；同時清理殘留命名（**已由 X17 完成**） | 中 | 中 |
+| planner recovery 契約文件 | 依現行程式寫契約，並納入 `docs-contracts`（**已由 X18 完成**） | 小 | 中 |
 
 不建議納入公開版的項目：
 - base 漂移後由協調者重新具體化 wave；
