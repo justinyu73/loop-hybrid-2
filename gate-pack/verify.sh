@@ -75,6 +75,11 @@ run_gate lh-failure-router python3 -B lh_runtime/failure_router_canary.py || exi
 run_gate lh-plan-shape python3 -B lh_runtime/plan_shape_canary.py || exit $?
 run_gate lh-planner-recovery python3 -B lh_runtime/planner_recovery_canary.py || exit $?
 run_gate lh-state-root-guard python3 -B lh_runtime/state_root_guard_canary.py || exit $?
+run_gate lh-assignment-packet python3 -B lh_runtime/assignment_packet_canary.py || exit $?
+run_gate lh-bounded-edit python3 -B lh_runtime/bounded_edit_canary.py || exit $?
+run_gate lh-plan-node-controller python3 -B lh_runtime/plan_node_controller_canary.py || exit $?
+run_gate lh-verifier-protocol python3 -B lh_runtime/verifier_protocol_canary.py || exit $?
+run_gate lh-canary-inventory python3 -B lh_runtime/canary_inventory_canary.py || exit $?
 run_gate lh-lifecycle-context-path-n05 python3 -B lh_runtime/lifecycle_context_path_canary.py || exit $?
 run_gate lh-provider-input-binding python3 -B lh_runtime/provider_input_binding_canary.py || exit $?
 run_gate lh-attempt-timeout python3 -B lh_runtime/attempt_timeout_canary.py || exit $?

@@ -13,8 +13,9 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import delivery_contract as engine  # noqa: E402
 from parallel_scheduler import ParallelScheduler  # noqa: E402
-from work_unit_store import DAGCycleError, WorkUnitStore  # noqa: E402
+from work_unit_store import DAGCycleError, WorkUnitStore, digest_json  # noqa: E402
 
 
 BASE = "a" * 40
@@ -47,6 +48,48 @@ def unit(
     }
 
 
+def delivery(store: WorkUnitStore, parent_goal_id: str) -> dict[str, Any]:
+    """A sealed delivery contract and bound packet for every unit, as the scheduler now requires."""
+    parent = store.get_parent_goal(parent_goal_id)
+    contracts, packets = {}, {}
+    for definition in store.list_work_units(parent_goal_id):
+        work_unit_id = definition["work_unit_id"]
+        command = {"id": "unit-check", "argv": [sys.executable, "-B", "-c", "pass"], "cwd": "${WORKTREE}",
+                   "expect_exit": 0, "timeout_seconds": 30}
+        contract = engine.seal_contract({
+            "schema": engine.SCHEMA, "contract_version": 1, "contract_id": f"{work_unit_id}-contract",
+            "unit_id": f"{work_unit_id}-unit", "goal": {"id": parent["goal_id"], "revision": parent["goal_revision"]},
+            "node": {"id": definition["node_id"], "kind": "coding"},
+            "planner": {"principal": "scheduler-planner", "source": "scheduler-fixture"},
+            "independent_verifier": {"principal": "scheduler-verifier", "read_only": True, "source_write": False},
+            "outcome": {"observable": "the unit is integrated", "start_state": "ready", "success_state": "integrated",
+                        "terminal_states": ["integrated", "human_required", "exhausted"]},
+            "scope": {"ownership": "task-owned", "allowed_paths": ["src/", "docs/"], "forbidden_paths": ["secrets"],
+                      "identity": ["goal_id", "goal_revision", "node_id", "unit_id"]},
+            "obligations": [{"id": "unit-obligation", "commands": [command], "required_receipts": ["checks"]}],
+            "required_receipts": ["plan_verdict", "packet_admission", "dispatch", "executor", "candidate", "checks",
+                                  "verifier", "integration", "integration_checks", "integration_verifier",
+                                  "machine_complete", "completion", "delivery_verifier"],
+            "source_required_receipts": ["plan_verdict", "candidate", "checks", "verifier"],
+            "source_obligation_ids": ["unit-obligation"],
+            "source_vs_live": {"source_must_not_claim_live": True, "live_required_for_source_delivery": False},
+            "repair_same_unit": {"enabled": True, "route": "same_unit_new_attempt", "max_attempts": 3},
+            "authority_store": "work_unit", "managed_scope": f"{work_unit_id}-scope",
+        })
+        completion = {"checks": [command], "integration_checks": [command],
+                      "full_validation_plan": {"commands": [command]}, "max_attempts": 3}
+        packet = engine.bind_packet({
+            "schema": "scheduler-fixture-packet/v1", "packet_id": f"{work_unit_id}-packet",
+            "goal_id": parent["goal_id"], "goal_revision": parent["goal_revision"], "node_id": definition["node_id"],
+            "task": f"deliver {work_unit_id}", "write_set": list(definition["write_set"]),
+            "forbidden_paths": ["secrets"], "completion_contract": completion,
+            "completion_contract_digest": digest_json(completion), "targeted_commands": [command],
+            "full_validation_ref": "#/full_validation_plan"}, engine.plan_delivery_unit(contract), contract)
+        packet["packet_digest"] = digest_json(packet)
+        contracts[work_unit_id], packets[work_unit_id] = contract, packet
+    return {"delivery_contract": contracts, "delivery_packet": packets}
+
+
 def cycle_case(root: Path) -> dict[str, Any]:
     store = WorkUnitStore(root / "cycle")
     store.create_parent_goal("parent-cycle", base_sha=BASE, goal_revision=2)
@@ -71,7 +114,7 @@ def overlap_case(root: Path) -> dict[str, Any]:
         unit(root, "overlap-a", write_path="src/shared.py"),
         unit(root, "overlap-b", read_path="src/shared.py", write_path="src/other.py"),
     ])
-    result = ParallelScheduler(store).dispatch("parent-overlap", holder="overlap")
+    result = ParallelScheduler(store, **delivery(store, "parent-overlap")).dispatch("parent-overlap", holder="overlap")
     ok = result["status"] == "rejected" and result["reason"] == "read_write_overlap" and store.run_count("parent-overlap") == 0
     return case("read-write-overlap-rejected-before-run", ok, {"result": result, "run_count": store.run_count("parent-overlap")})
 
@@ -84,7 +127,7 @@ def parallel_case(root: Path) -> dict[str, Any]:
         unit(root, "parallel-b"),
         unit(root, "parallel-c"),
     ])
-    scheduler = ParallelScheduler(store)
+    scheduler = ParallelScheduler(store, **delivery(store, "parent-parallel"))
     first = scheduler.dispatch("parent-parallel", holder="parallel")
     run_ids = [row["run_id"] for row in first["dispatched"]]
     states = [store.get_work_unit(row["work_unit_id"])["state"] for row in first["dispatched"]]
@@ -113,7 +156,7 @@ def dependency_and_fence_case(root: Path) -> dict[str, Any]:
         unit(root, "dep-c"),
         unit(root, "dep-d"),
     ])
-    scheduler = ParallelScheduler(store)
+    scheduler = ParallelScheduler(store, **delivery(store, "parent-dependency"))
     first = scheduler.dispatch("parent-dependency", holder="dependency")
     first_ids = {row["work_unit_id"] for row in first["dispatched"]}
     dep_a = next(row for row in first["dispatched"] if row["work_unit_id"] == "dep-a")
@@ -137,10 +180,12 @@ def restart_case(root: Path) -> dict[str, Any]:
     store = WorkUnitStore(root / "restart")
     store.create_parent_goal("parent-restart", base_sha=BASE, goal_revision=2)
     store.register_work_units("parent-restart", [unit(root, "restart-a"), unit(root, "restart-b")])
-    first = ParallelScheduler(store, lease_seconds=0).dispatch("parent-restart", holder="restart")
+    first = ParallelScheduler(store, lease_seconds=0, **delivery(store, "parent-restart")).dispatch(
+        "parent-restart", holder="restart")
     first_ids = sorted(row["run_id"] for row in first["dispatched"])
     restarted_store = WorkUnitStore(store.root)
-    restarted = ParallelScheduler(restarted_store, lease_seconds=0).dispatch("parent-restart", holder="restart")
+    restarted = ParallelScheduler(restarted_store, lease_seconds=0,
+                                  **delivery(restarted_store, "parent-restart")).dispatch("parent-restart", holder="restart")
     second_ids = sorted(row["run_id"] for row in restarted["dispatched"])
     attempt_counts = [len(restarted_store.attempts_for_run(run_id)) for run_id in second_ids]
     ok = (
