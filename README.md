@@ -99,13 +99,14 @@ flowchart TB
 - **決策登記**（`gate-pack/decision_registry/`，給目標 repo 用的工具）：決策在工作開始前登記，必須附驗收探針與允許改動的路徑；用 git 逐 commit 找出碰到受保護路徑卻沒引用已登記決策的改動；結果每次重跑探針推導，不儲存「已完成」。
 - **進度收據與驗證佇列**（`gate-pack/progress_receipts/`，給目標 repo 用的工具）：請求方只能指名檢查 id，由驗證方在釘住 HEAD 的快照中執行並寫入雜湊鏈收據；沒有收據的進度不算進度。驗證、驗收、推廣分開記錄且有先後；兩個角色是否真的是不同身分，由工具量測並如實回報。
 - **推進判定**（`gate-pack/advancement/`，給目標 repo 用的工具）：評估前就固定每個判準的 baseline 與 closing 收據，只有「原本紅、後來綠」才算推進；已經綠的檢查、worker 自選的檢查都不算。
+- **獨立的重試驗證器**（`gate-pack/retry_verifier/`）：另一份不 import 引擎模組的實作，以唯讀方式讀 work-unit store 與 executor 的 digest 綁定收據，核對重試鏈與啟動上限是否一致。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：84 個 gate 中 76 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：85 個 gate 中 77 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
