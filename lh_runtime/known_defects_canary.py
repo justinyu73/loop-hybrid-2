@@ -65,7 +65,7 @@ def d1_deletion(root: Path) -> dict[str, Any]:
                                               "cwd": "${WORKTREE}", "expect_exit": 0, "timeout_seconds": 30}],
                "required_receipts": ["executor"]}]
     verifier = [sys.executable, "-B", "-c", CHECK]
-    bundle = make_native_run(runs, source, base, "d1", "deletion", checks, verifier, ["src/"], 1, run_id="d1")
+    make_native_run(runs, source, base, "d1", "deletion", checks, verifier, ["src/"], 1, run_id="d1")
 
     def model(workspace: Path, _capsule: dict[str, Any]) -> dict[str, Any]:
         (workspace / "src" / "old.txt").unlink()
