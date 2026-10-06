@@ -25,6 +25,7 @@
 | `staleness_threshold_seconds` | 門檻：attempt 牆鐘上限加上 tick 額外開銷，嚴格大於兩者之和 |
 | `attempt_wall_clock_upper_bound_seconds`、`tick_overhead_seconds` | 門檻的組成 |
 | `run_liveness` | 各個 running run 是否仍在門檻之內 |
+| `open_questions` | 需要人處理的待辦（`lh-open-questions/v1`，見第 6 節） |
 
 ## 3. 狀態物件
 
@@ -55,6 +56,14 @@
 ## 5. Heartbeat
 
 driver 在每個 tick 寫出 heartbeat，內含 holder、phase、cycles 與單調時鐘時間戳。`stale` 只是投影：它不會改變恢復語意，也不會自行結束任何 run。
+
+## 6. 待人處理的事項
+
+`lh_runtime/open_questions.py` 把每個 `human_required` 的 Goal 與事件，投影成一筆有型別的待辦：
+- 欄位：來源、對象、原因、開始等待時間、已等待秒數，以及超過門檻時的 `quiet` 標記；
+- 類型由封閉的原因代碼前綴表決定：`awaiting_owner`、`blocked_by_evidence`、`scope_escalation`；
+- 表外的代碼一律歸為 `awaiting_owner`，並保留原始原因；
+- 這只是投影，不做決定，也不寫入任何 store。
 
 ## 與現行程式的差異
 

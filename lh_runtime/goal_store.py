@@ -933,6 +933,13 @@ class GoalStore:
             rows = conn.execute("SELECT * FROM goals WHERE state = ? ORDER BY goal_id", (state,)).fetchall()
             return [self._goal_row(conn, row) for row in rows]
 
+    def events_in_state(self, state: str) -> list[dict[str, Any]]:
+        state = _required_text("state", state)
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM goal_events WHERE state = ? ORDER BY created_at, event_key",
+                                (state,)).fetchall()
+        return [self._event_row(row) for row in rows]
+
     def pending_events(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM goal_events WHERE state IN ('event_received', 'candidate') ORDER BY created_at, event_key").fetchall()
