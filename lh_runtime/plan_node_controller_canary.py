@@ -155,7 +155,7 @@ def run_cases(root: Path) -> list[dict[str, Any]]:
 
 
 def main() -> int:
-    configured = os.environ.get("LH_HOST_TMP_ROOT")
+    configured = os.environ.get("LH_TASK_TMP_ROOT")
     if configured:
         base = Path(configured).resolve()
         base.mkdir(parents=True, exist_ok=True)

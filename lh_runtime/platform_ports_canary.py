@@ -42,7 +42,7 @@ def case(case_id: str, ok: bool, detail: str) -> dict[str, object]:
 
 
 def _temporary_directory(prefix: str) -> tempfile.TemporaryDirectory[str]:
-    configured = os.environ.get("LH_HOST_TMP_ROOT", "").strip()
+    configured = os.environ.get("LH_TASK_TMP_ROOT", "").strip()
     if not configured:
         return tempfile.TemporaryDirectory(prefix=prefix)
     parent = Path(configured).expanduser() / "platform-ports-canary"

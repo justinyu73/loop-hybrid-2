@@ -354,7 +354,7 @@ class TrustedProjectExecutionFence(ExecutionFencePort):
         if role is not None:
             result.update(provider["environment"])
         else:
-            for key in ("LH_HOST_TMP_ROOT", "LH_HOST_STATE_ROOT", "LH_STATE_ROOT", "GIT_OPTIONAL_LOCKS"):
+            for key in ("LH_TASK_TMP_ROOT", "LH_TASK_STATE_ROOT", "LH_STATE_ROOT", "GIT_OPTIONAL_LOCKS"):
                 if key in supplied:
                     result[key] = supplied[key]
         return result

@@ -421,7 +421,7 @@ def validate_contract(raw: Any, *, require_planning: bool = False) -> dict[str, 
 def validate_planning_contract(raw: Any) -> dict[str, Any]:
     """Require an explicit planning capability and planner role.
 
-    This named entrypoint keeps the merged P3B packet API available while
+    This named entrypoint keeps the merged plan-node packet API available while
     ``validate_contract`` remains the provider-neutral base contract.
     """
 

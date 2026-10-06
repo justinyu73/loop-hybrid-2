@@ -28,9 +28,11 @@ from typing import Any
 try:
     from .work_unit_store import LeaseBusyError, WorkUnitStore, WorkUnitStoreError
     from . import plan_shape
+    from . import platform_ports
 except ImportError:  # direct canary execution keeps lh_runtime on sys.path
     from work_unit_store import LeaseBusyError, WorkUnitStore, WorkUnitStoreError  # type: ignore
     import plan_shape  # type: ignore
+    import platform_ports  # type: ignore
 
 
 # State files written under earlier schema names still replay: replay checks identity, not the name.
@@ -178,13 +180,11 @@ class PlanNodeController:
         self.state_root = Path(state_root).expanduser().resolve()
         if not self.state_root.name:
             raise PlanNodeControllerError("state_root_invalid")
-        configured_production_root = os.environ.get("LH_HOST_STATE_ROOT")
-        production_root = (
-            Path(configured_production_root).expanduser().resolve()
-            if configured_production_root
-            else (Path.home() / ".local" / "state" / "external-host").resolve()
-        )
-        if self.state_root == production_root or self.state_root.is_relative_to(production_root):
+        try:
+            in_production = platform_ports.inside_production(self.state_root)
+        except platform_ports.RenamedEnvironmentError as exc:
+            raise PlanNodeControllerError(str(exc)) from exc
+        if in_production:
             raise PlanNodeControllerError("production_state_root_forbidden")
         self.state_path = self.state_root / "plan-node-state.json"
 
