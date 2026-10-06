@@ -42,6 +42,16 @@ python3 -B lh_runtime/mcp_server.py --run-store ... --knowledge-store ...
 
 `--apply` 刪除前會重新檢查連結與位置；沒刪成的項目寫入 `errors`，此時結束碼為 1。`artifacts/`、`loop.sqlite3` 等證據本身不在清理範圍內。
 
+### 正式根目錄防護
+
+測試與任務專屬的暫存，絕不能寫進操作者的真實狀態。引擎依自己的平台路徑規則（`lh_runtime/platform_ports.py` 的 `PlatformPaths`）決定正式根目錄：各平台的預設位置，或由 `LH_INSTANCE_ROOT`、`LH_STATE_ROOT`、`LH_RUN_ROOT`、`LH_WORKSPACE_ROOT`、`LH_CACHE_ROOT`、`LH_LOG_ROOT` 指定的位置。
+
+- plan 節點、post-merge resume 的 controller 與 poller，以及完成檢查的暫存目錄，都拒絕位於任何正式根目錄之內的目錄（`production_state_root_forbidden`、`completion_check_tmp_root_production`）；
+- 任務專屬的暫存以 `LH_TASK_TMP_ROOT` 指定；完成檢查傳給指令的環境帶 `LH_TASK_STATE_ROOT` 與 `LH_TASK_TMP_ROOT`；
+- 前身時期的名稱 `LH_HOST_STATE_ROOT`、`LH_HOST_TMP_ROOT` 不再讀取。只要環境中設定了它們，就明確拒絕（`renamed_environment:<舊名>-><新名>`），不會默默忽略，以免原本設定的保護無聲失效。
+
+驗收燈：`lh_runtime/state_root_guard_canary.py`。
+
 ## 5. 警報與交付
 
 引擎不附任何通知管道。需要警報時，讀取端以快照的 `lamp`（`lh_runtime/status_lamp.py` 的唯一健康判定，附觸發的規則）決定是否送出，不要從其他欄位自行推導。
@@ -52,9 +62,11 @@ python3 -B lh_runtime/mcp_server.py --run-store ... --knowledge-store ...
 - `lh_runtime/status_snapshot_canary.py`：快照欄位與 stale 判定；
 - `lh_runtime/mcp_canary.py`：唯讀介面；
 - `lh_runtime/retention_canary.py`：保存與工作區衛生；
-- `lh_runtime/status_trust_canary.py`：code identity 與健康燈。
+- `lh_runtime/status_trust_canary.py`：code identity 與健康燈；
+- `lh_runtime/state_root_guard_canary.py`：正式根目錄防護。
 
 ## 與現行程式的差異
 
 - 原設計包含 durable 資料的保留政策，以及推送到通訊軟體的警報。公開版只實作了引擎暫存的清理（第 4 節，需手動執行，不會自動排程）；receipt、artifact 與 store 本身的保留期限沒有實作，警報由讀取端負責。
 - 原設計有人工抽查實戰紀錄的流程。公開版不含任何實戰紀錄。
+- 原設計的正式狀態目錄是宿主自己的固定路徑。公開版改以引擎的平台路徑規則判定，舊的環境變數名稱一律拒絕。

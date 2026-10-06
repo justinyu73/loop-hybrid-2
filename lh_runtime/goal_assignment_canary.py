@@ -14,7 +14,7 @@ import goal_assignment
 from goal_store import GoalStore
 
 
-PROJECT = "external-host"
+PROJECT = "example-target"
 
 
 def assignment(*, check_digest: str = "sha256:" + "b" * 64) -> dict:

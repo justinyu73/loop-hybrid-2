@@ -24,9 +24,11 @@ from typing import Any
 
 
 try:
-    from .platform_ports import locked_file, make_file_private, sync_directory
+    from .platform_ports import (RenamedEnvironmentError, inside_production, locked_file, make_file_private,
+                                 sync_directory)
 except ImportError:
-    from platform_ports import locked_file, make_file_private, sync_directory
+    from platform_ports import (RenamedEnvironmentError, inside_production, locked_file, make_file_private,  # type: ignore
+                                sync_directory)
 
 
 SCHEMA = "host-post-merge-resume/v1"
@@ -469,13 +471,13 @@ def _read_polled_merge(
     return normalized
 
 
-def _production_state_root() -> Path:
-    configured = os.environ.get("LH_HOST_STATE_ROOT")
-    return (
-        Path(configured).expanduser().resolve()
-        if configured
-        else (Path.home() / ".local" / "state" / "external-host").resolve()
-    )
+def _refuse_production_state_root(state_root: Path) -> None:
+    try:
+        in_production = inside_production(state_root)
+    except RenamedEnvironmentError as exc:
+        raise PostMergeResumeError(str(exc)) from exc
+    if in_production:
+        raise PostMergeResumeError("production_state_root_forbidden")
 
 
 def _reject_reason(exc: BaseException) -> str:
@@ -503,11 +505,8 @@ class PostMergeResumeController:
         allow_production_state_root: bool = False,
     ):
         self.state_root = Path(state_root).expanduser().resolve()
-        if (
-            not allow_production_state_root
-            and (self.state_root == _production_state_root() or self.state_root.is_relative_to(_production_state_root()))
-        ):
-            raise PostMergeResumeError("production_state_root_forbidden")
+        if not allow_production_state_root:
+            _refuse_production_state_root(self.state_root)
         self.state_path = self.state_root / "post-merge-resume-state.json"
         self.lock_path = self.state_root / "post-merge-resume-state.lock"
         self.binding = _normalise_binding(expected_binding)
@@ -1041,12 +1040,8 @@ class BoundedPostMergeResumePoller:
         allow_production_state_root: bool = False,
     ):
         self.state_root = Path(state_root).expanduser().resolve()
-        production_root = _production_state_root()
-        if (
-            not allow_production_state_root
-            and (self.state_root == production_root or self.state_root.is_relative_to(production_root))
-        ):
-            raise PostMergeResumeError("production_state_root_forbidden")
+        if not allow_production_state_root:
+            _refuse_production_state_root(self.state_root)
         self.allow_production_state_root = allow_production_state_root
         self.binding = _normalise_poll_binding(expected_binding)
         self.idempotency_key = _text("idempotency_key", idempotency_key)
@@ -1524,12 +1519,8 @@ class PendingPostMergeWatchStore:
 
     def __init__(self, state_root: str | Path, *, allow_production_state_root: bool = False):
         self.state_root = Path(state_root).expanduser().resolve()
-        production_root = _production_state_root()
-        if (
-            not allow_production_state_root
-            and (self.state_root == production_root or self.state_root.is_relative_to(production_root))
-        ):
-            raise PostMergeResumeError("production_state_root_forbidden")
+        if not allow_production_state_root:
+            _refuse_production_state_root(self.state_root)
         self.allow_production_state_root = allow_production_state_root
         self.watch_path = self.state_root / "post-merge-resume-pending-watch.json"
         self.lock_path = self.state_root / "post-merge-resume-pending-watch.lock"

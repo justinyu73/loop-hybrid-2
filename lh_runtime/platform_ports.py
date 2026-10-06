@@ -522,6 +522,40 @@ class PlatformPaths:
         )
 
 
+# Task-owned scratch variables were renamed; an old name is refused, never ignored,
+# so a protection somebody configured cannot fail silently.
+RENAMED_ENVIRONMENT = {
+    "LH_HOST_STATE_ROOT": "LH_TASK_STATE_ROOT",
+    "LH_HOST_TMP_ROOT": "LH_TASK_TMP_ROOT",
+}
+
+
+class RenamedEnvironmentError(ValueError):
+    """An environment variable was set under a name the engine no longer reads."""
+
+
+def refuse_renamed_environment(env: Mapping[str, str] | None = None) -> None:
+    values = os.environ if env is None else env
+    for old, new in RENAMED_ENVIRONMENT.items():
+        if old in values:
+            raise RenamedEnvironmentError(f"renamed_environment:{old}->{new}")
+
+
+def production_roots(env: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+    """Every root the engine itself would use for live state, from the platform path rules."""
+    refuse_renamed_environment(env)
+    paths = PlatformPaths.from_environment(env)
+    roots = (paths.instance_root, paths.state_root, paths.run_root, paths.workspace_root,
+             paths.cache_root, paths.logs_root)
+    return tuple(dict.fromkeys(Path(root).expanduser().resolve() for root in roots))
+
+
+def inside_production(path: str | Path, env: Mapping[str, str] | None = None) -> bool:
+    """True when ``path`` is a production root or lies inside one."""
+    candidate = Path(path).expanduser().resolve()
+    return any(candidate == root or candidate.is_relative_to(root) for root in production_roots(env))
+
+
 @dataclass(frozen=True)
 class FileLockHandle:
     fd: int

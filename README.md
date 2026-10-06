@@ -109,13 +109,14 @@ flowchart TB
 - **固定選路表**（`failure_router.py`）：失敗後「下一步由誰做什麼」由一張封閉的代碼表決定，不呼叫模型，收據可重算。只有十項擁有者動作需要人；未知代碼路由到選路表本身，同一處失敗達 3 次改走唯讀稽核。目前是投影：待人處理事項會標出「其實機器可處理」的項目，不改變執行流程。
 - **計畫形狀檢查**（`plan_shape.py`）：宣告 `lh-sealed-plan/v1` 的計畫，在交給驗證器之前先由引擎以固定清單檢查（循環、重複、佔位符、未知依賴與可派工節點、平行群組的路徑衝突與互相依賴），有缺陷就附代碼拒絕，驗證器不會被呼叫。
 - **planner recovery 行為考卷**（`planner_recovery_canary.py`）：方案與判定的驗證規則逐條驗證；campaign 路徑在審核通過後一律停在等待授權，不自行套用、不補 attempt 上限，角色失敗不重試，重啟不重呼叫。
+- **正式根目錄防護**（`platform_ports.py`）：任務與測試的狀態、暫存目錄，一律不得位於引擎依平台路徑規則得到的正式根目錄內；任務暫存改名為 `LH_TASK_STATE_ROOT`／`LH_TASK_TMP_ROOT`，設定舊名稱時明確拒絕並指出新名稱。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：95 個 gate 中 87 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：96 個 gate 中 88 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor

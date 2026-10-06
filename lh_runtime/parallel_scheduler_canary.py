@@ -156,7 +156,7 @@ def restart_case(root: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-    injected = os.environ.get("LH_HOST_TMP_ROOT")
+    injected = os.environ.get("LH_TASK_TMP_ROOT")
     if injected:
         task_root = Path(injected).resolve()
         task_root.mkdir(parents=True, exist_ok=True)

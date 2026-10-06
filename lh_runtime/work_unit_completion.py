@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterator, Mapping
 import sys
 
 from .work_unit_store import WorkUnitStore, digest_json
+from .platform_ports import inside_production, refuse_renamed_environment
 from .runner_adapter import PhaseJobPending
 
 CANDIDATE_RECOVERY_ADMISSION_SCHEMA = "lh-candidate-recovery-admission/v1"
@@ -79,10 +80,10 @@ def task_owned_check_environment(
 ) -> Iterator[tuple[dict[str, str], dict[str, str]]]:
     """Give one check batch disposable state roots outside the scheduler store."""
     store = Path(store_root).expanduser().resolve()
-    configured = base.get("LH_HOST_TMP_ROOT")
+    refuse_renamed_environment(base)
+    configured = base.get("LH_TASK_TMP_ROOT")
     parent = Path(configured).expanduser().resolve() if configured else Path(tempfile.gettempdir()).resolve()
-    production = Path.home().expanduser().resolve() / ".local" / "state" / "external-host"
-    if parent == production or production in parent.parents:
+    if inside_production(parent, base):
         raise ValueError("completion_check_tmp_root_production")
     if parent == store or store in parent.parents:
         raise ValueError("completion_check_tmp_root_store_overlap")
@@ -100,8 +101,8 @@ def task_owned_check_environment(
         }
         env = {
             **base,
-            "LH_HOST_STATE_ROOT": str(state_root),
-            "LH_HOST_TMP_ROOT": str(tmp_root),
+            "LH_TASK_STATE_ROOT": str(state_root),
+            "LH_TASK_TMP_ROOT": str(tmp_root),
             "PYTHONDONTWRITEBYTECODE": "1",
             "LH_ROOT": str(Path(worktree) / "loop-hybrid"),
         }

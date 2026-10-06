@@ -168,7 +168,7 @@ class TaskAreaController:
         actual = {"repo": {"common_dir": common, "worktree": root},
                   "git_common_dir": {"path": common}, "index": {"path": self._resource_git_path(root, "index")},
                   "store": {"path": str(self.store.root.resolve())},
-                  "scratch": {"path": str(Path(os.environ.get("LH_HOST_TMP_ROOT", tempfile.gettempdir())).resolve())}}
+                  "scratch": {"path": str(Path(os.environ.get("LH_TASK_TMP_ROOT", tempfile.gettempdir())).resolve())}}
         material, seen = [], set()
         for resource in declaration["resources"]:
             kind = resource["kind"]
