@@ -701,8 +701,11 @@ class RunStore:
                         "invocation": invocation,
                         "snapshot": snapshot,
                     }
+                # List what the snapshot tracks, not the source index: a deletion the
+                # candidate already staged is no longer in the source index, but the
+                # clone of HEAD still holds the file and must drop it.
                 tracked = subprocess.run(
-                    ["git", "-C", str(source), "ls-files", "-z", "--cached"],
+                    ["git", "-C", str(snapshot_worktree), "ls-files", "-z", "--cached"],
                     capture_output=True,
                     check=False,
                 )
@@ -713,7 +716,7 @@ class RunStore:
                         "invocation": invocation,
                         "snapshot": snapshot,
                     }
-                for raw in tracked.stdout.split(b"\\0"):
+                for raw in tracked.stdout.split(b"\0"):
                     if not raw:
                         continue
                     relative = Path(os.fsdecode(raw))
