@@ -102,7 +102,7 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：79 個 gate 中 71 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：80 個 gate 中 72 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
@@ -237,6 +237,7 @@ python3 -B lh_runtime/goal_loop_run.py --contract project_runtime_contract.json 
   你的 adapter 必須對同一個 key 讀回既有效果，才能保證重試不重複作用。
 - **verdict store 與 conclusion source**（`external_verdict.py`）：外部結論只接受明確的 `success` / `failure`，
   來源或憑證錯誤不會變成重試判定。
+- **effect guard**（`effect_guard.py`）：run 完成後的作用（merge、發布、部署）經 `guarded_dispatch` 送出時，引擎會先確認目前 attempt 的最終交付為 GREEN、diff 沒碰到 authority surface、外部目標讀回仍是審過的那一份（等待之後再讀一次）；帶候選覆核 v2 的 contract 還需要綁定 contract digest 的 `lh-effect-grant/v1`。送出前先記錄 prepared，回應遺失時只讀回確認，絕不重送。你的 target 只需實作 `readback` 與以 `op_key` 去重的 `perform`。
 
 contract 裡帶 `external_verdict` 區塊會被明確拒絕，不會靜默忽略。是否允許外部作用，由注入方的授權決定；
 公開發布、release 與產品終驗仍由人／專案持有。
