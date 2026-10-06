@@ -114,7 +114,7 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 71 of 79 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 72 of 80 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
@@ -233,7 +233,15 @@ End-to-end, offline-verifiable up to step C:
    engine API: an external action port (`external_action_port.py`, deduplicated
    by `operation_key`; your adapter must read back an existing effect for the
    same key) and a verdict store with a conclusion source
-   (`external_verdict.py`; only explicit `success` / `failure` count). A contract
+   (`external_verdict.py`; only explicit `success` / `failure` count). A
+   post-run effect (merge, publish, deploy) sent through `effect_guard.guarded_dispatch`
+   first re-verifies that the current attempt's final delivery is GREEN, that
+   its diff leaves the authority surface alone, and that the target still reads
+   back as the reviewed one (again after any wait); a contract with candidate
+   review v2 also needs an `lh-effect-grant/v1` bound to its contract digest. A
+   prepared marker is recorded before sending, so a lost response is settled by
+   readback only, never by sending again. Your target implements `readback`
+   and an `op_key`-idempotent `perform`. A contract
    carrying an `external_verdict` block is refused, not silently ignored.
    Whether an external effect is allowed is the injecting project's call;
    publication, release, and terminal product acceptance stay project/human-owned.
