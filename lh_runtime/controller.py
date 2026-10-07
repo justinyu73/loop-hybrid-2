@@ -26,6 +26,7 @@ from platform_ports import (
 )
 from run_store import RunStore
 from status_snapshot import DEFAULT_EXECUTOR_TIMEOUT_SECONDS
+from workspace_port import GitCloneWorkspace, WorkspacePort, WorkspaceRequest
 
 ModelRunner = Callable[[Path, dict[str, Any]], dict[str, Any]]
 
@@ -85,6 +86,7 @@ class LoopController:
         execution_fence_port: execution_fences.ExecutionFencePort | None = None,
         process_port: ProcessPort | None = None,
         deadline_port: DeadlinePort | None = None,
+        workspace_port: WorkspacePort | None = None,
     ):
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -103,6 +105,7 @@ class LoopController:
         )
         self.process_port = process_port or LocalProcessPort()
         self.deadline_port = deadline_port or MonotonicDeadlinePort()
+        self.workspace_port = workspace_port or GitCloneWorkspace()
 
     def _bind_dispatch(self, receipt: dict[str, Any]) -> dict[str, Any]:
         if self.dispatch is not None:
@@ -149,50 +152,18 @@ class LoopController:
         ordinal: int,
         budget: _TimeoutBudget,
     ) -> tuple[Path, str, Path]:
-        clone_root = self.workspace_root / run["run_id"] / str(ordinal)
-        clone_root.parent.mkdir(parents=True, exist_ok=True)
         source_root, target_subdir = self._source_layout(run["source_repo"], budget)
-        completed = self._run(["git", "clone", "--quiet", "--no-local", str(source_root), str(clone_root)], cwd=None, budget=budget)
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or "could not create disposable workspace")
-        checkout = self._run(["git", "-C", str(clone_root), "checkout", "--quiet", "--detach", run["base_revision"]], cwd=None, budget=budget)
-        if checkout.returncode != 0:
-            raise RuntimeError(checkout.stderr.strip() or "could not checkout base revision")
-        workspace = clone_root / target_subdir
-        if not workspace.is_dir():
+        prepared = self.workspace_port.prepare(WorkspaceRequest(
+            run_id=run["run_id"], attempt=ordinal, base_revision=run["base_revision"], source_root=source_root,
+            target_subdir=target_subdir, workspace_root=self.workspace_root,
+            run=lambda argv: self._run(argv, cwd=None, budget=budget)))
+        git_root = Path(prepared.git_root).resolve()
+        # Whatever the backend, the workspace and everything removed after the Attempt stay inside the root.
+        if not git_root.is_relative_to(self.workspace_root.resolve()) or git_root == self.workspace_root.resolve():
+            raise RuntimeError("workspace_outside_root")
+        if not Path(prepared.workspace).is_dir():
             raise RuntimeError("source target subtree is missing from disposable workspace")
-        self._seal_push(clone_root, budget)
-        marker = {
-            "schema": "loop-hybrid-disposable-workspace/v1",
-            "run_id": run["run_id"],
-            "attempt": ordinal,
-            "base_revision": run["base_revision"],
-            "git_root": str(clone_root),
-            "target_subdir": target_subdir.as_posix(),
-            "push_sealed": True,
-        }
-        (clone_root / ".git" / "lh-disposable-workspace.json").write_text(json.dumps(marker, sort_keys=True), encoding="utf-8", newline="")
-        return workspace, f"workspace://{run['run_id']}/{ordinal}", clone_root
-
-    def _seal_push(self, clone_root: Path, budget: _TimeoutBudget) -> None:
-        """The clone's remotes point at the local source; nothing may push back through them.
-
-        Every existing remote gets an unusable push URL, and a pre-push hook
-        refuses any push, including one to a remote the executor adds later.
-        A push that bypasses the hook is caught by the source-refs comparison
-        around the executor call.
-        """
-        remotes = self._run(["git", "-C", str(clone_root), "remote"], cwd=None, budget=budget)
-        for name in remotes.stdout.split():
-            sealed = self._run(["git", "-C", str(clone_root), "remote", "set-url", "--push", name,
-                                "lh-push-disabled://disposable-workspace"], cwd=None, budget=budget)
-            if sealed.returncode != 0:
-                raise RuntimeError("could not seal the disposable workspace remote")
-        hook = clone_root / ".git" / "hooks" / "pre-push"
-        hook.parent.mkdir(parents=True, exist_ok=True)
-        hook.write_text("#!/bin/sh\necho 'lh: pushing from a disposable workspace is refused' >&2\nexit 1\n",
-                        encoding="utf-8", newline="\n")
-        hook.chmod(0o755)
+        return Path(prepared.workspace), prepared.ref, Path(prepared.git_root)
 
     def _source_refs_digest(self, run: dict[str, Any], budget: _TimeoutBudget) -> str:
         """Digest of every ref in the source repository the clone was made from."""

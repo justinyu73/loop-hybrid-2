@@ -1,6 +1,6 @@
 # Goal 生命週期 v1
 
-狀態：active。本文件描述引擎中 Goal 與 Run 的生命週期邊界，依據為 `lh_runtime/goal_store.py`、`lh_runtime/run_store.py`、`lh_runtime/admission_bridge.py` 與 `lh_runtime/controller.py`。
+狀態：active。本文件描述引擎中 Goal 與 Run 的生命週期邊界，依據為 `lh_runtime/goal_store.py`、`lh_runtime/run_store.py`、`lh_runtime/admission_bridge.py`、`lh_runtime/controller.py` 與 `lh_runtime/workspace_port.py`。
 
 ## 1. 狀態與轉移
 
@@ -45,6 +45,22 @@ envelope（`lh-campaign-admission-envelope/v1`）必須指明：
 - executor 執行前後比對 source repo 的 refs。若 refs 被改動（例如以 git 的 no-verify 選項繞過 hook），該次 attempt 轉為 `human_required`，原因為 `source_refs_mutated_by_executor`。
 
 注意：繞過 hook 的情況是偵測後拒絕驗收，不是事前阻止；在沒有隔離 backend 時，這是能做到的最強保證。
+
+### 工作區的建立（WorkspacePort）
+
+controller 經由 `WorkspacePort` 建立每次 attempt 的工作區。預設的 `GitCloneWorkspace` 就是上述的一次性 clone：
+- `git clone --no-local`；
+- 以 detached 狀態 checkout 到 base；
+- 封閉對外 push。
+
+使用者可以注入其他 backend，例如快照或共享物件的實作，但必須遵守以下保證。`workspace_port.check_backend`（或 `python3 lh_runtime/workspace_port.py --backend module:Class`）會逐項檢查：
+- 工作區位於 workspace root 之內，並以 detached 狀態停在 base；
+- 經由既有的 remote（即使繞過 hook），或經由 executor 新增的 remote 進行 push，都不會改動 source 的 refs；
+- 在工作區建立的分支與 tag，不會出現在 source；
+- 損壞工作區的物件庫，不會損壞 source；
+- 位於較大 checkout 中的目標，會從相同的子目錄執行。
+
+不論使用哪一種 backend，controller 都會拒絕位於 workspace root 之外的工作區（`workspace_outside_root`）。像 `git worktree` 這類與 source 共享 refs 與物件的作法，無法通過上述檢查。
 
 引擎不寫入目標的工作樹，只會：
 - 保存 artifact 與 receipt；
@@ -100,6 +116,8 @@ backend 由 `LH_EXECUTION_FENCE_BACKEND` 明確選擇：
 機器完成只是給人審閱的證據，不會自行宣告終驗。發布、release 與產品驗收不在授權之內。
 
 ## 與現行程式的差異
+
+- 先前版本的工作區建立方式寫死在 controller 中，現在改為 `WorkspacePort`，預設實作的行為不變，只附預設實作與符合性檢查，不附其他 backend。
 
 - 原設計包含代管服務的 draft PR、自動合併與信任爬坡。公開版沒有任何服務 adapter：外部作用只經注入的 port，run 完成後的作用須經 effect guard；帶 `external_verdict` 區塊的 contract 會被拒絕。
 - 原設計的 execution fence 附有 kernel 沙箱 backend，並要求兩項 kernel proof。公開版只附 `local-process`，不提供隔離，proof 一律記為 `not_contained`。
