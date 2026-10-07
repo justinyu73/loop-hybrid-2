@@ -154,7 +154,8 @@ def main() -> int:
                 nested_done.get("status") == "verified",
                 json.dumps({"result": nested_done, "verification": nested_receipt.get("verification")}, sort_keys=True),
             ),
-            case("monorepo-subtree-runs-from-target-cwd", nested_seen.get("top_level") == str(nested_workspace.resolve()) and nested_seen.get("prefix") == "loop-hybrid/\n", json.dumps(nested_seen)),
+            # git prints its top level with forward slashes on every platform; compare paths, not strings.
+            case("monorepo-subtree-runs-from-target-cwd", bool(nested_seen.get("top_level")) and Path(nested_seen["top_level"]).resolve() == nested_workspace.resolve() and nested_seen.get("prefix") == "loop-hybrid/\n", json.dumps(nested_seen)),
             case("monorepo-subtree-diff-is-target-relative", "a/nested-change.txt b/nested-change.txt" in nested_diff and nested_source_clean, nested_diff),
             case("monorepo-clone-root-is-disposed", not nested_workspace.exists(), str(nested_workspace)),
             case("receipt-keeps-outputs-by-reference", "stdout" not in receipt and receipt["verification"]["stdout"]["ref"].endswith("verifier.stdout"), done["receipt_ref"]),

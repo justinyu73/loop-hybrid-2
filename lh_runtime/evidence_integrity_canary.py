@@ -77,12 +77,17 @@ def _seed_goal(worker: GoalLoopWorker, tag: str) -> None:
 
 
 def _locking_model(workspace: Path, _capsule: dict) -> dict:
-    """Creates a staged change the controller cannot read back (chmod 000)."""
+    """Creates a staged change the controller cannot read back (chmod 000; a deny-read ACL on Windows)."""
     src = workspace / "src"
     src.mkdir(exist_ok=True)
     target = src / "locked.txt"
     target.write_text("locked\n", encoding="utf-8")
-    os.chmod(target, 0)
+    if sys.platform == "win32":
+        # chmod 0 only sets the read-only bit on Windows and git still reads the file; deny
+        # read to Everyone (S-1-1-0) instead, which leaves delete rights for workspace disposal.
+        subprocess.run(["icacls", str(target), "/deny", "*S-1-1-0:(R)"], check=True, capture_output=True)
+    else:
+        os.chmod(target, 0)
     return {"summary": "w8 locking fixture"}
 
 

@@ -390,7 +390,9 @@ class _ShutdownController:
             self.event.set()
         if threading.current_thread() is not threading.main_thread():
             return
-        for signal_number in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        # SIGBREAK exists only on Windows (CTRL_BREAK_EVENT), its graceful-stop signal.
+        for signal_number in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None),
+                              getattr(signal, "SIGBREAK", None)):
             if signal_number is None:
                 continue
             self._previous[signal_number] = signal.getsignal(signal_number)

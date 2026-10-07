@@ -90,7 +90,10 @@ def _is_executable(path: Path) -> bool:
     if not path.is_file():
         return False
     if _platform_name() == "windows":
-        return True
+        # Windows has no execute bit: a file is runnable by its PATHEXT suffix,
+        # the same rule shutil.which applies to the PATH branch.
+        pathext = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
+        return path.suffix.upper() in {ext.strip().upper() for ext in pathext.split(";") if ext.strip()}
     return os.access(path, os.X_OK)
 
 

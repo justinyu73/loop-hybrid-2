@@ -45,8 +45,10 @@ def main() -> int:
         # the verifier sleeps far longer than the budget, and the assertions
         # only require (a) the attempt converges to retry with the timeout
         # exit code and (b) the tick returns well before the sleep would end.
-        budget_seconds = 2.0
-        sleep_seconds = 10
+        # The budget also bounds the workspace git calls, so it must leave room
+        # for them on a loaded host; the sleep stays far beyond it.
+        budget_seconds = 10.0
+        sleep_seconds = 60
         controller = LoopController(store, root / "workspaces", timeout_seconds=budget_seconds)
         run_id = make_native_run(
             store,
