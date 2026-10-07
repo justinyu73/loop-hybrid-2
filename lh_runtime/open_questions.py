@@ -28,6 +28,7 @@ SCOPE_ESCALATION = "scope_escalation"
 KIND_BY_PREFIX = (
     ("execution_fence_unavailable", AWAITING_OWNER),
     ("verifier_unavailable", AWAITING_OWNER),
+    ("regression_detected", AWAITING_OWNER),
     ("source_refs_mutated", SCOPE_ESCALATION),
     ("independent_verifier_in_write_scope", SCOPE_ESCALATION),
     ("authority_surface", SCOPE_ESCALATION),

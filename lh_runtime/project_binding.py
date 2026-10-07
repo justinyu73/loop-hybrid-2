@@ -21,6 +21,7 @@ import capability_resolver as cr
 import cli_agent_executor as executors
 import delivery_binding
 import instance_config as ic
+import regression_watch
 
 CONTRACT_SCHEMA = "lh-project-runtime-contract/v1"
 REQUIRED_RUNTIME = ("goal_store", "run_store", "workspace_root")
@@ -186,6 +187,11 @@ def resolve_project(
             raise SystemExit(f"contract.executors invalid: {exc}") from exc
     if contract.get("pricing") is not None:
         run_kwargs["pricing"] = _validate_pricing(contract["pricing"])
+    if contract.get("regression_watch") is not None:
+        try:
+            run_kwargs["regression_watch"] = regression_watch.validate_config(contract["regression_watch"])
+        except ValueError as exc:
+            raise SystemExit(f"contract.regression_watch invalid: {exc}") from exc
     models = contract.get("models")
     execution_graph = contract.get("execution_graph")
     work_graph = contract.get("work_graph")

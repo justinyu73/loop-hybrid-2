@@ -83,6 +83,17 @@ verifier 跑不起來時，不該消耗 attempt。controller 在開始 attempt �
 - `verifier_unavailable` 在 open question 中歸為 `awaiting_owner`，在失敗選路中歸為 `runtime_activation`。
 - 注入的 process port 沒有 `launch_unavailable` 時不做事前檢查，啟動失敗仍會在事後被分類。
 
+### 已完成目標的回歸檢查
+
+goal 完成後，之後的改動仍可能讓它的驗收燈轉紅。`lh_runtime/regression_watch.py` 的 `sweep` 會重驗已完成的 goal（`lh-regression-watch/v1`）：
+
+- 只看目前 revision 帶有驗收燈的 goal，最久沒檢查的優先；每輪最多 `max_goals` 個，同一個 goal 至少相隔 `min_interval_seconds`。
+- 每個燈在 source HEAD 的一次性工作區中執行（與 controller 相同的 `WorkspacePort` 與 process port），有逾時，跑完即移除工作區，不寫入 source。
+- **綠**：只更新 goal store 旁的 `regression-watch.json`（`lh-regression-watch-state/v1`）。
+- **紅**：寫入一筆 `regression_detected` event 並停在 `human_required`，idempotency key 綁定 goal、source HEAD 與燈；同一個回歸只提出一次。goal 維持 `completed`，不重開、不建立 run；它是 owner 的 open question（`awaiting_owner`），失敗選路為 `product_acceptance`。owner 可以照現有方式下新指令重新發出這個 goal。
+- **燈跑不起來或沒有結束**：記為 `unknown`，不算紅也不算綠。
+- 啟用方式：project contract 的 `regression_watch` 區塊（`max_goals`、`min_interval_seconds`、`timeout_seconds`），預設關閉；啟用時在 `goal_loop_run` 的 driver 結束後執行，結果放在輸出的 `regression_watch` 欄位。也可以用 CLI 單獨執行。
+
 ## 5. Delivery 綁定
 
 每個 Run 都必須有 delivery 綁定（`host-delivery-unit-contract/v1`）：
@@ -141,6 +152,7 @@ backend 由 `LH_EXECUTION_FENCE_BACKEND` 明確選擇：
 
 ## 與現行程式的差異
 
+- 原設計中，goal 完成後就不再重驗。公開版提供可選用的回歸檢查，只提出回歸，不自動重開。
 - 原設計中，verifier 跑不起來時 tick 直接拋出例外，每次仍消耗一個 attempt，最後停在 `human_required` 且沒有原因。公開版在開始 attempt 前檢查就緒，事後的啟動失敗也有型別。
 - 原設計沒有驗證 backend 宣稱的工具。公開版附 `gate-pack/fence_conformance/`，供 backend 作者與操作者自行驗證，引擎不強制執行。
 - 先前版本的工作區建立方式寫死在 controller 中，現在改為 `WorkspacePort`，預設實作的行為不變，只附預設實作與符合性檢查，不附其他 backend。

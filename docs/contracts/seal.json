@@ -1,7 +1,7 @@
 {
   "schema": "lh-contract-seal/v1",
-  "sealed_by": "loop (X29, owner-approved package X28-X33)",
-  "reason": "X29 verifier readiness: goal-lifecycle-v1 and failure-routing-v1",
+  "sealed_by": "loop (X30, owner-approved package X28-X33)",
+  "reason": "X30 regression watch: goal-lifecycle-v1 and failure-routing-v1",
   "scope": [
     "docs/contracts/*.md"
   ],
@@ -11,9 +11,9 @@
     "docs/contracts/candidate-review-v2.md": "sha256:7de324172915f5551f8d80680aadc1d9659aae2e86a72c628e176c5c5a35cbaf",
     "docs/contracts/command-ingress-v1.md": "sha256:4fb4c6374ee4c1f8ac51ba655a62c719b679af1070b7346e557a1d8bbd5cd5a4",
     "docs/contracts/entry-governance-v1.md": "sha256:8c08bb2f42ed697cd869894ecfead5190874a58ceaacbb4044871d5981dbf01c",
-    "docs/contracts/failure-routing-v1.md": "sha256:ca5429688990fd92b7e16bd42954dfa2c2d558d73cf2d6c54ddebcbe0a2a163e",
+    "docs/contracts/failure-routing-v1.md": "sha256:892980dfa86ba0e02e0731e65d2fb06d7d9901c225568391c1c286d50a14702e",
     "docs/contracts/goal-hierarchy-v1.md": "sha256:edb0c7e6a84b62b845d4260f46ff9b5fbce04ddb477d48603bb7ed9609ee3c5d",
-    "docs/contracts/goal-lifecycle-v1.md": "sha256:51df4a8f2a60873693dfffa949698eb11e0e4753aee664a7c60fc36635998016",
+    "docs/contracts/goal-lifecycle-v1.md": "sha256:ca7c4ea0eb8a4649c3fe67b8ee415b7578f3cfc0150be2efe85642f9c1803063",
     "docs/contracts/model-routing-v1.md": "sha256:4d9ccb91f0342f81cd4da80a179cf8a7284720a6ad2a4ebc0c256a664ae34d95",
     "docs/contracts/observability-v1.md": "sha256:50113b7e9565df875c0d09471720318475ec1158bdc9ecb1e66956a9f64b80a2",
     "docs/contracts/planner-recovery-v1.md": "sha256:d9fdcb036f942be87dba062157937e9103dca81e366a89b04a0ccdea120291d0",
