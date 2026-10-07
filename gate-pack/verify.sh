@@ -50,6 +50,7 @@ run_gate lh-lamp-precheck python3 -B lh_runtime/lamp_precheck_canary.py || exit 
 run_gate lh-verifier-readiness python3 -B lh_runtime/verifier_readiness_canary.py || exit $?
 run_gate lh-regression-watch python3 -B lh_runtime/regression_watch_canary.py || exit $?
 run_gate lh-scheduled-checks python3 -B lh_runtime/scheduled_checks_canary.py || exit $?
+run_gate lh-lamp-actuator python3 -B lh_runtime/lamp_actuator_canary.py || exit $?
 run_gate execution-receipt python3 gate-pack/execution_receipt/canary.py || exit $?
 run_gate verification-reducer python3 gate-pack/verification_reducer/canary.py || exit $?
 run_gate lh-native-runtime python3 lh_runtime/canary.py || exit $?
