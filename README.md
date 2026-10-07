@@ -114,13 +114,14 @@ flowchart TB
 - **work-unit recovery 生命週期考卷**（`work_unit_recovery_canary.py`）：在走完真實完成流程的 Run 上驗證 recovery store API：身分綁定、以 Run 計的呼叫預算、套用前重驗與各動作的落點，以及連續 3 次失敗時引擎要求先做唯讀稽核。
 - **native recovery 綁定考卷**（`native_recovery_binding_canary.py`）：以真實檔案建立 contract、capability contract、provider registry、host contract、bootstrap authority、fence 與 dispatch 的完整封存鏈；正確的鏈可以解析，任何單一變動都以其特定原因被拒。
 - **campaign recovery 隔離端到端考卷**（`campaign_recovery_e2e_canary.py`）：所有輸入都在暫存目錄中建立，以正式入口在程序內走完「真實失敗 → stop line → 請求 → 經 fence 執行替身角色 → 等待授權」，不依賴 scheduler 入口或宿主環境。
+- **WorkspacePort**（`workspace_port.py`）：工作區的建立可以替換（預設仍是 `git clone --no-local`）。任何 backend 都必須通過 `check_backend`：push 與分支不會回到 source、損壞工作區物件不影響 source、子目錄語意相同；controller 拒絕 workspace root 之外的工作區。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：105 個 gate 中 97 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：106 個 gate 中 98 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
