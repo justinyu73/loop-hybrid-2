@@ -25,7 +25,7 @@
 
 「修改契約需要核准」這句話本身擋不住任何人：沒讀到它的 agent 不受影響，讀到它的 agent 可以連同檢查一起改。封印給檢查一個改不動的錨點：`docs/contracts/seal.json` 記錄每份契約的 digest（`lh-contract-seal/v1`）。
 
-- **範圍由 repo 決定**：`gate-pack/contract_seal/seal.py` 列出受追蹤、以及未追蹤但未被忽略、符合 `--include` 的檔案（預設 `docs/contracts/*.md`），不由封印檔決定。封印檔少了一筆、或記錄的範圍比要求的窄，都判為 broken。
+- **範圍由 repo 決定**：`gate-pack/contract_seal/seal.py` 列出受追蹤、以及未追蹤但未被忽略、符合指令所給樣式的檔案（預設 `docs/contracts/*.md`），不由封印檔決定。封印檔少了一筆、或記錄的範圍比要求的窄，都判為 broken。
 - **判為 broken 的情況**：契約沒有被封印、已封印的契約不存在、digest 不符、封印檔讀不到或範圍不符。
 - **重封不被阻擋，但必須看得見**：`reseal --sealed-by <名稱> --reason <文字>` 一律重算整個範圍，沒有只重封單一檔案的選項。owner 核准的變更修改契約時，在同一個 PR 重封，PR 中列出封印的 diff。
 - digest 先把 CRLF 正規化為 LF，Windows 與 Linux 的 checkout 結果相同。

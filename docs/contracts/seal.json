@@ -10,7 +10,7 @@
     "docs/contracts/campaign-requirement-template.md": "sha256:b33952f80dd107a64b4165d568e5342f90c002974c1e43c359c9c422c20c7bae",
     "docs/contracts/candidate-review-v2.md": "sha256:7de324172915f5551f8d80680aadc1d9659aae2e86a72c628e176c5c5a35cbaf",
     "docs/contracts/command-ingress-v1.md": "sha256:4fb4c6374ee4c1f8ac51ba655a62c719b679af1070b7346e557a1d8bbd5cd5a4",
-    "docs/contracts/entry-governance-v1.md": "sha256:5b32a50442eccb853a50673dbee113b736c17536310ab089a88b3b73c9897d3b",
+    "docs/contracts/entry-governance-v1.md": "sha256:8c08bb2f42ed697cd869894ecfead5190874a58ceaacbb4044871d5981dbf01c",
     "docs/contracts/failure-routing-v1.md": "sha256:bcc4b9a782e42293a303412f8d41d1e94c25b786e3777dbcc5430fcc42dbc491",
     "docs/contracts/goal-hierarchy-v1.md": "sha256:edb0c7e6a84b62b845d4260f46ff9b5fbce04ddb477d48603bb7ed9609ee3c5d",
     "docs/contracts/goal-lifecycle-v1.md": "sha256:f4ca2cde5a5afeac01571fd6039c4a513493caeb37f07857c40ca56478f9bf90",
