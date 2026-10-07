@@ -205,13 +205,18 @@ clone can reproduce the same closed loop.
   outside the allowed roots, loopback egress, the caller's environment, the
   deadline, the output limit and started notifications; a claim that
   measurement contradicts is RED.
+- **Contract seal** (`gate-pack/contract_seal/`, usable in any target repo) —
+  `docs/contracts/seal.json` holds a digest per contract, and the scope comes
+  from the repository, not from the seal; an edit without a reseal, a deleted
+  or added contract, or a seal that shrinks turns it red. A reseal records who
+  resealed and why.
 
 ## Platform support
 
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Supported. All 107 gates pass; CI runs the full `gate-pack/verify.sh` on `windows-latest` (set `PYTHONUTF8=1`). Graceful stop uses `CTRL_BREAK_EVENT` (SIGBREAK) on Windows, and a file counts as executable by its `PATHEXT` suffix. One `lh-judge-wiring` item needs the symlink privilege: on a host without it (no Developer Mode, not elevated) that item fails explicitly with `symlink_privilege_required`; it is never skipped. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Supported. All 109 gates pass; CI runs the full `gate-pack/verify.sh` on `windows-latest` (set `PYTHONUTF8=1`). Graceful stop uses `CTRL_BREAK_EVENT` (SIGBREAK) on Windows, and a file counts as executable by its `PATHEXT` suffix. One `lh-judge-wiring` item needs the symlink privilege: on a host without it (no Developer Mode, not elevated) that item fails explicitly with `symlink_privilege_required`; it is never skipped. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
