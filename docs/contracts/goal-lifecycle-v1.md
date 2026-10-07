@@ -94,6 +94,21 @@ backend 由 `LH_EXECUTION_FENCE_BACKEND` 明確選擇：
 - 內建的 `local-process` 管理程序群組、逾時與輸出上限，並在 receipt 標示 `kernel_containment: false`；
 - 真正的隔離 backend 由使用者以 port 提供。
 
+### 宣稱必須可被驗證
+
+每份 receipt 都帶兩個宣稱：
+- `kernel_containment`：子程序無法在允許的範圍之外寫入或讀取；
+- `provider_egress_enforced`：子程序無法對外連線。
+
+`gate-pack/fence_conformance/conformance.py` 以引擎指令邊界的同一套呼叫順序驅動任何 backend，實測以下項目：
+- descriptor 是否綁定輸入的 binding、被竄改或重播的 descriptor 是否被拒；
+- 在允許範圍之外的寫入與讀取；
+- 連往工具自己開的 loopback listener（不會連到外部）；
+- 呼叫端環境中的值是否外傳；
+- 期限是否強制執行、輸出是否有上限、啟動通知是否送出真實的程序。
+
+**實測與宣稱矛盾的，判為 RED**：宣稱有隔離卻寫得出去，或任何 backend 外傳呼叫端環境，都算矛盾。不宣稱隔離、實際也沒有隔離的 backend（例如 `local-process`）則是一致的。引擎不在每次執行前呼叫這個工具；驗證由 backend 作者與操作者負責，引擎只如實記錄 receipt 的宣稱。
+
 ## 7. Goal-scoped 授權
 
 人保有四項 Goal 層級的決定：
@@ -117,6 +132,7 @@ backend 由 `LH_EXECUTION_FENCE_BACKEND` 明確選擇：
 
 ## 與現行程式的差異
 
+- 原設計沒有驗證 backend 宣稱的工具。公開版附 `gate-pack/fence_conformance/`，供 backend 作者與操作者自行驗證，引擎不強制執行。
 - 先前版本的工作區建立方式寫死在 controller 中，現在改為 `WorkspacePort`，預設實作的行為不變，只附預設實作與符合性檢查，不附其他 backend。
 
 - 原設計包含代管服務的 draft PR、自動合併與信任爬坡。公開版沒有任何服務 adapter：外部作用只經注入的 port，run 完成後的作用須經 effect guard；帶 `external_verdict` 區塊的 contract 會被拒絕。
