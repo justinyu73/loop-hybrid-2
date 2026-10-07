@@ -46,6 +46,7 @@ run_gate goal-loop-g6-ci-conclusion python3 -B lh_runtime/ci_conclusion_canary.p
 run_gate lh-worker-async-dispatch python3 -B lh_runtime/worker_async_canary.py || exit $?
 run_gate lh-verifier-normalizer-n15 python3 -B lh_runtime/verifier_normalizer_canary.py || exit $?
 run_gate lh-lamp-precheck python3 -B lh_runtime/lamp_precheck_canary.py || exit $?
+run_gate lh-verifier-readiness python3 -B lh_runtime/verifier_readiness_canary.py || exit $?
 run_gate execution-receipt python3 gate-pack/execution_receipt/canary.py || exit $?
 run_gate verification-reducer python3 gate-pack/verification_reducer/canary.py || exit $?
 run_gate lh-native-runtime python3 lh_runtime/canary.py || exit $?

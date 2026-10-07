@@ -70,6 +70,7 @@ EXACT = {
 # Then prefixes, in the order they are tried; the first match wins.
 PREFIXES = (
     ("execution_fence_unavailable", "runtime_activation"),
+    ("verifier_unavailable", "runtime_activation"),
     ("source_refs_mutated", "destructive_effect"),
     ("independent_verifier_in_write_scope", "material_scope_expansion"),
     ("authority_surface", "material_scope_expansion"),

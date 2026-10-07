@@ -74,6 +74,15 @@ controller 經由 `WorkspacePort` 建立每次 attempt 的工作區。預設的 
 - 較新的 revision 取代舊的，必須重新 admission 後才會有新的 Run。
 - Run 的狀態以 `RUN_STATES` 為準：`queued`、`running`、`retry_pending`、`verified`、`stopped`、`human_required`、`awaiting_external_verdict`。
 
+### 驗證器就緒
+
+verifier 跑不起來時，不該消耗 attempt。controller 在開始 attempt 之前，先請負責啟動程式的 process port 檢查 verifier 能否啟動（預設的 `LocalProcessPort`：絕對路徑必須存在且可執行；只有名稱時依 PATH 查找；相對路徑要到 clone 建立後才知道，留給啟動時判定），並檢查 workspace root 可寫入。
+
+- **未就緒**：不開始 attempt、不呼叫 model；tick 回傳 `waiting_for_verifier` 與原因，並寫入一筆 `verifier_unavailable` event（同一個待執行的 attempt、同一個原因只記一次）。下一次 tick 重新檢查，就緒後照常進行。worker 不把等待算成進度，driver 因此會 idle 與 backoff。
+- **attempt 開始後才啟動失敗**：不論在 model 之前（lamp precheck）或之後，都以有型別的原因 `verifier_unavailable:launch_failed:<種類>` 結束該 attempt 並進入 `human_required`，例外不會拋出 tick。逾時仍走原本的 124 路徑。
+- `verifier_unavailable` 在 open question 中歸為 `awaiting_owner`，在失敗選路中歸為 `runtime_activation`。
+- 注入的 process port 沒有 `launch_unavailable` 時不做事前檢查，啟動失敗仍會在事後被分類。
+
 ## 5. Delivery 綁定
 
 每個 Run 都必須有 delivery 綁定（`host-delivery-unit-contract/v1`）：
@@ -132,6 +141,7 @@ backend 由 `LH_EXECUTION_FENCE_BACKEND` 明確選擇：
 
 ## 與現行程式的差異
 
+- 原設計中，verifier 跑不起來時 tick 直接拋出例外，每次仍消耗一個 attempt，最後停在 `human_required` 且沒有原因。公開版在開始 attempt 前檢查就緒，事後的啟動失敗也有型別。
 - 原設計沒有驗證 backend 宣稱的工具。公開版附 `gate-pack/fence_conformance/`，供 backend 作者與操作者自行驗證，引擎不強制執行。
 - 先前版本的工作區建立方式寫死在 controller 中，現在改為 `WorkspacePort`，預設實作的行為不變，只附預設實作與符合性檢查，不附其他 backend。
 
