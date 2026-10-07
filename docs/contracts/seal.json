@@ -1,7 +1,7 @@
 {
   "schema": "lh-contract-seal/v1",
-  "sealed_by": "loop (X32, owner-approved package X28-X33)",
-  "reason": "X32 scheduled checks: status-snapshot-v1",
+  "sealed_by": "loop (X33, owner-approved package X28-X33)",
+  "reason": "X33 lamp actuation: status-snapshot-v1",
   "scope": [
     "docs/contracts/*.md"
   ],
@@ -17,7 +17,7 @@
     "docs/contracts/model-routing-v1.md": "sha256:4d9ccb91f0342f81cd4da80a179cf8a7284720a6ad2a4ebc0c256a664ae34d95",
     "docs/contracts/observability-v1.md": "sha256:50113b7e9565df875c0d09471720318475ec1158bdc9ecb1e66956a9f64b80a2",
     "docs/contracts/planner-recovery-v1.md": "sha256:d9fdcb036f942be87dba062157937e9103dca81e366a89b04a0ccdea120291d0",
-    "docs/contracts/status-snapshot-v1.md": "sha256:85c5a8c58fa198401643d67c75639eeda6027d316535fd6f977a3d2e2a4059b4",
+    "docs/contracts/status-snapshot-v1.md": "sha256:d1830836dd81a82cba583593d07cdf78638adbb0c4b988a46c9d11335ed2bda9",
     "docs/contracts/token-accounting-v1.md": "sha256:a462cf05a702ee63b73ff369651ed6104fb22a119fda93484d9decbbb06f287c"
   }
 }

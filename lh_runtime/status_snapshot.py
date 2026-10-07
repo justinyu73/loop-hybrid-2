@@ -24,6 +24,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from goal_store import GoalStore
+import lamp_actuator
 import open_questions
 import scheduled_checks as integrity_checks
 import status_lamp
@@ -139,6 +140,7 @@ def build_snapshot(
     tick_overhead_seconds: float = 0.0,
     dispatch_gate: dict[str, Any] | None = None,
     scheduled_checks: dict[str, Any] | None = None,
+    lamp_actuation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     heartbeat = heartbeat if heartbeat is not None else read_heartbeat(default_heartbeat_path(run_store.root))
     attempt_bound = attempt_wall_clock_upper_bound_seconds(attempt_timeout_seconds)
@@ -175,6 +177,9 @@ def build_snapshot(
         # None unless enabled (or a verdict was left): the lamp rule then does not apply.
         "scheduled_checks": integrity_checks.project(integrity_checks.state_path(goal_store.root),
                                                    enabled=scheduled_checks),
+        # Both None unless lamp actuation is enabled.
+        "scratch": lamp_actuator.scratch_projection(run_store.root, enabled=lamp_actuation),
+        "lamp_actuation": lamp_actuator.project(goal_store.root, enabled=lamp_actuation),
     }
     # The one degraded verdict: a pure function of every other field.
     snapshot["lamp"] = status_lamp.lamp(snapshot)

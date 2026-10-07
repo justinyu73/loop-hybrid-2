@@ -120,13 +120,14 @@ flowchart TB
 - **驗證器就緒**（`controller.py`）：開始 attempt 前先確認驗收燈能啟動；跑不起來時回傳 `waiting_for_verifier`，不消耗 attempt、不呼叫 model，下一次 tick 重新檢查；attempt 開始後才啟動失敗，以 `verifier_unavailable` 進入 `human_required`，不拋例外。
 - **已完成目標的回歸檢查**（`regression_watch.py`，contract 選用）：在 source HEAD 的一次性工作區重跑已完成 goal 的驗收燈，有數量上限與間隔；轉紅時提出一筆給 owner 的 `regression_detected`，不重開 goal、不建立 run；燈跑不起來記為 unknown。
 - **定期檢查**（`scheduled_checks.py`，contract 選用）：在執行 loop 的機器上，依間隔重跑唯讀的完整性檢查（契約封印、決策登記），裁決留在 state root；裁決為紅、遺失或過期時，健康燈亮出 `integrity_check_red`。
+- **燈號自動處置**（`lamp_actuator.py`，contract 選用）：對釘住 digest 的 policy 允許的燈號，執行封閉表中的具名動作，每個事件一次並留收據；policy 漂移時全部停止並亮燈，owner 專屬的燈號永不自動處置，快照中的指令字串永不執行。目前唯一的動作是回收 scratch。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 支援：113 個 gate 全部通過；CI 在 `windows-latest` 上執行完整的 `gate-pack/verify.sh`（請設定 `PYTHONUTF8=1`）。優雅停止在 Windows 上使用 `CTRL_BREAK_EVENT`（SIGBREAK）；檔案是否可執行依 `PATHEXT` 副檔名判定。`lh-judge-wiring` 有一項需要建立 symlink 的權限：在沒有這個權限的主機上（未開啟開發人員模式，也不是以系統管理員身分執行），該項會以 `symlink_privilege_required` 明確失敗，不會略過。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 支援：114 個 gate 全部通過；CI 在 `windows-latest` 上執行完整的 `gate-pack/verify.sh`（請設定 `PYTHONUTF8=1`）。優雅停止在 Windows 上使用 `CTRL_BREAK_EVENT`（SIGBREAK）；檔案是否可執行依 `PATHEXT` 副檔名判定。`lh-judge-wiring` 有一項需要建立 symlink 的權限：在沒有這個權限的主機上（未開啟開發人員模式，也不是以系統管理員身分執行），該項會以 `symlink_privilege_required` 明確失敗，不會略過。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor

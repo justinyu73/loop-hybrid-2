@@ -38,6 +38,8 @@ import grill_loop
 import project_binding
 import regression_watch as regression_watch_module
 import scheduled_checks as scheduled_checks_module
+import lamp_actuator
+import status_snapshot
 import instance_config
 import turning_point as tp
 import verifier_normalizer
@@ -938,10 +940,12 @@ def run(
     planner_recovery: dict[str, Any] | None = None,
     regression_watch: dict[str, Any] | None = None,
     scheduled_checks: dict[str, Any] | None = None,
+    lamp_actuation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Opt-in per contract: validate before any work so a bad block fails fast.
     watch_config = regression_watch_module.validate_config(regression_watch) if regression_watch is not None else None
     checks_config = scheduled_checks_module.validate_config(scheduled_checks) if scheduled_checks is not None else None
+    actuation_config = lamp_actuator.validate_config(lamp_actuation) if lamp_actuation is not None else None
     native_binding = None
     if execute and planner_recovery is not None:
         from lh_runtime.runner_adapter import resolve_native_run_execution_binding
@@ -1198,6 +1202,8 @@ def run(
         worker.scheduled_checks = checks_config
     elif checks_file.exists():
         checks_file.unlink()  # disabled: a leftover verdict must not keep the rule alive
+    if actuation_config is not None:
+        worker.lamp_actuation = actuation_config
     summary = driver_fn(
         worker,
         holder=holder,
@@ -1222,6 +1228,17 @@ def run(
     result = {"mode": "execute", "invoked": True, "plan": plan, "startup_external_resumed": startup_external_resumed, "driver": summary}
     if checks_verdict is not None:
         result["scheduled_checks"] = checks_verdict
+    if actuation_config is not None:
+        # After the driver: judge a fresh snapshot, then act only on what the pinned policy allows.
+        fresh = status_snapshot.build_snapshot(
+            worker.run_store, worker.goal_store, generated_at=datetime.now(timezone.utc).isoformat(),
+            attempt_timeout_seconds=float(worker.controller.timeout_seconds),
+            scheduled_checks=checks_config, lamp_actuation=actuation_config,
+        )
+        result["lamp_actuation"] = lamp_actuator.actuate(
+            fresh, config=actuation_config, run_store_root=worker.run_store.root,
+            goal_store_root=worker.goal_store.root,
+        )
     if watch_config is not None:
         # After the driver: completed goals are looked at again; a regression is raised, never repaired.
         result["regression_watch"] = regression_watch_module.sweep(

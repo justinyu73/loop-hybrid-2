@@ -22,6 +22,7 @@ import cli_agent_executor as executors
 import delivery_binding
 import instance_config as ic
 import regression_watch
+import lamp_actuator
 import scheduled_checks
 
 CONTRACT_SCHEMA = "lh-project-runtime-contract/v1"
@@ -198,6 +199,12 @@ def resolve_project(
             run_kwargs["scheduled_checks"] = scheduled_checks.validate_config(contract["scheduled_checks"])
         except ValueError as exc:
             raise SystemExit(f"contract.scheduled_checks invalid: {exc}") from exc
+    if contract.get("lamp_actuation") is not None:
+        try:
+            actuation = lamp_actuator.validate_config(contract["lamp_actuation"])
+        except ValueError as exc:
+            raise SystemExit(f"contract.lamp_actuation invalid: {exc}") from exc
+        run_kwargs["lamp_actuation"] = {**actuation, "policy": resolve(actuation["policy"], "state")}
     models = contract.get("models")
     execution_graph = contract.get("execution_graph")
     work_graph = contract.get("work_graph")
