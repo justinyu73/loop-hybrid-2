@@ -96,7 +96,7 @@ flowchart TB
   真正的隔離 backend 由你以 port 提供。沒有選 backend 時預設停用，run 停在 `human_required`，不會無 fence 執行。
 - **Platform ports**（`platform_ports.py`、`host_ports.py`、`instance_config.py`、`lifecycle.py`）：鎖、路徑、程序控制等主機差異集中在 port，核心不含固定主機路徑。
 - **Provider registry 與輸入綁定**（`provider_registry.py`、`provider_input_binding.py`、`runner_adapter.py`）：依 capability 選路，專案節點不指定 provider／model。
-- **決策登記**（`gate-pack/decision_registry/`，給目標 repo 用的工具）：決策在工作開始前登記，必須附驗收探針與允許改動的路徑；用 git 逐 commit 找出碰到受保護路徑卻沒引用已登記決策的改動；結果每次重跑探針推導，不儲存「已完成」。
+- **決策登記**（`gate-pack/decision_registry/`，給目標 repo 用的工具）：決策在工作開始前登記，必須附驗收探針與允許改動的路徑；用 git 逐 commit 找出碰到受保護路徑卻沒引用已登記決策的改動；結果每次重跑探針推導，不儲存「已完成」。`red-proof` 在考卷 commit 上證明探針確實是紅的，並綁定完整 commit；policy 可要求每個探針都有紅的證明（或附理由豁免）。
 - **進度收據與驗證佇列**（`gate-pack/progress_receipts/`，給目標 repo 用的工具）：請求方只能指名檢查 id，由驗證方在釘住 HEAD 的快照中執行並寫入雜湊鏈收據；沒有收據的進度不算進度。驗證、驗收、推廣分開記錄且有先後；兩個角色是否真的是不同身分，由工具量測並如實回報。
 - **推進判定**（`gate-pack/advancement/`，給目標 repo 用的工具）：評估前就固定每個判準的 baseline 與 closing 收據，只有「原本紅、後來綠」才算推進；已經綠的檢查、worker 自選的檢查都不算。
 - **獨立的重試驗證器**（`gate-pack/retry_verifier/`）：另一份不 import 引擎模組的實作，以唯讀方式讀 work-unit store 與 executor 的 digest 綁定收據，核對重試鏈與啟動上限是否一致。
@@ -125,7 +125,7 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 支援：111 個 gate 全部通過；CI 在 `windows-latest` 上執行完整的 `gate-pack/verify.sh`（請設定 `PYTHONUTF8=1`）。優雅停止在 Windows 上使用 `CTRL_BREAK_EVENT`（SIGBREAK）；檔案是否可執行依 `PATHEXT` 副檔名判定。`lh-judge-wiring` 有一項需要建立 symlink 的權限：在沒有這個權限的主機上（未開啟開發人員模式，也不是以系統管理員身分執行），該項會以 `symlink_privilege_required` 明確失敗，不會略過。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 支援：112 個 gate 全部通過；CI 在 `windows-latest` 上執行完整的 `gate-pack/verify.sh`（請設定 `PYTHONUTF8=1`）。優雅停止在 Windows 上使用 `CTRL_BREAK_EVENT`（SIGBREAK）；檔案是否可執行依 `PATHEXT` 副檔名判定。`lh-judge-wiring` 有一項需要建立 symlink 的權限：在沒有這個權限的主機上（未開啟開發人員模式，也不是以系統管理員身分執行），該項會以 `symlink_privilege_required` 明確失敗，不會略過。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor
