@@ -116,13 +116,14 @@ flowchart TB
 - **campaign recovery 隔離端到端考卷**（`campaign_recovery_e2e_canary.py`）：所有輸入都在暫存目錄中建立，以正式入口在程序內走完「真實失敗 → stop line → 請求 → 經 fence 執行替身角色 → 等待授權」，不依賴 scheduler 入口或宿主環境。
 - **WorkspacePort**（`workspace_port.py`）：工作區的建立可以替換（預設仍是 `git clone --no-local`）。任何 backend 都必須通過 `check_backend`：push 與分支不會回到 source、損壞工作區物件不影響 source、子目錄語意相同；controller 拒絕 workspace root 之外的工作區。
 - **fence backend 符合性考卷**（`gate-pack/fence_conformance/`，給 backend 作者用的工具）：實測 backend 宣稱的隔離——範圍外的寫入與讀取、loopback 對外連線、呼叫端環境、期限、輸出上限、啟動通知；宣稱與實測矛盾即為 RED。
+- **契約封印**（`gate-pack/contract_seal/`，也可用在任何目標 repo）：`docs/contracts/seal.json` 記錄每份契約的 digest，範圍由 repo 決定而不是由封印檔決定；改了契約卻沒重封、刪掉或新增契約、封印檔縮小，都會轉紅。重封會記錄是誰、為什麼。
 
 ## 平台支援
 
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 支援：107 個 gate 全部通過；CI 在 `windows-latest` 上執行完整的 `gate-pack/verify.sh`（請設定 `PYTHONUTF8=1`）。優雅停止在 Windows 上使用 `CTRL_BREAK_EVENT`（SIGBREAK）；檔案是否可執行依 `PATHEXT` 副檔名判定。`lh-judge-wiring` 有一項需要建立 symlink 的權限：在沒有這個權限的主機上（未開啟開發人員模式，也不是以系統管理員身分執行），該項會以 `symlink_privilege_required` 明確失敗，不會略過。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 支援：109 個 gate 全部通過；CI 在 `windows-latest` 上執行完整的 `gate-pack/verify.sh`（請設定 `PYTHONUTF8=1`）。優雅停止在 Windows 上使用 `CTRL_BREAK_EVENT`（SIGBREAK）；檔案是否可執行依 `PATHEXT` 副檔名判定。`lh-judge-wiring` 有一項需要建立 symlink 的權限：在沒有這個權限的主機上（未開啟開發人員模式，也不是以系統管理員身分執行），該項會以 `symlink_privilege_required` 明確失敗，不會略過。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor

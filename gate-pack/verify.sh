@@ -21,6 +21,8 @@ run_gate ceremony-prefix python3 -B gate-pack/ceremony_grader_canary.py || exit 
 run_gate boundary-seal python3 gate-pack/boundary_seal/canary.py || exit $?
 run_gate docs-structure python3 gate-pack/docs_structure/canary.py || exit $?
 run_gate docs-contracts python3 gate-pack/docs_contracts/canary.py || exit $?
+run_gate contract-seal-kit python3 -B gate-pack/contract_seal/canary.py || exit $?
+run_gate contract-seal python3 -B gate-pack/contract_seal/seal.py verify --root . || exit $?
 run_gate decision-registry python3 -B gate-pack/decision_registry/canary.py || exit $?
 run_gate progress-receipts python3 -B gate-pack/progress_receipts/canary.py || exit $?
 run_gate advancement python3 -B gate-pack/advancement/canary.py || exit $?

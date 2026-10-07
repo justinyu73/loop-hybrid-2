@@ -11,7 +11,8 @@ acceptance authority, and goal-scoped execution authority.
 
 ## Conventions
 - Docs follow three layers: `docs/contracts/` (long-lived, describes the code as
-  it is; changing one needs approval), `docs/active/`, `docs/archive/`.
+  it is; changing one needs approval and a visible reseal with
+  `gate-pack/contract_seal/seal.py reseal`), `docs/active/`, `docs/archive/`.
 - Boundary-seal vocabulary: non-test files must not introduce the sealed gate
   vocabulary (the pattern list lives in `gate-pack/boundary_seal/canary.py`
   PATTERNS); any new site outside the sealed baseline turns that gate red.
