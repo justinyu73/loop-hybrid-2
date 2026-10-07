@@ -140,7 +140,22 @@ recovery 是 opt-in，必須同時滿足三個條件：
   - campaign 不符；
   - base 不符。
 
-以下尚無行為考卷：從真實失敗的子 Goal 建立 campaign 請求，並經 fence 呼叫角色。它需要原生 run 的完整路徑（scheduler 入口、連續失敗的原生子 Run、native store 連結），以及能依指令邊界 metadata 產生方案的替身 planner。
+`lh_runtime/campaign_recovery_e2e_canary.py`（gate `lh-campaign-recovery-e2e`）以隔離的方式走完第 3 節。所有輸入都在暫存目錄中建立：
+- 上述封存鏈；
+- 3 個 acceptance lamp 會失敗的 seed Goal；
+- 不 import 引擎模組的替身 planner 與驗證者。
+
+正式入口 `goal_loop_run.run` 在程序內以 `local-process` fence 執行，不經 scheduler 入口，也不連網。考卷涵蓋：
+- 真實失敗的子 Run 觸發 stop line；
+- 從真實收據建立請求；
+- 角色經真實綁定的指令邊界各執行一次；
+- 方案以真實的 metadata 驗證；
+- 最後停在 `awaiting_authority`，不套用、不補 attempt 上限；
+- 不合格的角色輸出被拒；
+- 子 Goal 收據不符時，記錄 `campaign_recovery_rejected` 並停在 `human_required`；
+- source repo 不變、環境變數還原。
+
+campaign 路徑與 work-unit 路徑目前都已有行為考卷。
 
 這份契約另由 `gate-pack/docs_contracts/canary.py` 檢查：文件中提到的路徑、schema id 與名稱都必須存在於程式中。
 
@@ -148,5 +163,6 @@ recovery 是 opt-in，必須同時滿足三個條件：
 
 - 原設計先以固定選路表處理失敗，只有需要判斷的情況才交給 planner。公開版沒有選路表：campaign 路徑在連續失敗後直接交給 planner，而單次失敗不會觸發 recovery。
 - 原設計的 recovery 由協調者驅動 work-unit 的完整生命週期。公開版保留了 store API 並有行為考卷，但沒有任何引擎路徑呼叫它。
+- X22 曾判斷「從真實失敗子 Goal 建立請求」需要 scheduler 入口與完整宿主環境才能驗證。這個判斷有誤：X24 以程序內呼叫正式入口的方式，在隔離環境中完成了這項驗證。同一次驗證也發現並修正了一個缺陷：子 Goal 收據不符時，driver 會因讀取不存在的欄位而中斷。
 - 本文件第一版（X18）的動作表把 `collect_evidence` 寫成「維持 `plan_verified`」，並把 `repair_same_node`、`retry_within_budget` 寫成「排入重試」。依程式更正為上表：前者在套用時被拒，後兩者的紀錄維持 `plan_verified`、apply 為 `retry_pending`。
 - `execution_binding` 的 schema 名稱仍帶有前身時期的 `host-` 前綴。

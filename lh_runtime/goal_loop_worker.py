@@ -400,11 +400,12 @@ class GoalLoopWorker:
             try:
                 children = [self._campaign_child(goal_id) for goal_id in payload["failed_goal_ids"]]
             except (KeyError, ValueError, OSError) as exc:
+                rejection = {"stop_event_key": stop["event_key"], "reason": "campaign_recovery_child_receipt_mismatch",
+                             "detail": type(exc).__name__}
                 event = self.goal_store.record_event(event_id=key, idempotency_key=key,
-                    source="campaign_recovery", event_type="campaign_recovery_rejected",
-                    payload={"stop_event_key": stop["event_key"], "reason": "campaign_recovery_child_receipt_mismatch",
-                             "detail": type(exc).__name__})
-                self.goal_store.transition_event(event["event_key"], "human_required", result=event["payload"])
+                    source="campaign_recovery", event_type="campaign_recovery_rejected", payload=rejection)
+                # record_event returns the event's key and digest, not its payload.
+                self.goal_store.transition_event(event["event_key"], "human_required", result=rejection)
                 continue
             anchor = children[-1]
             evidence = [{"goal_id": child["goal_id"], "run_id": child["run_id"],
