@@ -168,7 +168,9 @@ class GoalLoopWorker:
         run_result = self._dispatch_one_run(holder, model, turning_point=turning_point, verdict_store=verdict_store)
         terminal_after = self._reduce_run_result(run_result) if run_result and run_result.get("status") in {"verified", "stopped", "human_required"} else None
         campaign_stops = self._campaign_failure_lines()
-        progressed = any(item is not None and item != [] for item in (standing, startup, external, terminal_before, event_result, run_result, terminal_after, campaign_stops))
+        # A run waiting for its verifier did nothing; counting it would make the driver spin.
+        waiting = run_result is not None and run_result.get("status") == "waiting_for_verifier"
+        progressed = any(item is not None and item != [] for item in (standing, startup, external, terminal_before, event_result, None if waiting else run_result, terminal_after, campaign_stops))
         return {
             "status": "progress" if progressed else "idle",
             "standing_emitted": standing,

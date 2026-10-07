@@ -249,7 +249,7 @@ def _run_driver_loop(
         cycles += 1
 
         run = result.get("run")
-        if run is not None and run.get("status") != "human_required":
+        if run is not None and run.get("status") not in {"human_required", "waiting_for_verifier"}:
             runs_dispatched += 1
         terminal = result.get("terminal_after")
         if terminal is not None:

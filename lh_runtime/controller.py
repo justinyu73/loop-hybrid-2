@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -29,6 +30,8 @@ from status_snapshot import DEFAULT_EXECUTOR_TIMEOUT_SECONDS
 from workspace_port import GitCloneWorkspace, WorkspacePort, WorkspaceRequest
 
 ModelRunner = Callable[[Path, dict[str, Any]], dict[str, Any]]
+# Reason-code prefix and event type for a verifier that cannot be launched.
+VERIFIER_UNAVAILABLE = "verifier_unavailable"
 
 
 def _digest(content: str) -> str:
@@ -325,6 +328,67 @@ class LoopController:
             "receipt_ref": receipt_ref["ref"],
             "receipt_digest": receipt_ref["digest"],
         }
+
+    def _verifier_unready(self, verifier_argv: list[str]) -> str | None:
+        """Why the verifier cannot be launched before an attempt begins, if it cannot.
+
+        Only the launching port can answer; a port without ``launch_unavailable``
+        is not pre-checked, and its launch errors are typed after the fact.
+        """
+        check = getattr(self.process_port, "launch_unavailable", None)
+        reason = check(verifier_argv) if callable(check) else None
+        if reason is None:
+            try:
+                self.workspace_root.mkdir(parents=True, exist_ok=True)
+                writable = os.access(self.workspace_root, os.W_OK)
+            except OSError:
+                writable = False
+            if not writable:
+                reason = "workspace_root_not_writable"
+        return f"{VERIFIER_UNAVAILABLE}:{reason}" if reason is not None else None
+
+    def _finish_verifier_unavailable(
+        self,
+        *,
+        run_id: str,
+        ordinal: int,
+        attempt_fence: int,
+        workspace_ref: str,
+        base_revision: str,
+        reason: str,
+        provider: dict[str, Any] | None,
+        budget: _TimeoutBudget,
+    ) -> dict[str, Any]:
+        """End an attempt whose verifier failed to launch: typed, never raised."""
+        invocations = 0 if provider is None else 1
+        provider = provider or {"summary": "verifier could not be launched; model not invoked"}
+        provider = {**provider, "failure": reason, "provider_invocations": invocations}
+        provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(provider, sort_keys=True), budget)
+        empty_diff = self._write_artifact(run_id, ordinal, "diff.patch", "", budget)
+        receipt = self._bind_dispatch({
+            "schema": "loop-hybrid-attempt-receipt/v1",
+            "run_id": run_id,
+            "attempt": ordinal,
+            "workspace": {"ref": workspace_ref, "disposable": True, "disposed": True, "base_revision": base_revision},
+            "provider": {"summary": provider["summary"], "artifact": provider_ref, "provider_invocations": invocations},
+            "usage": token_cost.unknown_usage(reason="verifier could not be launched"),
+            "diff": empty_diff,
+            "verification": {"dispatched": False, "reason": reason},
+            "routing": {"route": "human_required", "reason": reason},
+        })
+        receipt_ref = self._write_artifact(run_id, ordinal, "receipt.json", json.dumps(receipt, sort_keys=True), budget)
+        if not self.store.finish_attempt(run_id, ordinal, state="human_required", receipt_ref=receipt_ref["ref"],
+                                         receipt_digest=receipt_ref["digest"], fence=attempt_fence):
+            return {"status": "fence_rejected", "run_id": run_id, "attempt": ordinal, "fence": attempt_fence}
+        self.store.append_event(
+            run_id,
+            VERIFIER_UNAVAILABLE,
+            {"attempt": ordinal, "reason": reason, "provider_invocations": invocations},
+            event_id=f"verifier-unavailable:{run_id}:{ordinal}",
+        )
+        return {"status": "human_required", "run_id": run_id, "attempt": ordinal, "reason": reason,
+                "provider_invocations": invocations, "receipt_ref": receipt_ref["ref"],
+                "receipt_digest": receipt_ref["digest"]}
 
     @staticmethod
     def _staging_error(add: ProcessResult, diff: ProcessResult) -> str | None:
@@ -658,6 +722,16 @@ class LoopController:
                 run_id,
                 states={"remediation_running"},
             )
+            unready = self._verifier_unready(verifier_argv)
+            if unready is not None:
+                # No attempt, no model call: record once per pending attempt and reason, look again next tick.
+                self.store.append_event(
+                    run_id,
+                    VERIFIER_UNAVAILABLE,
+                    {"reason": unready, "attempt": None, "provider_invocations": 0},
+                    event_id=f"verifier-unavailable:{run_id}:pending:{run['attempts']}:{_digest(unready)[7:23]}",
+                )
+                return {"status": "waiting_for_verifier", "run_id": run_id, "reason": unready}
             ordinal_hint = run["attempts"] + 1
             workspace_ref = f"workspace://{run_id}/{ordinal_hint}"
             try:
@@ -681,6 +755,14 @@ class LoopController:
             except AttemptTimeout:
                 pre = None
                 budget.reset()
+            except OSError as exc:  # a launch failure; timeouts (also OSError) are handled above
+                if isinstance(exc, TimeoutError):
+                    raise
+                return self._finish_verifier_unavailable(
+                    run_id=run_id, ordinal=ordinal, attempt_fence=fence, workspace_ref=workspace_ref,
+                    base_revision=run["base_revision"], reason=f"{VERIFIER_UNAVAILABLE}:launch_failed:{type(exc).__name__}",
+                    provider=None, budget=budget,
+                )
             if pre is not None and pre.returncode == 0:
                 pre_add = self._run(["git", "-C", str(workspace), "add", "-A"], cwd=None, budget=budget)
                 pre_diff = self._run(["git", "-C", str(workspace), "diff", "--cached", "--binary", "--relative"], cwd=None, budget=budget)
@@ -808,6 +890,14 @@ class LoopController:
                             stderr + "verifier timed out",
                         )
                         budget.reset()
+                    except OSError as exc:  # a launch failure; timeouts (also OSError) are handled above
+                        if isinstance(exc, TimeoutError):
+                            raise
+                        return self._finish_verifier_unavailable(
+                            run_id=run_id, ordinal=ordinal, attempt_fence=fence, workspace_ref=workspace_ref,
+                            base_revision=run["base_revision"], reason=f"{VERIFIER_UNAVAILABLE}:launch_failed:{type(exc).__name__}",
+                            provider=provider, budget=budget,
+                        )
             provider_ref = self._write_artifact(run_id, ordinal, "provider.json", json.dumps(provider, sort_keys=True), budget)
             diff_ref = self._write_artifact(run_id, ordinal, "diff.patch", diff.stdout, budget)
             stdout = verified.stdout if verified else ""

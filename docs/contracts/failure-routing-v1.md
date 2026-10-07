@@ -62,7 +62,7 @@
 | `source_refs_mutated` 開頭 | `destructive_effect` |
 | 超出允許路徑或範圍（`changed_path_outside_contract_scope` 等）、`authority_surface` 開頭、`independent_verifier_in_write_scope` | `material_scope_expansion` |
 | recovery 需要更多預算或授權（`campaign_recovery_requires_authority`、`campaign_recovery_child_attempt_budget_exhausted` 等） | `material_scope_expansion` |
-| `execution_fence_unavailable` 開頭 | `runtime_activation` |
+| `execution_fence_unavailable` 開頭、`verifier_unavailable` 開頭 | `runtime_activation` |
 
 擁有者動作不受失敗次數影響，不會改走稽核。
 

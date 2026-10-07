@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -305,6 +306,25 @@ class LocalProcessPort:
 
     def __init__(self, *, platform_name: str | None = None):
         self.platform_name = normalize_platform_name(platform_name)
+
+    def launch_unavailable(self, argv: Sequence[str]) -> str | None:
+        """Why ``argv`` cannot be launched, checked without running it.
+
+        ``None`` means it can be launched, or that only the launch can tell: a
+        program named by a relative path resolves inside a working directory the
+        caller may not have created yet.  Executability follows ``shutil.which``
+        (the execute bit on POSIX, ``PATHEXT`` on Windows).
+        """
+        if isinstance(argv, (str, bytes)) or not argv or not str(argv[0]):
+            return "argv_empty"
+        head = str(argv[0])
+        if Path(head).is_absolute():
+            if not Path(head).exists():
+                return "not_found"
+            return None if shutil.which(head) else "not_executable"
+        if os.sep in head or (os.altsep and os.altsep in head):
+            return None
+        return None if shutil.which(head) else "not_on_path"
 
     def run(
         self,
