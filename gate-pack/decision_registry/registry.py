@@ -16,34 +16,50 @@ before the work it governs.  Four rules follow:
    decision must fall inside its declared surface (default deny), and bound
    artefacts keep their registration digest unless a named row supersedes them.
 
+5. An exam never seen red proves nothing.  ``red-proof`` runs a decision's
+   probes in a disposable clone at a given commit and records, per probe, that
+   it ran and failed there; a probe already passing there is not a proof.  A
+   probe covering existing behaviour may be exempted at registration with a
+   reason.  Approval never requires green: the red is what shows the gap is
+   real, and green is what the approved work produces.
+
 This is not tamper-proof: the ledger is a file the governed agent can write.
 It turns a silent bypass into a visible edit in a diff.
 
 Files in the target repository:
-  decisions/policy.json          {"schema": "lh-decision-policy/v1", "guarded_prefixes": [...]}
+  decisions/policy.json          {"schema": "lh-decision-policy/v1", "guarded_prefixes": [...],
+                                  "require_red_proof": false}
   decisions/registrations.jsonl  append-only rows, hash-chained
+  decisions/red-proofs.jsonl     append-only red proofs, hash-chained
 
 Usage:
-  registry.py register --root R --row row.json
-  registry.py verify   --root R
-  registry.py orphans  --root R --range A..B
-  registry.py readback --root R --decision ID --range A..B
+  registry.py register  --root R --row row.json
+  registry.py verify    --root R
+  registry.py orphans   --root R --range A..B
+  registry.py readback  --root R --decision ID --range A..B
+  registry.py red-proof --root R --decision ID --at REV
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 POLICY_SCHEMA = "lh-decision-policy/v1"
 ROW_SCHEMA = "lh-decision-registration/v1"
+PROOF_SCHEMA = "lh-decision-red-proof/v1"
 LEDGER = "decisions/registrations.jsonl"
 POLICY = "decisions/policy.json"
+PROOFS = "decisions/red-proofs.jsonl"
 
 
 class Refused(ValueError):
@@ -70,6 +86,29 @@ def ledger_rows(root: Path) -> list[dict[str, Any]]:
     return _rows(path.read_text(encoding="utf-8")) if path.is_file() else []
 
 
+def proof_rows(root: Path) -> list[dict[str, Any]]:
+    path = root / PROOFS
+    return _rows(path.read_text(encoding="utf-8")) if path.is_file() else []
+
+
+def _exempt_reason(probe: dict[str, Any]) -> str | None:
+    red = probe.get("red_proof")
+    return red["exempt"] if isinstance(red, dict) and isinstance(red.get("exempt"), str) else None
+
+
+def _chain_problems(rows: list[dict[str, Any]], ledger: str) -> list[dict[str, Any]]:
+    problems = []
+    previous = None
+    for index, row in enumerate(rows):
+        body = {key: value for key, value in row.items() if key != "row_digest"}
+        if row.get("row_digest") != _digest(body):
+            problems.append({"ledger": ledger, "row": index, "reason": "row_digest_mismatch"})
+        if row.get("prev_digest") != previous:
+            problems.append({"ledger": ledger, "row": index, "reason": "chain_broken"})
+        previous = row.get("row_digest")
+    return problems
+
+
 def _git(root: Path, *args: str, check: bool = True) -> str:
     done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", check=False)
@@ -91,6 +130,10 @@ def register(root: Path, raw: dict[str, Any]) -> dict[str, Any]:
                 or not all(isinstance(item, str) for item in probe["argv"])
                 or type(probe.get("expect_exit", 0)) is not int):
             raise Refused("acceptance_probe_invalid", probe)
+        red = probe.get("red_proof")
+        if red is not None and (not isinstance(red, dict) or set(red) != {"exempt"}
+                                or not isinstance(red["exempt"], str) or not red["exempt"].strip()):
+            raise Refused("red_proof_exempt_reason_required", probe.get("id"))
     surface = raw.get("surface")
     if not isinstance(surface, list) or not all(isinstance(item, str) and item for item in surface):
         raise Refused("surface_required")
@@ -123,16 +166,8 @@ def register(root: Path, raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def verify(root: Path) -> dict[str, Any]:
-    problems = []
     rows = ledger_rows(root)
-    previous = None
-    for index, row in enumerate(rows):
-        body = {key: value for key, value in row.items() if key != "row_digest"}
-        if row.get("row_digest") != _digest(body):
-            problems.append({"row": index, "reason": "row_digest_mismatch"})
-        if row.get("prev_digest") != previous:
-            problems.append({"row": index, "reason": "chain_broken"})
-        previous = row.get("row_digest")
+    problems = _chain_problems(rows, LEDGER) + _chain_problems(proof_rows(root), PROOFS)
     superseded = {row.get("supersedes") for row in rows if row.get("supersedes")}
     for row in rows:
         if row.get("decision_id") in superseded:
@@ -199,34 +234,112 @@ def _run_probe(root: Path, probe: dict[str, Any]) -> dict[str, Any]:
     return {"id": probe["id"], "ok": ok, "exit": done.returncode}
 
 
-def readback(root: Path, decision_id: str, revision_range: str) -> dict[str, Any]:
+def _current_row(root: Path, decision_id: str) -> dict[str, Any]:
     rows = [row for row in ledger_rows(root) if row.get("decision_id") == decision_id]
     if not rows:
         raise Refused("decision_unregistered", decision_id)
-    row = rows[-1]
+    return rows[-1]
+
+
+def _require_red_proof(root: Path) -> bool:
+    path = root / POLICY
+    if not path.is_file():
+        return False
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise Refused("policy_invalid") from exc
+    return isinstance(policy, dict) and policy.get("require_red_proof") is True
+
+
+def _remove(path: Path) -> None:
+    for parent, _dirs, files in os.walk(path):
+        for name in files:
+            os.chmod(os.path.join(parent, name), stat.S_IWRITE)  # git objects are read-only on Windows
+    shutil.rmtree(path)
+
+
+def red_proof(root: Path, decision_id: str, revision: str) -> dict[str, Any]:
+    row = _current_row(root, decision_id)
+    sha = _git(root, "rev-parse", "--verify", f"{revision}^{{commit}}").strip()
+    probes = [probe for probe in row.get("acceptance", []) if _exempt_reason(probe) is None]
+    exempt = [probe["id"] for probe in row.get("acceptance", []) if _exempt_reason(probe) is not None]
+    scratch = Path(tempfile.mkdtemp(prefix="red-proof-"))
+    try:
+        clone = scratch / "clone"
+        cloned = subprocess.run(["git", "clone", "--quiet", "--no-local", str(root), str(clone)],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        if cloned.returncode != 0:
+            raise Refused("clone_failed", cloned.stderr.strip()[:200])
+        _git(clone, "checkout", "--quiet", "--detach", sha)
+        results = [(probe, _run_probe(clone, probe)) for probe in probes]
+    finally:
+        _remove(scratch)
+    unrunnable = [result for _probe, result in results if "error" in result]
+    if unrunnable:
+        raise Refused("probe_unrunnable_at_rev", unrunnable)
+    green = [result["id"] for _probe, result in results if result["ok"]]
+    if green:
+        raise Refused("probe_green_at_rev", green)
+    existing = proof_rows(root)
+    previous = existing[-1]["row_digest"] if existing else None
+    recorded = []
+    path = root / PROOFS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        for probe, result in results:
+            body = {"schema": PROOF_SCHEMA, "decision_id": decision_id, "decision_row_digest": row["row_digest"],
+                    "probe_id": probe["id"], "probe_digest": _digest(probe), "commit": sha,
+                    "exit": result["exit"], "verdict": "red", "prev_digest": previous}
+            proof = {**body, "row_digest": _digest(body)}
+            stream.write(json.dumps(proof, ensure_ascii=False, sort_keys=True) + "\n")
+            previous = proof["row_digest"]
+            recorded.append(probe["id"])
+    return {"status": "pass", "decision_id": decision_id, "commit": sha, "recorded": recorded, "exempt": exempt}
+
+
+def _red_proof_state(proofs: list[dict[str, Any]], row: dict[str, Any], probe: dict[str, Any]) -> str:
+    if _exempt_reason(probe) is not None:
+        return "exempt"
+    digest = _digest(probe)
+    proven = any(proof.get("decision_row_digest") == row.get("row_digest") and proof.get("probe_id") == probe["id"]
+                 and proof.get("probe_digest") == digest and proof.get("verdict") == "red" for proof in proofs)
+    return "proven" if proven else "missing"
+
+
+def readback(root: Path, decision_id: str, revision_range: str) -> dict[str, Any]:
+    row = _current_row(root, decision_id)
     surface = tuple(row.get("surface", []))
     drift = []
     for commit in _commits(root, revision_range):
         if not _names(commit["lines"], decision_id):
             continue
-        # Default deny: only the declared surface and the ledger itself may change.
-        outside = [path for path in commit["files"] if not (path == LEDGER or path.startswith(surface))]
+        # Default deny: only the declared surface and the decision ledgers may change.
+        outside = [path for path in commit["files"] if not (path in (LEDGER, PROOFS) or path.startswith(surface))]
         if outside:
             drift.append({"sha": commit["sha"], "paths": outside})
-    probes = [_run_probe(root, probe) for probe in row.get("acceptance", [])]
+    proofs = proof_rows(root)
+    probes = []
+    for probe in row.get("acceptance", []):
+        result = {**_run_probe(root, probe), "red_proof": _red_proof_state(proofs, row, probe)}
+        if _exempt_reason(probe) is not None:
+            result["exempt_reason"] = _exempt_reason(probe)
+        probes.append(result)
     disposition = "passing" if probes and all(item["ok"] for item in probes) else "failing"
-    status = "pass" if not drift and disposition == "passing" else "fail"
+    unproven = [item["id"] for item in probes if item["red_proof"] == "missing"] if _require_red_proof(root) else []
+    status = "pass" if not drift and disposition == "passing" and not unproven else "fail"
     return {"status": status, "decision_id": decision_id, "drift": drift, "disposition": disposition,
-            "probes": probes}
+            "probes": probes, "red_proof_missing": unproven}
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["register", "verify", "orphans", "readback"])
+    parser.add_argument("command", choices=["register", "verify", "orphans", "readback", "red-proof"])
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--row", type=Path)
     parser.add_argument("--range", dest="revision_range")
     parser.add_argument("--decision")
+    parser.add_argument("--at", dest="revision", help="red-proof: the commit the probes must fail at")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
@@ -240,6 +353,10 @@ def main(argv: list[str]) -> int:
             if not args.revision_range:
                 raise Refused("range_required")
             result = orphans(root, args.revision_range)
+        elif args.command == "red-proof":
+            if not args.decision or not args.revision:
+                raise Refused("decision_and_revision_required")
+            result = red_proof(root, args.decision, args.revision)
         else:
             if not args.decision or not args.revision_range:
                 raise Refused("decision_and_range_required")

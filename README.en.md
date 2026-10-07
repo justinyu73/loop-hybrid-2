@@ -112,7 +112,9 @@ clone can reproduce the same closed loop.
   repositories) — a decision is registered before the work, with acceptance
   probes and the paths it may touch; git is read commit by commit for guarded
   changes that name no registered decision; the outcome is re-derived by
-  running the probes, never stored as done.
+  running the probes, never stored as done. `red-proof` records that each
+  probe ran and failed at the exam commit, bound to the full sha; a policy can
+  require that proof (or a reasoned exemption) for every probe.
 - **Progress receipts and verifier queue** (`gate-pack/progress_receipts/`, a
   tool for target repositories) — a requester names only a check id; the
   verifier runs it in a snapshot pinned to HEAD and writes a hash-chained
@@ -227,7 +229,7 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Supported. All 111 gates pass; CI runs the full `gate-pack/verify.sh` on `windows-latest` (set `PYTHONUTF8=1`). Graceful stop uses `CTRL_BREAK_EVENT` (SIGBREAK) on Windows, and a file counts as executable by its `PATHEXT` suffix. One `lh-judge-wiring` item needs the symlink privilege: on a host without it (no Developer Mode, not elevated) that item fails explicitly with `symlink_privilege_required`; it is never skipped. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Supported. All 112 gates pass; CI runs the full `gate-pack/verify.sh` on `windows-latest` (set `PYTHONUTF8=1`). Graceful stop uses `CTRL_BREAK_EVENT` (SIGBREAK) on Windows, and a file counts as executable by its `PATHEXT` suffix. One `lh-judge-wiring` item needs the symlink privilege: on a host without it (no Developer Mode, not elevated) that item fails explicitly with `symlink_privilege_required`; it is never skipped. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors
