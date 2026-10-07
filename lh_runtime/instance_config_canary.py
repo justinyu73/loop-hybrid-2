@@ -56,7 +56,7 @@ def _contains_credential_key(value: object) -> bool:
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="lh-instance-config-") as raw:
-        root = Path(raw)
+        root = Path(raw).resolve()  # canonical temp root: a Windows temp dir can carry 8.3 short names
         home = root / "clean user" / "使用者"
         fake_bin = root / "fake bin"
         fake_coder = _fake_executable(fake_bin / "coder")
