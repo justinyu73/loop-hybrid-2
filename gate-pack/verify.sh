@@ -24,6 +24,7 @@ run_gate docs-contracts python3 gate-pack/docs_contracts/canary.py || exit $?
 run_gate contract-seal-kit python3 -B gate-pack/contract_seal/canary.py || exit $?
 run_gate contract-seal python3 -B gate-pack/contract_seal/seal.py verify --root . || exit $?
 run_gate decision-registry python3 -B gate-pack/decision_registry/canary.py || exit $?
+run_gate decision-registry-red-proof python3 -B gate-pack/decision_registry/red_proof_canary.py || exit $?
 run_gate progress-receipts python3 -B gate-pack/progress_receipts/canary.py || exit $?
 run_gate advancement python3 -B gate-pack/advancement/canary.py || exit $?
 run_gate retry-verifier python3 -B gate-pack/retry_verifier/canary.py || exit $?
