@@ -27,6 +27,7 @@
 | `run_liveness` | 各個 running run 是否仍在門檻之內 |
 | `open_questions` | 需要人處理的待辦（`lh-open-questions/v1`，見第 6 節） |
 | `code_identity` | driver 載入的引擎 digest、目前磁碟上的 digest，以及兩者是否不同（`stale`）；見第 5 節 |
+| `scheduled_checks` | 定期檢查的裁決投影；未啟用時為 null（見第 8 節） |
 | `lamp` | 唯一的健康判定（`lh-status-lamp/v1`），見第 7 節 |
 
 ## 3. 狀態物件
@@ -85,10 +86,23 @@ heartbeat 也帶 `code_identity`：
 | `code_identity_stale` | `code_identity.stale` 不是 false（含未知） |
 | `needs_human` | `needs_human` 或 `needs_human_events` 大於 0，或數量未知 |
 | `dispatch_stopped` | 最近一次 dispatch gate 判定為 `stop` |
+| `integrity_check_red` | 定期檢查已啟用，且裁決不是 green、讀不到、遺失或超過最大年齡；未啟用（`scheduled_checks` 為 null）時不適用 |
 
 未知不算健康：輸入缺失或讀不到時，對應規則觸發。快照的 `lamp` 欄位就是對其餘欄位呼叫 `lamp()` 的結果；讀取端需要判定時，以這盞燈為準，不要從其他欄位自行推導。
+
+## 8. 定期檢查
+
+CI 檢查的是 commit 內容，不是「執行 loop 的這台機器上，封印此刻是否完好」。`lh_runtime/scheduled_checks.py` 的 `run` 以一張封閉表重跑唯讀的完整性檢查，並在 state root（goal store 旁的 `scheduled-checks.json`，`lh-scheduled-checks/v1`）留下裁決：
+
+- `contract_seal`：目標 repo 有 `docs/contracts/seal.json` 時，執行 `gate-pack/contract_seal/seal.py` 的 verify；
+- `decision_registry`：目標 repo 有 `decisions/policy.json` 時，執行 `gate-pack/decision_registry/registry.py` 的 verify（涵蓋兩份決策 ledger）。
+
+每項檢查都是有逾時的子程序，只讀不修，不寫入目標。至少一項適用且全部通過才是 `green`；任何一項失敗是 `red`；跑不起來或沒有任何適用的檢查是 `unknown`。距離上次不到 `min_interval_seconds` 時沿用上次的裁決。
+
+啟用方式：project contract 的 `scheduled_checks` 區塊（`min_interval_seconds`、`max_age_seconds`），預設關閉。啟用時，`goal_loop_run` 在 driver 之前執行檢查，driver 寫出的每份快照都帶這份裁決；未啟用時刪除遺留的裁決檔，規則因此不適用。
 
 ## 與現行程式的差異
 
 - 原設計的快照包含多專案彙總，供控制平面讀取。公開版的快照只涵蓋單一專案的兩個 store。
+- 原設計中，完整性檢查只在 CI 執行。公開版可選擇在執行 loop 的機器上定期重跑，結果進入健康燈。
 - 原設計附有特定廠商的配額監控。公開版只保留注入式的配額讀取器介面。
