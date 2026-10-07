@@ -47,3 +47,39 @@ jobs:
 
       - name: Diff hygiene
         run: git diff --check
+
+  windows:
+    # Every gate on native Windows (Python + Git for Windows sh); a Windows
+    # regression turns CI red. CI wiring only, never a runtime dependency.
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Provide python3 next to python
+        run: |
+          if ! python3 -c "import sys" >/dev/null 2>&1; then
+            dir="$(dirname "$(command -v python)")"
+            cp "$dir/python.exe" "$dir/python3.exe"
+          fi
+          python3 --version
+
+      - name: Configure git identity for canaries
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "Loop Hybrid CI"
+
+      - name: Aggregate gate-pack tests
+        run: sh gate-pack/verify.sh < /dev/null

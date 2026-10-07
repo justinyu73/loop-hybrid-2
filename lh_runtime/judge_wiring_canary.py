@@ -29,6 +29,17 @@ def _ok(fn) -> tuple[bool, str]:
         return True, f"{type(exc).__name__}: {exc}"
 
 
+def _fake_cli(path: Path, *, mode: int) -> Path:
+    """A runnable fake: a shell script with an execute bit, or a .cmd on Windows (PATHEXT)."""
+    if sys.platform == "win32":
+        path = path.with_name(path.name + ".cmd")
+        path.write_text("@exit /b 0\r\n", encoding="utf-8")
+        return path
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(mode)
+    return path
+
+
 def main() -> int:
     cases: list[dict[str, object]] = []
 
@@ -222,12 +233,10 @@ def main() -> int:
     fake_home = Path(tempfile.mkdtemp())
     fake_bin = fake_home / ".local" / "bin"
     fake_bin.mkdir(parents=True)
-    fake_cli = fake_bin / "fake-cli-x1"
-    fake_cli.write_text("#!/bin/sh\n", encoding="utf-8")
-    fake_cli.chmod(0o700)
+    fake_cli = _fake_cli(fake_bin / "fake-cli-x1", mode=0o700)
     non_executable_cli = fake_bin / "fake-cli-non-executable-x2"
     non_executable_cli.write_text("#!/bin/sh\n", encoding="utf-8")
-    non_executable_cli.chmod(0o600)
+    non_executable_cli.chmod(0o600)  # no execute bit; on Windows, no PATHEXT suffix
     old_home = os.environ.get("HOME")
     os.environ["HOME"] = str(fake_home)
     try:
@@ -253,16 +262,18 @@ def main() -> int:
             os.environ["HOME"] = old_home
     # which() 分支：PATH 上的 fake binary（不依賴 runner 有沒有裝真 CLI）。
     path_dir = Path(tempfile.mkdtemp())
-    path_cli = path_dir / "fake-cli-y2"
-    path_cli.write_text("#!/bin/sh\n", encoding="utf-8")
-    path_cli.chmod(0o755)
-    path_alias = path_dir / "fake-cli-y2-alias"
-    path_alias.symlink_to(path_cli)
+    path_cli = _fake_cli(path_dir / "fake-cli-y2", mode=0o755)
+    path_alias = path_dir / ("fake-cli-y2-alias" + path_cli.suffix)
+    alias_error = None
+    try:
+        path_alias.symlink_to(path_cli)
+    except OSError as exc:  # Windows without symlink privilege: a failed case, never a skip
+        alias_error = f"symlink_privilege_required: {exc}"
     old_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = f"{path_dir}:{old_path}"
+    os.environ["PATH"] = f"{path_dir}{os.pathsep}{old_path}"
     try:
         resolved_on_path = executors.resolve_cli("fake-cli-y2")
-        resolved_on_path_alias = executors.resolve_cli("fake-cli-y2-alias")
+        resolved_on_path_alias = executors.resolve_cli("fake-cli-y2-alias") if alias_error is None else None
     finally:
         os.environ["PATH"] = old_path
     cases.append(case(
@@ -278,6 +289,7 @@ def main() -> int:
             "missing_raises": missing_raises,
             "on_path": resolved_on_path,
             "on_path_alias": resolved_on_path_alias,
+            "alias_error": alias_error,
         }),
     ))
     cases.append(case(

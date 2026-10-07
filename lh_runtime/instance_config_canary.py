@@ -33,6 +33,10 @@ def case(case_id: str, ok: bool, detail: str) -> dict[str, object]:
 
 def _fake_executable(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":  # Windows runs a file by its PATHEXT suffix, not an execute bit
+        path = path.with_name(path.name + ".cmd")
+        path.write_text("@exit /b 0\r\n", encoding="utf-8")
+        return path
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
@@ -52,7 +56,7 @@ def _contains_credential_key(value: object) -> bool:
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="lh-instance-config-") as raw:
-        root = Path(raw)
+        root = Path(raw).resolve()  # canonical temp root: a Windows temp dir can carry 8.3 short names
         home = root / "clean user" / "使用者"
         fake_bin = root / "fake bin"
         fake_coder = _fake_executable(fake_bin / "coder")
@@ -76,7 +80,7 @@ def main() -> int:
         platform_defaults = (
             str(root / "xdg config" / "lh-host" / "instance.json") == str(linux_path)
             and "LocalAppData" in str(windows_path)
-            and "/Library/Application Support/lh-host/instance.json" in str(macos_path)
+            and Path(macos_path).as_posix().endswith("/Library/Application Support/lh-host/instance.json")
         )
 
         configured_paths = {

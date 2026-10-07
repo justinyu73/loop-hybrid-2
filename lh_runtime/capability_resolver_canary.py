@@ -496,7 +496,8 @@ def main() -> int:
     ))
 
     with tempfile.TemporaryDirectory() as raw:
-        root = Path(raw)
+        # The trust root must be canonical; a temp dir can carry 8.3 short names on Windows.
+        root = Path(raw).resolve()
         source, base = make_source_repo(root)
         campaign = make_campaign("campaign-capability")
         dry_spy = FactorySpy()

@@ -225,15 +225,18 @@ def _run_restart_sessions(root: Path, *, executor: str, offline: bool) -> dict[s
     deadline = time.monotonic() + 30.0
     while not complete.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
-    if first.poll() is None:
+    killed_by_harness = first.poll() is None
+    if killed_by_harness:
         first.kill()
     first_exit = first.wait(timeout=10.0)
+    # POSIX reports a signal kill as a negative exit; Windows' kill() leaves exit 1.
+    killed = first_exit < 0 if sys.platform != "win32" else first_exit != 0
     second = subprocess.run(command + ["second", executor, "offline" if offline else "execute"], capture_output=True, text=True, check=False)
     first_result = json.loads((root / "first-result.json").read_text(encoding="utf-8")) if (root / "first-result.json").exists() else {}
     second_result = json.loads((root / "second-result.json").read_text(encoding="utf-8")) if (root / "second-result.json").exists() else {}
     return {
         "first_exit": first_exit,
-        "first_killed_after_bounded_session": complete.exists() and first_exit < 0,
+        "first_killed_after_bounded_session": complete.exists() and killed_by_harness and killed,
         "first": first_result,
         "second_exit": second.returncode,
         "second": second_result,

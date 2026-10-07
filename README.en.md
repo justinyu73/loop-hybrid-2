@@ -211,7 +211,7 @@ clone can reproduce the same closed loop.
 | Platform | Status |
 |---|---|
 | Linux | Reference platform. CI (`ubuntu-latest`) runs every gate. |
-| Windows (native Python 3.12 + Git for Windows `sh`) | Partial. 99 of 107 gates pass (set `PYTHONUTF8=1`). 8 fail because they rely on POSIX-only behavior or fixed timing: POSIX file permissions and symlink privileges (2), POSIX signals and process-holder semantics (2), POSIX path or platform defaults (2), and timing budgets (2) — run verdict has a fixed 0.25 s budget, and attempt timeout overruns its budget on a loaded host; slow Windows process start-up exceeds both. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
+| Windows (native Python 3.12 + Git for Windows `sh`) | Supported. All 107 gates pass; CI runs the full `gate-pack/verify.sh` on `windows-latest` (set `PYTHONUTF8=1`). Graceful stop uses `CTRL_BREAK_EVENT` (SIGBREAK) on Windows, and a file counts as executable by its `PATHEXT` suffix. One `lh-judge-wiring` item needs the symlink privilege: on a host without it (no Developer Mode, not elevated) that item fails explicitly with `symlink_privilege_required`; it is never skipped. Without `PYTHONUTF8=1`, `ceremony` can fail on a non-UTF-8 console (for example cp950) when it cannot decode non-ASCII commit messages. |
 | macOS | Not tested. |
 
 ## Declaring executors

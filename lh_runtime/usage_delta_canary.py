@@ -24,7 +24,7 @@ from cli_agent_executor import make_cli_agent
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
-        root = Path(raw)
+        root = Path(raw).resolve()  # canonical temp root: a Windows temp dir can carry 8.3 short names
         seen: dict[str, Any] = {}
 
         def recording_collector(_proc: Any, context: dict[str, Any]) -> dict[str, Any]:

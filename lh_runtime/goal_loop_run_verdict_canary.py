@@ -89,7 +89,8 @@ def _resume(root: Path, source: Path, base: str) -> int:
                 campaign=_campaign(),
                 source_repo=source,
                 base_revision=base,
-                executor_timeout_seconds=0.25,
+                # Bounds the final delivery materialization (clone + checks); the cases assert order, not speed.
+                executor_timeout_seconds=30,
                 verdict_store=verdicts,
                 conclusion_source=lambda _op_key: {"conclusion": "success"},
                 factory_overrides={"fake": _fake_factory},

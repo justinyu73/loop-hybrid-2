@@ -47,7 +47,7 @@ def _write_receipt(store: RunStore, run_id: str, usage: dict) -> None:
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
-        root = Path(raw)
+        root = Path(raw).resolve()  # canonical temp root: a Windows temp dir can carry 8.3 short names
 
         measured = token_cost.measured_usage(model="m1", input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
         cost_measured = token_cost.compute_cost(measured, pricing=PRICING)

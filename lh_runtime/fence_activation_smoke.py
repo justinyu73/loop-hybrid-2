@@ -239,6 +239,7 @@ def _stub_report(provider: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     cases: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory() as raw:
+        raw = str(Path(raw).resolve())  # canonical temp root: a Windows temp dir can carry 8.3 short names
         enabled_root = Path(raw) / "enabled"
         enabled_root.mkdir()
         enabled = _tick(enabled_root, backend=BACKEND_ID, post_worker_fixture=True)

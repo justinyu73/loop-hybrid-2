@@ -122,7 +122,7 @@ flowchart TB
 | 平台 | 狀態 |
 |---|---|
 | Linux | 參考平台；CI（`ubuntu-latest`）跑全部 gate。 |
-| Windows（原生 Python 3.12 + Git for Windows `sh`） | 部分支援：107 個 gate 中 99 個通過（請設定 `PYTHONUTF8=1`）。8 個失敗，都依賴 POSIX 行為或固定計時：POSIX 檔案權限與 symlink 權限（2）、POSIX signal／程序 holder 語義（2）、POSIX 路徑或平台預設（2），以及計時預算（2）——run verdict 有固定 0.25 秒預算，attempt timeout 在主機負載高時會超出預算；Windows 程序啟動較慢時兩者都會超時。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
+| Windows（原生 Python 3.12 + Git for Windows `sh`） | 支援：107 個 gate 全部通過；CI 在 `windows-latest` 上執行完整的 `gate-pack/verify.sh`（請設定 `PYTHONUTF8=1`）。優雅停止在 Windows 上使用 `CTRL_BREAK_EVENT`（SIGBREAK）；檔案是否可執行依 `PATHEXT` 副檔名判定。`lh-judge-wiring` 有一項需要建立 symlink 的權限：在沒有這個權限的主機上（未開啟開發人員模式，也不是以系統管理員身分執行），該項會以 `symlink_privilege_required` 明確失敗，不會略過。沒有設定 `PYTHONUTF8=1` 時，cp950 等非 UTF-8 主控台上的 `ceremony` 可能因讀不了中文 commit 訊息而失敗。 |
 | macOS | 未測試。 |
 
 ## 宣告 executor

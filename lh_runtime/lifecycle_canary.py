@@ -192,10 +192,14 @@ def _crash_restart_case(root: Path) -> dict[str, Any]:
 
 def _graceful_shutdown_case(root: Path) -> dict[str, Any]:
     script = str(Path(__file__).resolve())
-    child = subprocess.Popen([sys.executable, "-B", script, "--child", "shutdown", str(root)])
+    # Windows has no SIGTERM delivery to another process; its graceful stop is
+    # CTRL_BREAK_EVENT to the child's own process group (SIGBREAK in the child).
+    windows = sys.platform == "win32"
+    child = subprocess.Popen([sys.executable, "-B", script, "--child", "shutdown", str(root)],
+                             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0)
     entered = _wait_for(root / "entered")
     if entered:
-        child.send_signal(signal.SIGTERM)
+        child.send_signal(signal.CTRL_BREAK_EVENT if windows else signal.SIGTERM)
     (root / "release").write_text("release\n", encoding="utf-8")
     exit_code = child.wait(timeout=5.0)
     result_path = root / "result.json"

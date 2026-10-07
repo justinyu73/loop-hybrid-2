@@ -14,6 +14,8 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+# Upper bounds on child start/exit waits; no case asserts speed, so a loaded host must not fail them.
+CHILD_WAIT_SECONDS = 30.0
 sys.path.insert(0, str(HERE))
 
 from command_ingress import submit_command
@@ -83,7 +85,7 @@ def _singleton_case(root: Path) -> dict[str, Any]:
     holder = subprocess.Popen([sys.executable, "-B", script, "--child", "holder", str(root)])
     try:
         entered = root / "holder-entered"
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + CHILD_WAIT_SECONDS
         while not entered.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         contender = subprocess.run(
@@ -93,11 +95,11 @@ def _singleton_case(root: Path) -> dict[str, Any]:
             check=False,
         )
         (root / "release-holder").write_text("release\n", encoding="utf-8")
-        holder_exit = holder.wait(timeout=5.0)
+        holder_exit = holder.wait(timeout=CHILD_WAIT_SECONDS)
     finally:
         if holder.poll() is None:
             holder.terminate()
-            holder.wait(timeout=5.0)
+            holder.wait(timeout=CHILD_WAIT_SECONDS)
 
     contender_result_path = root / "contender-result.json"
     contender_result = json.loads(contender_result_path.read_text(encoding="utf-8")) if contender_result_path.exists() else {}
@@ -178,10 +180,10 @@ def _crash_restart_case(root: Path) -> dict[str, Any]:
     script = str(Path(__file__).resolve())
     crashed = subprocess.Popen([sys.executable, "-B", script, "--child", "crash", str(root)])
     marker = root / "crash-entered"
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + CHILD_WAIT_SECONDS
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    crash_exit = crashed.wait(timeout=5.0)
+    crash_exit = crashed.wait(timeout=CHILD_WAIT_SECONDS)
     restarted = subprocess.run(
         [sys.executable, "-B", script, "--child", "restart", str(root)],
         capture_output=True,
