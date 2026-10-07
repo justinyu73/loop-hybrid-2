@@ -28,6 +28,7 @@
 | `open_questions` | 需要人處理的待辦（`lh-open-questions/v1`，見第 6 節） |
 | `code_identity` | driver 載入的引擎 digest、目前磁碟上的 digest，以及兩者是否不同（`stale`）；見第 5 節 |
 | `scheduled_checks` | 定期檢查的裁決投影；未啟用時為 null（見第 8 節） |
+| `scratch`、`lamp_actuation` | 可回收的 scratch 數量與門檻、燈號自動處置是否停止；未啟用時為 null（見第 9 節） |
 | `lamp` | 唯一的健康判定（`lh-status-lamp/v1`），見第 7 節 |
 
 ## 3. 狀態物件
@@ -87,6 +88,8 @@ heartbeat 也帶 `code_identity`：
 | `needs_human` | `needs_human` 或 `needs_human_events` 大於 0，或數量未知 |
 | `dispatch_stopped` | 最近一次 dispatch gate 判定為 `stop` |
 | `integrity_check_red` | 定期檢查已啟用，且裁決不是 green、讀不到、遺失或超過最大年齡；未啟用（`scheduled_checks` 為 null）時不適用 |
+| `scratch_reclaimable` | 已啟用燈號自動處置，且 retention 可回收的 scratch 已達門檻；未啟用時不適用 |
+| `lamp_actuation_policy_drift` | 燈號自動處置因 policy 讀不到或與釘住的 digest 不符而停止 |
 
 未知不算健康：輸入缺失或讀不到時，對應規則觸發。快照的 `lamp` 欄位就是對其餘欄位呼叫 `lamp()` 的結果；讀取端需要判定時，以這盞燈為準，不要從其他欄位自行推導。
 
@@ -101,8 +104,21 @@ CI 檢查的是 commit 內容，不是「執行 loop 的這台機器上，封印
 
 啟用方式：project contract 的 `scheduled_checks` 區塊（`min_interval_seconds`、`max_age_seconds`），預設關閉。啟用時，`goal_loop_run` 在 driver 之前執行檢查，driver 寫出的每份快照都帶這份裁決；未啟用時刪除遺留的裁決檔，規則因此不適用。
 
+## 9. 燈號自動處置
+
+亮燈本身不等於要人處理。`lh_runtime/lamp_actuator.py` 的 `actuate` 只讀快照中觸發規則的 id，對 policy（`lh-lamp-actuation-policy/v1`）允許的種類，執行該種類的具名動作，每個事件一次，並附加收據（goal store 旁的 `lamp-actuation-receipts.jsonl`，`lh-lamp-actuation-receipt/v1`）。依構造，它永遠不會：
+
+- 執行快照中帶的任何指令字串：動作只來自封閉表 `VERBS`，參數由 actuator 自行建立；policy 中未知的動作會被跳過；
+- 在 policy 的位元組與 contract 釘住的 digest 不符時動作：全部停止、記下原因，健康燈亮出 `lamp_actuation_policy_drift`；
+- 處置 owner 專屬的種類（`needs_human`、`dispatch_stopped`、`integrity_check_red`、`code_identity_stale`、`heartbeat_stale` 與漂移燈本身），即使 policy 列出也一樣。
+
+事件從某個種類開始觸發起算，到不再觸發為止，至多處置一次。目前唯一的動作是 `retention_reclaim`（`retention.plan` 後 `apply`），對應 `scratch_reclaimable` 燈。
+
+啟用方式：project contract 的 `lamp_actuation` 區塊（`policy`、`policy_digest`、`scratch_threshold`），預設關閉。啟用時，`goal_loop_run` 在 driver 結束後建立一份新快照並據以處置；driver 的快照也帶上 `scratch` 與 `lamp_actuation`。
+
 ## 與現行程式的差異
 
 - 原設計的快照包含多專案彙總，供控制平面讀取。公開版的快照只涵蓋單一專案的兩個 store。
+- 原設計的燈號自動處置包含重啟宿主服務與移除工作樹等動作。公開版只附 `retention_reclaim`，其餘燈號在公開版中沒有不涉及宿主的機械處置，歸為 owner 專屬。
 - 原設計中，完整性檢查只在 CI 執行。公開版可選擇在執行 loop 的機器上定期重跑，結果進入健康燈。
 - 原設計附有特定廠商的配額監控。公開版只保留注入式的配額讀取器介面。

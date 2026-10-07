@@ -22,6 +22,8 @@ RULES = (
     ("needs_human", "a goal or event is parked in human_required, or the count is unknown"),
     ("dispatch_stopped", "the last dispatch gate decision is stop"),
     ("integrity_check_red", "the scheduled integrity checks are enabled and red, unknown, missing, or older than their maximum age"),
+    ("scratch_reclaimable", "engine scratch that retention may reclaim has reached the actuation threshold"),
+    ("lamp_actuation_policy_drift", "lamp actuation is halted because its policy is unreadable or differs from the pinned digest"),
 )
 
 
@@ -47,6 +49,15 @@ def _fires(rule_id: str, snapshot: Mapping[str, Any]) -> bool:
         if checks is None:
             return False  # not enabled: the rule does not apply
         return not isinstance(checks, Mapping) or checks.get("verdict") != "green" or checks.get("stale") is not False
+    if rule_id == "scratch_reclaimable":
+        scratch = snapshot.get("scratch")
+        if not isinstance(scratch, Mapping):
+            return False  # not enabled: the rule does not apply
+        count, threshold = _count(scratch.get("reclaimable")), _count(scratch.get("threshold"))
+        return count is not None and threshold is not None and count >= max(threshold, 1)
+    if rule_id == "lamp_actuation_policy_drift":
+        actuation = snapshot.get("lamp_actuation")
+        return isinstance(actuation, Mapping) and actuation.get("halted") is True
     if rule_id == "dispatch_stopped":
         gate = snapshot.get("dispatch_gate")
         return isinstance(gate, Mapping) and gate.get("action") == "stop"
