@@ -71,6 +71,8 @@ EXACT = {
 PREFIXES = (
     ("execution_fence_unavailable", "runtime_activation"),
     ("verifier_unavailable", "runtime_activation"),
+    # A goal the owner accepted no longer passes its lamp: re-issuing it is the owner's call.
+    ("regression_detected", "product_acceptance"),
     ("source_refs_mutated", "destructive_effect"),
     ("independent_verifier_in_write_scope", "material_scope_expansion"),
     ("authority_surface", "material_scope_expansion"),

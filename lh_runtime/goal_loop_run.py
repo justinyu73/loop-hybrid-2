@@ -36,6 +36,7 @@ import external_action_port as eap
 import external_verdict as ev
 import grill_loop
 import project_binding
+import regression_watch as regression_watch_module
 import instance_config
 import turning_point as tp
 import verifier_normalizer
@@ -934,7 +935,10 @@ def run(
     assignment_binding: dict[str, Any] | None = None,
     execution_fence_port: execution_fences.ExecutionFencePort | None = None,
     planner_recovery: dict[str, Any] | None = None,
+    regression_watch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # Opt-in per contract: validate before any work so a bad block fails fast.
+    watch_config = regression_watch_module.validate_config(regression_watch) if regression_watch is not None else None
     native_binding = None
     if execute and planner_recovery is not None:
         from lh_runtime.runner_adapter import resolve_native_run_execution_binding
@@ -1204,7 +1208,13 @@ def run(
         sleep_fn=sleep_fn,
         turning_point=turning_point,
     )
-    return {"mode": "execute", "invoked": True, "plan": plan, "startup_external_resumed": startup_external_resumed, "driver": summary}
+    result = {"mode": "execute", "invoked": True, "plan": plan, "startup_external_resumed": startup_external_resumed, "driver": summary}
+    if watch_config is not None:
+        # After the driver: completed goals are looked at again; a regression is raised, never repaired.
+        result["regression_watch"] = regression_watch_module.sweep(
+            worker.goal_store, source_repo=source_repo, workspace_root=workspace_root, **watch_config,
+        )
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
