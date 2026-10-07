@@ -316,6 +316,7 @@ def _refresh_snapshot(worker: GoalLoopWorker, out_path: Path, *, tick_overhead_s
         tick_overhead_seconds=tick_overhead_seconds,
         dispatch_gate=gate_state,
         pricing=pricing,
+        scheduled_checks=getattr(worker, "scheduled_checks", None),
     )
     write_snapshot(snapshot, out_path)
 

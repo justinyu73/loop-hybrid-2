@@ -21,6 +21,7 @@ RULES = (
     ("code_identity_stale", "the engine code on disk differs from the code the driver loaded, or that is unknown"),
     ("needs_human", "a goal or event is parked in human_required, or the count is unknown"),
     ("dispatch_stopped", "the last dispatch gate decision is stop"),
+    ("integrity_check_red", "the scheduled integrity checks are enabled and red, unknown, missing, or older than their maximum age"),
 )
 
 
@@ -41,6 +42,11 @@ def _fires(rule_id: str, snapshot: Mapping[str, Any]) -> bool:
             return True
         counts = [_count(headline.get("needs_human")), _count(headline.get("needs_human_events"))]
         return any(count is None or count > 0 for count in counts)
+    if rule_id == "integrity_check_red":
+        checks = snapshot.get("scheduled_checks")
+        if checks is None:
+            return False  # not enabled: the rule does not apply
+        return not isinstance(checks, Mapping) or checks.get("verdict") != "green" or checks.get("stale") is not False
     if rule_id == "dispatch_stopped":
         gate = snapshot.get("dispatch_gate")
         return isinstance(gate, Mapping) and gate.get("action") == "stop"

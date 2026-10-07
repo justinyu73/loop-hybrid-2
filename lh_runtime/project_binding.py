@@ -22,6 +22,7 @@ import cli_agent_executor as executors
 import delivery_binding
 import instance_config as ic
 import regression_watch
+import scheduled_checks
 
 CONTRACT_SCHEMA = "lh-project-runtime-contract/v1"
 REQUIRED_RUNTIME = ("goal_store", "run_store", "workspace_root")
@@ -192,6 +193,11 @@ def resolve_project(
             run_kwargs["regression_watch"] = regression_watch.validate_config(contract["regression_watch"])
         except ValueError as exc:
             raise SystemExit(f"contract.regression_watch invalid: {exc}") from exc
+    if contract.get("scheduled_checks") is not None:
+        try:
+            run_kwargs["scheduled_checks"] = scheduled_checks.validate_config(contract["scheduled_checks"])
+        except ValueError as exc:
+            raise SystemExit(f"contract.scheduled_checks invalid: {exc}") from exc
     models = contract.get("models")
     execution_graph = contract.get("execution_graph")
     work_graph = contract.get("work_graph")
